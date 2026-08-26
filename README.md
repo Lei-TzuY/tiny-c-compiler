@@ -11,6 +11,7 @@ An educational C compiler implemented in C. The pipeline includes preprocessing,
 - **Preprocessor**: object-like and function-like macros, recursive expansion, `#include`, `#define`, `#undef`, `#if/#elif/#else/#endif`, `#ifdef/#ifndef`, `defined`, variadic macros with `__VA_ARGS__`, stringification `#`, token pasting `##`, source line splicing, and `#error`
 - **Scope**: full block-level scoping
 - **Floating point**: scalar `float`/`double` literals, variables, arithmetic, comparisons, casts, truth tests, compound assignment, increment/decrement, scalar global/static initializers, and non-variadic function arguments/returns using SysV SSE registers. Direct calls use declared parameter types for scalar coercion; external variadic calls receive the required vector-register count and default float promotion. The built-in educational `va_list` implementation remains integer-only.
+- **Record types**: `struct`/`union` forward declarations, completion-in-place, recursive pointer members, and block-scoped tags. Incomplete records are permitted behind pointers/`extern` declarations and rejected where object size is required.
 - **Target**: x86-64 AT&T syntax assembly, Linux System V ABI
 
 ## Build and test
