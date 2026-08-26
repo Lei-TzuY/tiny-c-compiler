@@ -214,8 +214,10 @@ Token *tokenize(char *p) {
                     break;
                 }
             }
+            bool is_float_suffix = false;
             if (*end == 'f' || *end == 'F') {
                 is_flonum = true;
+                is_float_suffix = true;
                 end++;
             }
 
@@ -225,7 +227,7 @@ Token *tokenize(char *p) {
                 cur->line_no = line;
                 cur->is_float = true;
                 cur->fval = fval;
-                cur->ty = ty_double;
+                cur->ty = is_float_suffix ? ty_float : ty_double;
                 continue;
             }
 

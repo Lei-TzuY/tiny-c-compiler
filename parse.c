@@ -163,7 +163,7 @@ static Node *new_add(Node *lhs, Node *rhs) {
     add_type(lhs);
     add_type(rhs);
 
-    if (is_integer(lhs->ty) && is_integer(rhs->ty))
+    if (is_numeric(lhs->ty) && is_numeric(rhs->ty))
         return new_binary(ND_ADD, lhs, rhs);
 
     if (lhs->ty->base && is_integer(rhs->ty))
@@ -179,7 +179,7 @@ static Node *new_sub(Node *lhs, Node *rhs) {
     add_type(lhs);
     add_type(rhs);
 
-    if (is_integer(lhs->ty) && is_integer(rhs->ty))
+    if (is_numeric(lhs->ty) && is_numeric(rhs->ty))
         return new_binary(ND_SUB, lhs, rhs);
 
     if (lhs->ty->base && is_integer(rhs->ty))
@@ -199,7 +199,7 @@ static Node *new_compound_assign(NodeKind kind, Node *lhs, Node *rhs) {
     add_type(rhs);
 
     if (kind == ND_ADD_EQ || kind == ND_SUB_EQ) {
-        if (is_integer(lhs->ty) && is_integer(rhs->ty))
+        if (is_numeric(lhs->ty) && is_numeric(rhs->ty))
             return new_binary(kind, lhs, rhs);
 
         if (lhs->ty->kind == TY_PTR && is_integer(rhs->ty)) {
@@ -210,6 +210,10 @@ static Node *new_compound_assign(NodeKind kind, Node *lhs, Node *rhs) {
         error("invalid operands");
     }
 
+    if ((kind == ND_MUL_EQ || kind == ND_DIV_EQ) &&
+        is_numeric(lhs->ty) && is_numeric(rhs->ty))
+        return new_binary(kind, lhs, rhs);
+
     if (is_integer(lhs->ty) && is_integer(rhs->ty))
         return new_binary(kind, lhs, rhs);
 
@@ -218,7 +222,7 @@ static Node *new_compound_assign(NodeKind kind, Node *lhs, Node *rhs) {
 
 static Node *new_inc_dec(NodeKind kind, Node *expr) {
     add_type(expr);
-    if (!is_integer(expr->ty) && expr->ty->kind != TY_PTR)
+    if (!is_numeric(expr->ty) && expr->ty->kind != TY_PTR)
         error("invalid operand");
     return new_unary(kind, expr);
 }
@@ -581,9 +585,22 @@ static int64_t parse_const_int(Token **rest, Token *tok) {
     bool pos = false;
     if (!neg) pos = consume(&tok, tok, "+");
     (void)pos;
-    if (tok->kind != TK_NUM)
+    if (tok->kind != TK_NUM || tok->is_float)
         error_at(tok->loc, "expected integer constant");
     int64_t val = tok->val;
+    if (neg) val = -val;
+    *rest = tok->next;
+    return val;
+}
+
+static double parse_const_double(Token **rest, Token *tok) {
+    bool neg = consume(&tok, tok, "-");
+    bool pos = false;
+    if (!neg) pos = consume(&tok, tok, "+");
+    (void)pos;
+    if (tok->kind != TK_NUM)
+        error_at(tok->loc, "expected numeric constant");
+    double val = tok->is_float ? tok->fval : (double)tok->val;
     if (neg) val = -val;
     *rest = tok->next;
     return val;
@@ -642,7 +659,10 @@ static Node *declaration(Token **rest, Token *tok, bool is_static, bool is_exter
                 var->init_vals = vals;
                 var->init_vals_count = cnt;
             } else {
-                var->init_val = parse_const_int(&tok, tok);
+                if (is_flonum(ty))
+                    var->finit_val = parse_const_double(&tok, tok);
+                else
+                    var->init_val = parse_const_int(&tok, tok);
                 var->has_init_val = true;
             }
             continue;
@@ -1476,7 +1496,10 @@ Program *parse(Token *tok) {
                         }
                         tok = tok->next;
                     } else {
-                        var->init_val = parse_const_int(&tok, tok);
+                        if (is_flonum(ty))
+                            var->finit_val = parse_const_double(&tok, tok);
+                        else
+                            var->init_val = parse_const_int(&tok, tok);
                         var->has_init_val = true;
                     }
                 }

@@ -4,12 +4,13 @@ An educational C compiler implemented in C. The pipeline includes preprocessing,
 
 ## Supported Language Features
 
-- **Types**: `char` (1B), `short` (2B), `int` (4B), `long` (8B), `void`, pointers, arrays, `struct`, `union`, `enum`, `typedef`, `unsigned`
+- **Types**: `char` (1B), `short` (2B), `int` (4B), `long` (8B), `float` (4B), `double` (8B), `void`, pointers, arrays, `struct`, `union`, `enum`, `typedef`, `unsigned`
 - **Operators**: arithmetic, bitwise, logical, comparison, ternary `?:`, comma `,`, `sizeof`, prefix/postfix `++/--`, all compound assignments (`+= -= *= /= %= &= |= ^= <<= >>=`), type cast
 - **Control flow**: `if/else`, `while`, `for` (including init declarations), `do-while`, `switch/case/default`, `break`, `continue`, `return`, `goto`/labels
 - **Declarations**: local/global variables with initializers, `{ }` brace-enclosed initializers for arrays and structs, array length inference from initializer, function definitions and prototypes
 - **Preprocessor**: object-like and function-like macros, recursive expansion, `#include`, `#define`, `#undef`, `#if/#elif/#else/#endif`, `#ifdef/#ifndef`, `defined`, variadic macros with `__VA_ARGS__`, stringification `#`, token pasting `##`, source line splicing, and `#error`
 - **Scope**: full block-level scoping
+- **Floating point**: scalar `float`/`double` literals, variables, arithmetic, comparisons, casts, truth tests, compound assignment, increment/decrement, and scalar global/static initializers. Floating-point function arguments/returns are not yet supported.
 - **Target**: x86-64 AT&T syntax assembly, Linux System V ABI
 
 ## Build and test

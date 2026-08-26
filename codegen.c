@@ -24,11 +24,33 @@ static void pop(char *arg) {
     depth--;
 }
 
+static void pushf(Type *ty) {
+    printf("  sub $8, %%rsp\n");
+    if (ty->kind == TY_FLOAT)
+        printf("  movss %%xmm0, (%%rsp)\n");
+    else
+        printf("  movsd %%xmm0, (%%rsp)\n");
+    depth++;
+}
+
+static void popf(Type *ty, char *reg) {
+    if (ty->kind == TY_FLOAT)
+        printf("  movss (%%rsp), %s\n", reg);
+    else
+        printf("  movsd (%%rsp), %s\n", reg);
+    printf("  add $8, %%rsp\n");
+    depth--;
+}
+
 static void load(Type *ty) {
     if (ty->kind == TY_ARRAY || ty->kind == TY_STRUCT || ty->kind == TY_FUNC)
         return; // arrays/structs/functions decay to address
 
-    if (ty->kind == TY_BOOL)
+    if (ty->kind == TY_FLOAT)
+        printf("  movss (%%rax), %%xmm0\n");
+    else if (ty->kind == TY_DOUBLE)
+        printf("  movsd (%%rax), %%xmm0\n");
+    else if (ty->kind == TY_BOOL)
         printf("  movzbq (%%rax), %%rax\n");
     else if (ty->kind == TY_CHAR) {
         if (ty->is_unsigned)
@@ -51,7 +73,11 @@ static void load(Type *ty) {
 
 static void store(Type *ty) {
     pop("%rdi");
-    if (ty->kind == TY_BOOL) {
+    if (ty->kind == TY_FLOAT) {
+        printf("  movss %%xmm0, (%%rdi)\n");
+    } else if (ty->kind == TY_DOUBLE) {
+        printf("  movsd %%xmm0, (%%rdi)\n");
+    } else if (ty->kind == TY_BOOL) {
         // _Bool: any non-zero value becomes 1
         printf("  cmp $0, %%rax\n");
         printf("  setne %%al\n");
@@ -105,6 +131,68 @@ static void normalize(Type *ty) {
     }
 }
 
+static void value_to_bool(Type *ty) {
+    if (is_flonum(ty)) {
+        if (ty->kind == TY_FLOAT) {
+            printf("  xorps %%xmm1, %%xmm1\n");
+            printf("  ucomiss %%xmm1, %%xmm0\n");
+        } else {
+            printf("  xorpd %%xmm1, %%xmm1\n");
+            printf("  ucomisd %%xmm1, %%xmm0\n");
+        }
+        printf("  setne %%al\n");
+        printf("  setp %%dl\n");
+        printf("  or %%dl, %%al\n");
+        printf("  movzb %%al, %%rax\n");
+        return;
+    }
+    printf("  cmp $0, %%rax\n");
+    printf("  setne %%al\n");
+    printf("  movzb %%al, %%rax\n");
+}
+
+static void cast_value(Type *from, Type *to) {
+    if (!from || !to || from == to || from->kind == to->kind)
+        return;
+
+    if (to->kind == TY_VOID)
+        return;
+
+    if (to->kind == TY_BOOL) {
+        value_to_bool(from);
+        return;
+    }
+
+    if (is_integer(from) && is_flonum(to)) {
+        if (to->kind == TY_FLOAT)
+            printf("  cvtsi2ss %%rax, %%xmm0\n");
+        else
+            printf("  cvtsi2sd %%rax, %%xmm0\n");
+        return;
+    }
+
+    if (is_flonum(from) && is_integer(to)) {
+        if (from->kind == TY_FLOAT)
+            printf("  cvttss2si %%xmm0, %%rax\n");
+        else
+            printf("  cvttsd2si %%xmm0, %%rax\n");
+        normalize(to);
+        return;
+    }
+
+    if (from->kind == TY_FLOAT && to->kind == TY_DOUBLE) {
+        printf("  cvtss2sd %%xmm0, %%xmm0\n");
+        return;
+    }
+    if (from->kind == TY_DOUBLE && to->kind == TY_FLOAT) {
+        printf("  cvtsd2ss %%xmm0, %%xmm0\n");
+        return;
+    }
+
+    if (is_integer(from) && is_integer(to))
+        normalize(to);
+}
+
 static void gen_addr(Node *node) {
     if (node->kind == ND_VAR) {
         if (node->var->is_local)
@@ -127,6 +215,27 @@ static void gen_addr(Node *node) {
 }
 
 static void gen_inc_dec(Node *node, bool increment, bool return_old) {
+    if (is_flonum(node->ty)) {
+        gen_addr(node->lhs);
+        push();
+        load(node->ty);
+        if (return_old)
+            printf("  movaps %%xmm0, %%xmm2\n");
+        if (node->ty->kind == TY_FLOAT) {
+            printf("  mov $1065353216, %%eax\n");
+            printf("  movd %%eax, %%xmm1\n");
+            printf(increment ? "  addss %%xmm1, %%xmm0\n" : "  subss %%xmm1, %%xmm0\n");
+        } else {
+            printf("  mov $4607182418800017408, %%rax\n");
+            printf("  movq %%rax, %%xmm1\n");
+            printf(increment ? "  addsd %%xmm1, %%xmm0\n" : "  subsd %%xmm1, %%xmm0\n");
+        }
+        store(node->ty);
+        if (return_old)
+            printf("  movaps %%xmm2, %%xmm0\n");
+        return;
+    }
+
     int step;
     if (node->ty->kind == TY_PTR)
         step = node->ty->base->size;
@@ -151,6 +260,44 @@ static void gen_inc_dec(Node *node, bool increment, bool return_old) {
 }
 
 static void gen_compound_assign(Node *node) {
+    if (is_flonum(node->ty)) {
+        gen_addr(node->lhs);
+        push();
+        load(node->ty);
+        pushf(node->ty);
+        gen_expr(node->rhs);
+        cast_value(node->rhs->ty, node->ty);
+        popf(node->ty, "%xmm1");
+
+        if (node->ty->kind == TY_FLOAT) {
+            if (node->kind == ND_ADD_EQ) printf("  addss %%xmm1, %%xmm0\n");
+            else if (node->kind == ND_MUL_EQ) printf("  mulss %%xmm1, %%xmm0\n");
+            else if (node->kind == ND_SUB_EQ) {
+                printf("  subss %%xmm0, %%xmm1\n");
+                printf("  movaps %%xmm1, %%xmm0\n");
+            } else if (node->kind == ND_DIV_EQ) {
+                printf("  divss %%xmm0, %%xmm1\n");
+                printf("  movaps %%xmm1, %%xmm0\n");
+            } else {
+                error("invalid floating compound assignment");
+            }
+        } else {
+            if (node->kind == ND_ADD_EQ) printf("  addsd %%xmm1, %%xmm0\n");
+            else if (node->kind == ND_MUL_EQ) printf("  mulsd %%xmm1, %%xmm0\n");
+            else if (node->kind == ND_SUB_EQ) {
+                printf("  subsd %%xmm0, %%xmm1\n");
+                printf("  movapd %%xmm1, %%xmm0\n");
+            } else if (node->kind == ND_DIV_EQ) {
+                printf("  divsd %%xmm0, %%xmm1\n");
+                printf("  movapd %%xmm1, %%xmm0\n");
+            } else {
+                error("invalid floating compound assignment");
+            }
+        }
+        store(node->ty);
+        return;
+    }
+
     gen_addr(node->lhs);
     push();
     load(node->ty);
@@ -247,7 +394,13 @@ static void gen_funcall(Node *node) {
 
 static void gen_expr(Node *node) {
     if (node->kind == ND_NUM) {
-        if (node->ty && is_flonum(node->ty)) {
+        if (node->ty && node->ty->kind == TY_FLOAT) {
+            union { float f; uint32_t u; } u = { (float)node->fval };
+            printf("  mov $%" PRIu32 ", %%eax\n", u.u);
+            printf("  movd %%eax, %%xmm0\n");
+            return;
+        }
+        if (node->ty && node->ty->kind == TY_DOUBLE) {
             union { double d; uint64_t u; } u = { node->fval };
             printf("  mov $%" PRIu64 ", %%rax\n", u.u);
             printf("  movq %%rax, %%xmm0\n");
@@ -294,6 +447,7 @@ static void gen_expr(Node *node) {
         gen_addr(node->lhs);
         push();
         gen_expr(node->rhs);
+        cast_value(node->rhs->ty, node->ty);
         store(node->ty);
         normalize(node->ty);
         return;
@@ -330,22 +484,14 @@ static void gen_expr(Node *node) {
 
     if (node->kind == ND_CAST) {
         gen_expr(node->lhs);
-        if (node->ty->kind == TY_BOOL) {
-            printf("  cmp $0, %%rax\n");
-            printf("  setne %%al\n");
-            printf("  movzb %%al, %%rax\n");
-        } else if (node->ty->kind == TY_CHAR)
-            printf("  movsbq %%al, %%rax\n");
-        else if (node->ty->kind == TY_SHORT)
-            printf("  movswq %%ax, %%rax\n");
-        else if (node->ty->kind == TY_INT)
-            printf("  movslq %%eax, %%rax\n");
+        cast_value(node->lhs->ty, node->ty);
         return;
     }
 
     if (node->kind == ND_TERNARY) {
         int c = count();
         gen_expr(node->cond);
+        value_to_bool(node->cond->ty);
         printf("  cmp $0, %%rax\n");
         printf("  je .L.else.%d\n", c);
         gen_expr(node->then);
@@ -358,18 +504,19 @@ static void gen_expr(Node *node) {
 
     if (node->kind == ND_NOT) {
         gen_expr(node->lhs);
-        printf("  cmp $0, %%rax\n");
-        printf("  sete %%al\n");
-        printf("  movzb %%al, %%rax\n");
+        value_to_bool(node->lhs->ty);
+        printf("  xor $1, %%rax\n");
         return;
     }
 
     if (node->kind == ND_LOGAND) {
         int c = count();
         gen_expr(node->lhs);
+        value_to_bool(node->lhs->ty);
         printf("  cmp $0, %%rax\n");
         printf("  je  .L.false.%d\n", c);
         gen_expr(node->rhs);
+        value_to_bool(node->rhs->ty);
         printf("  cmp $0, %%rax\n");
         printf("  je  .L.false.%d\n", c);
         printf("  mov $1, %%rax\n");
@@ -383,9 +530,11 @@ static void gen_expr(Node *node) {
     if (node->kind == ND_LOGOR) {
         int c = count();
         gen_expr(node->lhs);
+        value_to_bool(node->lhs->ty);
         printf("  cmp $0, %%rax\n");
         printf("  jne .L.true.%d\n", c);
         gen_expr(node->rhs);
+        value_to_bool(node->rhs->ty);
         printf("  cmp $0, %%rax\n");
         printf("  jne .L.true.%d\n", c);
         printf("  mov $0, %%rax\n");
@@ -399,6 +548,70 @@ static void gen_expr(Node *node) {
     if (node->kind == ND_COMMA) {
         gen_expr(node->lhs);
         gen_expr(node->rhs);
+        return;
+    }
+
+    bool arithmetic = node->kind == ND_ADD || node->kind == ND_SUB ||
+                      node->kind == ND_MUL || node->kind == ND_DIV;
+    bool comparison = node->kind == ND_EQ || node->kind == ND_NE ||
+                      node->kind == ND_LT || node->kind == ND_LE;
+    Type *common = NULL;
+    if ((arithmetic || comparison) && node->lhs->ty && node->rhs->ty &&
+        is_numeric(node->lhs->ty) && is_numeric(node->rhs->ty))
+        common = get_common_type(node->lhs->ty, node->rhs->ty);
+
+    if (common && is_flonum(common)) {
+        gen_expr(node->rhs);
+        cast_value(node->rhs->ty, common);
+        pushf(common);
+        gen_expr(node->lhs);
+        cast_value(node->lhs->ty, common);
+        popf(common, "%xmm1");
+
+        if (comparison) {
+            if (common->kind == TY_FLOAT)
+                printf("  ucomiss %%xmm1, %%xmm0\n");
+            else
+                printf("  ucomisd %%xmm1, %%xmm0\n");
+
+            if (node->kind == ND_EQ) {
+                printf("  sete %%al\n");
+                printf("  setnp %%dl\n");
+                printf("  and %%dl, %%al\n");
+            } else if (node->kind == ND_NE) {
+                printf("  setne %%al\n");
+                printf("  setp %%dl\n");
+                printf("  or %%dl, %%al\n");
+            } else if (node->kind == ND_LT) {
+                printf("  setb %%al\n");
+                printf("  setnp %%dl\n");
+                printf("  and %%dl, %%al\n");
+            } else {
+                printf("  setbe %%al\n");
+                printf("  setnp %%dl\n");
+                printf("  and %%dl, %%al\n");
+            }
+            printf("  movzb %%al, %%rax\n");
+            return;
+        }
+
+        if (common->kind == TY_FLOAT) {
+            if (node->kind == ND_ADD) printf("  addss %%xmm1, %%xmm0\n");
+            else if (node->kind == ND_MUL) printf("  mulss %%xmm1, %%xmm0\n");
+            else if (node->kind == ND_SUB) {
+                printf("  subss %%xmm1, %%xmm0\n");
+            } else if (node->kind == ND_DIV) {
+                printf("  divss %%xmm1, %%xmm0\n");
+            }
+        } else {
+            if (node->kind == ND_ADD) printf("  addsd %%xmm1, %%xmm0\n");
+            else if (node->kind == ND_MUL) printf("  mulsd %%xmm1, %%xmm0\n");
+            else if (node->kind == ND_SUB) {
+                printf("  subsd %%xmm1, %%xmm0\n");
+            } else if (node->kind == ND_DIV) {
+                printf("  divsd %%xmm1, %%xmm0\n");
+            }
+        }
         return;
     }
 
@@ -446,17 +659,6 @@ static void gen_expr(Node *node) {
             printf("  sar %%cl, %%rax\n");
         return;
     case ND_EQ: case ND_NE: case ND_LT: case ND_LE:
-        if (node->lhs->ty && is_flonum(node->lhs->ty)) {
-            printf("  movq %%rax, %%xmm0\n");
-            printf("  movq %%rdi, %%xmm1\n");
-            printf("  ucomisd %%xmm1, %%xmm0\n");
-            if (node->kind == ND_EQ) printf("  sete %%al\n");
-            else if (node->kind == ND_NE) printf("  setne %%al\n");
-            else if (node->kind == ND_LT) printf("  setb %%al\n");
-            else if (node->kind == ND_LE) printf("  setbe %%al\n");
-            printf("  movzb %%al, %%rax\n");
-            return;
-        }
         printf("  cmp %%rdi, %%rax\n");
         if (node->kind == ND_EQ) printf("  sete %%al\n");
         else if (node->kind == ND_NE) printf("  setne %%al\n");
@@ -523,6 +725,7 @@ static void gen_stmt(Node *node) {
     if (node->kind == ND_IF) {
         int c = count();
         gen_expr(node->cond);
+        value_to_bool(node->cond->ty);
         printf("  cmp $0, %%rax\n");
         printf("  je  .L.else.%d\n", c);
         gen_stmt(node->then);
@@ -543,6 +746,7 @@ static void gen_stmt(Node *node) {
 
         printf(".L.begin.%d:\n", c);
         gen_expr(node->cond);
+        value_to_bool(node->cond->ty);
         printf("  cmp $0, %%rax\n");
         printf("  je  .L.end.%d\n", c);
         gen_stmt(node->then);
@@ -565,6 +769,7 @@ static void gen_stmt(Node *node) {
         gen_stmt(node->then);
         printf(".L.continue.%d:\n", c);
         gen_expr(node->cond);
+        value_to_bool(node->cond->ty);
         printf("  cmp $0, %%rax\n");
         printf("  jne .L.begin.%d\n", c);
         printf(".L.end.%d:\n", c);
@@ -706,7 +911,13 @@ static void emit_data(Program *prog) {
             if (!var->is_static)
                 printf("  .globl %s\n", var->name);
             printf("%s:\n", var->name);
-            if (var->ty->size == 1)
+            if (var->ty->kind == TY_FLOAT) {
+                union { float f; uint32_t u; } u = { (float)var->finit_val };
+                printf("  .long %" PRIu32 "\n", u.u);
+            } else if (var->ty->kind == TY_DOUBLE) {
+                union { double d; uint64_t u; } u = { var->finit_val };
+                printf("  .quad %" PRIu64 "\n", u.u);
+            } else if (var->ty->size == 1)
                 printf("  .byte %" PRId64 "\n", var->init_val);
             else if (var->ty->size == 2)
                 printf("  .short %" PRId64 "\n", var->init_val);

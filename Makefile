@@ -11,6 +11,7 @@ test: minicc
 	./test/test.sh
 	bash ./test/preprocessor.sh
 	bash ./test/preprocessor_advanced.sh
+	bash ./test/float.sh
 
 clean:
 	rm -f minicc *.o *~ tmp*
