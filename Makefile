@@ -9,6 +9,7 @@ $(OBJS): minicc.h
 
 test: minicc
 	./test/test.sh
+	bash ./test/preprocessor.sh
 
 clean:
 	rm -f minicc *.o *~ tmp*
