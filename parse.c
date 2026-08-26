@@ -1225,10 +1225,15 @@ static Node *primary(Token **rest, Token *tok) {
             Obj *var = find_var(tok);
 
             if (var && !var->is_function) {
-                // Indirect call through function pointer variable
+                // Indirect call through function pointer variable. The current
+                // declarator keeps the return type even though it does not yet
+                // retain a full function-pointer parameter prototype.
                 Node *node = new_node(ND_FUNCALL);
                 node->funcname = NULL; // NULL = indirect call
                 node->lhs = new_var_node(var); // callee expression
+                if (var->ty->kind == TY_PTR && var->ty->base &&
+                    var->ty->base->kind == TY_FUNC)
+                    node->ty = var->ty->base->return_ty;
                 tok = skip(tok->next, "(");
 
                 Node head = {};
@@ -1245,14 +1250,45 @@ static Node *primary(Token **rest, Token *tok) {
             // Direct call
             Node *node = new_node(ND_FUNCALL);
             node->funcname = strndup(tok->loc, tok->len);
+            if (var && var->is_function && var->ty->kind == TY_FUNC)
+                node->ty = var->ty->return_ty;
             tok = skip(tok->next, "(");
 
+            Obj *expected = (var && var->is_function) ? var->func_params : NULL;
+            bool variadic = var && var->is_function && var->func_variadic;
             Node head = {};
             Node *cur = &head;
             while (!equal(tok, ")")) {
                 if (cur != &head)
                     tok = skip(tok, ",");
-                cur = cur->next = assign(&tok, tok);
+
+                Node *arg = assign(&tok, tok);
+                add_type(arg);
+
+                if (expected) {
+                    if (is_numeric(arg->ty) && is_numeric(expected->ty) &&
+                        arg->ty != expected->ty) {
+                        Node *cast = new_unary(ND_CAST, arg);
+                        cast->ty = expected->ty;
+                        arg = cast;
+                    }
+                    expected = expected->param_next;
+                } else if (variadic) {
+                    // C default argument promotions for the scalar subset.
+                    Type *promoted = NULL;
+                    if (arg->ty->kind == TY_FLOAT)
+                        promoted = ty_double;
+                    else if (arg->ty->kind == TY_BOOL || arg->ty->kind == TY_CHAR ||
+                             arg->ty->kind == TY_SHORT)
+                        promoted = ty_int;
+                    if (promoted) {
+                        Node *cast = new_unary(ND_CAST, arg);
+                        cast->ty = promoted;
+                        arg = cast;
+                    }
+                }
+
+                cur = cur->next = arg;
             }
             *rest = skip(tok, ")");
             node->args = head.next;
@@ -1331,15 +1367,24 @@ static void resolve_gotos(void) {
 
 // Register a function symbol as a global Obj so it can be used as a value
 // (e.g. function pointer assignment: fp = add;)
-static void register_function_symbol(char *name, Type *return_ty, bool is_static) {
-    // Check if already registered
-    for (Obj *var = globals; var; var = var->next)
-        if (!strcmp(var->name, name) && var->is_function)
+static void register_function_symbol(char *name, Type *return_ty, bool is_static,
+                                     Obj *params, bool is_variadic) {
+    // A later definition refreshes metadata from an earlier prototype.
+    for (Obj *var = globals; var; var = var->next) {
+        if (!strcmp(var->name, name) && var->is_function) {
+            var->ty = func_type(return_ty);
+            var->func_params = params;
+            var->func_variadic = is_variadic;
+            var->is_static = is_static;
             return;
+        }
+    }
 
     Obj *fn_obj = calloc(1, sizeof(Obj));
     fn_obj->name = name;
     fn_obj->ty = func_type(return_ty);
+    fn_obj->func_params = params;
+    fn_obj->func_variadic = is_variadic;
     fn_obj->is_local = false;
     fn_obj->is_function = true;
     fn_obj->is_static = is_static;
@@ -1428,8 +1473,9 @@ Program *parse(Token *tok) {
             }
             tok = skip(tok, ")");
 
-            // Register function symbol for function pointer usage
-            register_function_symbol(name, basety, is_static);
+            // Register function symbol for calls and function-pointer usage.
+            register_function_symbol(name, basety, is_static,
+                                     param_head.param_next, is_variadic);
 
             // Function prototype
             if (consume(&tok, tok, ";")) {
@@ -1442,6 +1488,7 @@ Program *parse(Token *tok) {
             Function *fn = calloc(1, sizeof(Function));
             fn->name = name;
             fn->params = param_head.param_next;
+            fn->return_ty = basety;
             fn->is_static = is_static;
             fn->is_variadic = is_variadic;
 

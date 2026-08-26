@@ -8,6 +8,7 @@ static char *argreg32[] = {"%edi", "%esi", "%edx", "%ecx", "%r8d", "%r9d"};
 static char *argreg16[] = {"%di",  "%si",  "%dx",  "%cx",  "%r8w", "%r9w"};
 static char *argreg8[]  = {"%dil", "%sil", "%dl",  "%cl",  "%r8b", "%r9b"};
 static char *current_fn;
+static Type *current_return_ty;
 static char *brk_label;
 static char *cnt_label;
 
@@ -337,59 +338,82 @@ static void gen_compound_assign(Node *node) {
     normalize(node->ty);
 }
 
-// Generate a function call (direct or indirect via function pointer)
+// Generate a function call (direct or indirect via function pointer).
+// Integer/pointer arguments use rdi..r9; float/double arguments independently
+// use xmm0..xmm7 as required by the System V AMD64 ABI.
 static void gen_funcall(Node *node) {
     bool indirect = (node->funcname == NULL);
 
-    // For indirect calls, evaluate callee first and save to stack
     if (indirect) {
         gen_expr(node->lhs);
-        push(); // save function address on stack
+        push(); // save function address below argument spills
     }
 
+    Node *args[32];
+    bool fp_arg[32];
+    int abi_slot[32];
     int nargs = 0;
+    int gp_count = 0;
+    int fp_count = 0;
+
     for (Node *arg = node->args; arg; arg = arg->next) {
+        if (nargs >= 32)
+            error("too many arguments");
+        add_type(arg);
+        args[nargs] = arg;
+
         gen_expr(arg);
-        push();
+        if (is_flonum(arg->ty)) {
+            if (fp_count >= 8)
+                error("too many floating-point register arguments");
+            fp_arg[nargs] = true;
+            abi_slot[nargs] = fp_count++;
+            pushf(arg->ty);
+        } else {
+            if (gp_count >= 6)
+                error("too many integer register arguments");
+            fp_arg[nargs] = false;
+            abi_slot[nargs] = gp_count++;
+            push();
+        }
         nargs++;
     }
-    if (nargs > 6)
-        error("too many arguments");
 
-    for (int i = nargs - 1; i >= 0; i--)
-        pop(argreg64[i]);
+    for (int i = nargs - 1; i >= 0; i--) {
+        if (fp_arg[i]) {
+            char reg[16];
+            sprintf(reg, "%%xmm%d", abi_slot[i]);
+            popf(args[i]->ty, reg);
+        } else {
+            pop(argreg64[abi_slot[i]]);
+        }
+    }
 
     int c = count();
 
-    if (indirect) {
-        // Pop callee address into %r10
+    if (indirect)
         pop("%r10");
-        printf("  mov %%rsp, %%rax\n");
-        printf("  and $15, %%rax\n");
-        printf("  jnz .L.call.%d\n", c);
-        printf("  mov $0, %%rax\n");
+
+    printf("  mov %%rsp, %%rax\n");
+    printf("  and $15, %%rax\n");
+    printf("  jnz .L.call.%d\n", c);
+    // For variadic callees, SysV requires AL to contain the number of vector
+    // registers used. Non-variadic callees ignore it.
+    printf("  mov $%d, %%eax\n", fp_count);
+    if (indirect)
         printf("  call *%%r10\n");
-        printf("  jmp .L.end.%d\n", c);
-        printf(".L.call.%d:\n", c);
-        printf("  sub $8, %%rsp\n");
-        printf("  mov $0, %%rax\n");
+    else
+        printf("  call %s\n", node->funcname);
+    printf("  jmp .L.end.%d\n", c);
+    printf(".L.call.%d:\n", c);
+    printf("  sub $8, %%rsp\n");
+    printf("  mov $%d, %%eax\n", fp_count);
+    if (indirect)
         printf("  call *%%r10\n");
-        printf("  add $8, %%rsp\n");
-        printf(".L.end.%d:\n", c);
-    } else {
-        printf("  mov %%rsp, %%rax\n");
-        printf("  and $15, %%rax\n");
-        printf("  jnz .L.call.%d\n", c);
-        printf("  mov $0, %%rax\n");
+    else
         printf("  call %s\n", node->funcname);
-        printf("  jmp .L.end.%d\n", c);
-        printf(".L.call.%d:\n", c);
-        printf("  sub $8, %%rsp\n");
-        printf("  mov $0, %%rax\n");
-        printf("  call %s\n", node->funcname);
-        printf("  add $8, %%rsp\n");
-        printf(".L.end.%d:\n", c);
-    }
+    printf("  add $8, %%rsp\n");
+    printf(".L.end.%d:\n", c);
 }
 
 static void gen_expr(Node *node) {
@@ -683,7 +707,10 @@ static int count(void) {
 
 static void gen_stmt(Node *node) {
     if (node->kind == ND_RETURN) {
-        if (node->lhs) gen_expr(node->lhs);
+        if (node->lhs) {
+            gen_expr(node->lhs);
+            cast_value(node->lhs->ty, current_return_ty);
+        }
         printf("  jmp .L.return.%s\n", current_fn);
         return;
     }
@@ -790,6 +817,7 @@ static void gen_stmt(Node *node) {
         printf(".L.begin.%d:\n", c);
         if (node->cond) {
             gen_expr(node->cond);
+            value_to_bool(node->cond->ty);
             printf("  cmp $0, %%rax\n");
             printf("  je  .L.end.%d\n", c);
         }
@@ -945,6 +973,7 @@ void codegen(Program *prog) {
             printf("  .globl %s\n", fn->name);
         printf("%s:\n", fn->name);
         current_fn = fn->name;
+        current_return_ty = fn->return_ty;
 
         // Prologue
         printf("  push %%rbp\n");
@@ -959,19 +988,32 @@ void codegen(Program *prog) {
             printf("  mov %%r8,  %d(%%rbp)\n", fn->va_offset + 32);
             printf("  mov %%r9,  %d(%%rbp)\n", fn->va_offset + 40);
         } else {
-            // Save passed-by-register arguments to the stack
-            int i = 0;
+            // Save passed-by-register arguments to the stack. Integer and SSE
+            // register numbers advance independently under SysV AMD64.
+            int gp = 0;
+            int fp = 0;
             for (Obj *var = fn->params; var; var = var->param_next) {
-                if (i >= 6)
-                    error("too many parameters");
+                if (is_flonum(var->ty)) {
+                    if (fp >= 8)
+                        error("too many floating-point parameters");
+                    if (var->ty->kind == TY_FLOAT)
+                        printf("  movss %%xmm%d, %d(%%rbp)\n", fp, var->offset);
+                    else
+                        printf("  movsd %%xmm%d, %d(%%rbp)\n", fp, var->offset);
+                    fp++;
+                    continue;
+                }
+
+                if (gp >= 6)
+                    error("too many integer parameters");
                 if (var->ty->kind == TY_BOOL || var->ty->kind == TY_CHAR)
-                    printf("  mov %s, %d(%%rbp)\n", argreg8[i++], var->offset);
+                    printf("  mov %s, %d(%%rbp)\n", argreg8[gp++], var->offset);
                 else if (var->ty->kind == TY_SHORT)
-                    printf("  mov %s, %d(%%rbp)\n", argreg16[i++], var->offset);
+                    printf("  mov %s, %d(%%rbp)\n", argreg16[gp++], var->offset);
                 else if (var->ty->kind == TY_INT)
-                    printf("  mov %s, %d(%%rbp)\n", argreg32[i++], var->offset);
+                    printf("  mov %s, %d(%%rbp)\n", argreg32[gp++], var->offset);
                 else
-                    printf("  mov %s, %d(%%rbp)\n", argreg64[i++], var->offset);
+                    printf("  mov %s, %d(%%rbp)\n", argreg64[gp++], var->offset);
             }
         }
 
