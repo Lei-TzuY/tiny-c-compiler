@@ -1,0 +1,30 @@
+name: Apply incomplete record tags
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - tools/apply_incomplete_tags.py
+      - .github/workflows/apply-incomplete-tags.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Apply migration
+        run: python3 tools/apply_incomplete_tags.py
+      - name: Test migrated compiler
+        run: make clean && make test
+      - name: Commit verified implementation
+        run: |
+          rm -f tools/apply_incomplete_tags.py .github/workflows/apply-incomplete-tags.yml .trigger-incomplete-tags .trigger-gitdata
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Support incomplete records and scoped tags"
+          git push origin HEAD:main
