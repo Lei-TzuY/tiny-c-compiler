@@ -1,6 +1,6 @@
 # Mini C Compiler
 
-An educational C compiler implemented in C. The pipeline includes tokenization, parsing, type analysis, and x86-64 code generation; the shell test suite documents and exercises the supported language subset.
+An educational C compiler implemented in C. The pipeline includes preprocessing, tokenization, parsing, type analysis, and x86-64 code generation; the shell test suite documents and exercises the supported language subset.
 
 ## Supported Language Features
 
@@ -8,6 +8,7 @@ An educational C compiler implemented in C. The pipeline includes tokenization, 
 - **Operators**: arithmetic, bitwise, logical, comparison, ternary `?:`, comma `,`, `sizeof`, prefix/postfix `++/--`, all compound assignments (`+= -= *= /= %= &= |= ^= <<= >>=`), type cast
 - **Control flow**: `if/else`, `while`, `for` (including init declarations), `do-while`, `switch/case/default`, `break`, `continue`, `return`, `goto`/labels
 - **Declarations**: local/global variables with initializers, `{ }` brace-enclosed initializers for arrays and structs, array length inference from initializer, function definitions and prototypes
+- **Preprocessor**: object-like and function-like macros, recursive expansion, `#include`, `#define`, `#undef`, `#if/#elif/#else/#endif`, `#ifdef/#ifndef`, `defined`, variadic macros with `__VA_ARGS__`, stringification `#`, token pasting `##`, source line splicing, and `#error`
 - **Scope**: full block-level scoping
 - **Target**: x86-64 AT&T syntax assembly, Linux System V ABI
 
@@ -20,9 +21,7 @@ make
 make test
 ```
 
-The test target builds `minicc`, compiles small C programs with it, links them with the host compiler, and checks their exit values. Use `make clean` to remove generated objects, binaries, and temporary test sources.
-
-Current local audit: 228/228 test cases passing.
+The test target builds `minicc`, compiles small C programs with it, links them with the host compiler, and checks their exit values. It runs the 228 core compiler cases plus focused basic and advanced preprocessor regression suites. Use `make clean` to remove generated objects, binaries, and temporary test sources.
 
 ## Notes
 
