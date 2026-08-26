@@ -1,0 +1,32 @@
+name: Apply float ABI
+
+on:
+  push:
+    branches:
+      - agent/float-double-core
+    paths:
+      - tools/apply_float_abi.py
+      - .github/workflows/apply-float-abi.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/float-double-core
+      - name: Apply migration
+        run: python3 tools/apply_float_abi.py
+      - name: Test migrated compiler
+        run: make clean && make test
+      - name: Commit migration
+        run: |
+          rm tools/apply_float_abi.py .github/workflows/apply-float-abi.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Add floating-point SysV function ABI"
+          git push origin HEAD:agent/float-double-core
