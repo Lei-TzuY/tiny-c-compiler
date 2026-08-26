@@ -57,7 +57,7 @@ Type *func_type(Type *return_ty) {
     return ty;
 }
 
-// Usual arithmetic conversions: promote both operands to the larger type.
+// Usual arithmetic conversions for the subset supported by minicc.
 Type *get_common_type(Type *ty1, Type *ty2) {
     if (ty1->base)
         return pointer_to(ty1->base);
@@ -94,7 +94,7 @@ void add_type(Node *node) {
     for (Node *n = node->args; n; n = n->next)
         add_type(n);
 
-    if (node->ty) return; // already typed
+    if (node->ty) return;
 
     switch (node->kind) {
     case ND_ADD:
@@ -107,25 +107,41 @@ void add_type(Node *node) {
             node->ty = node->rhs->ty;
             return;
         }
+        if (!is_numeric(node->lhs->ty) || !is_numeric(node->rhs->ty))
+            error("invalid arithmetic operands");
         node->ty = get_common_type(node->lhs->ty, node->rhs->ty);
         return;
+
     case ND_MUL:
     case ND_DIV:
+        if (!is_numeric(node->lhs->ty) || !is_numeric(node->rhs->ty))
+            error("invalid arithmetic operands");
+        node->ty = get_common_type(node->lhs->ty, node->rhs->ty);
+        return;
+
     case ND_MOD:
     case ND_BITAND:
     case ND_BITOR:
     case ND_BITXOR:
     case ND_SHL:
     case ND_SHR:
-        if (node->lhs->ty && node->rhs->ty)
-            node->ty = get_common_type(node->lhs->ty, node->rhs->ty);
-        else
-            node->ty = ty_int;
+        if (!is_integer(node->lhs->ty) || !is_integer(node->rhs->ty))
+            error("integer operands required");
+        node->ty = get_common_type(node->lhs->ty, node->rhs->ty);
         return;
+
     case ND_NEG:
-    case ND_BITNOT:
+        if (!is_numeric(node->lhs->ty))
+            error("numeric operand required");
         node->ty = node->lhs->ty;
         return;
+
+    case ND_BITNOT:
+        if (!is_integer(node->lhs->ty))
+            error("integer operand required");
+        node->ty = node->lhs->ty;
+        return;
+
     case ND_EQ:
     case ND_NE:
     case ND_LT:
@@ -135,18 +151,28 @@ void add_type(Node *node) {
     case ND_NOT:
         node->ty = ty_int;
         return;
+
     case ND_FUNCALL:
+        // Function-call return types are still resolved as int until the
+        // SysV floating-point function ABI work lands.
         node->ty = ty_int;
         return;
+
     case ND_NUM:
         node->ty = ty_int;
         return;
+
     case ND_TERNARY:
-        node->ty = node->then->ty;
+        if (is_numeric(node->then->ty) && is_numeric(node->els->ty))
+            node->ty = get_common_type(node->then->ty, node->els->ty);
+        else
+            node->ty = node->then->ty;
         return;
+
     case ND_COMMA:
         node->ty = node->rhs->ty;
         return;
+
     case ND_ASSIGN:
     case ND_ADD_EQ:
     case ND_SUB_EQ:
@@ -164,6 +190,7 @@ void add_type(Node *node) {
     case ND_POST_DEC:
         node->ty = node->lhs->ty;
         return;
+
     case ND_VAR:
         node->ty = node->var->ty;
         return;
