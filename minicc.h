@@ -82,6 +82,7 @@ struct Type {
     int size;         // sizeof() value
     int align;        // alignment requirement
     bool is_unsigned; // true for unsigned integer types
+    bool is_incomplete; // forward-declared struct/union with no body yet
     Type *base;       // Pointer or array
     int array_len;    // Array
     Member *members;  // Struct members
