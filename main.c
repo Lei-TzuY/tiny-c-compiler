@@ -1,4 +1,5 @@
 #include "minicc.h"
+#include "preprocess_v2.h"
 
 static char *read_file(char *path) {
     FILE *fp = fopen(path, "r");
@@ -30,7 +31,7 @@ int main(int argc, char **argv) {
     }
 
     char *user_input = read_file(argv[1]);
-    char *preprocessed = preprocess(user_input);
+    char *preprocessed = preprocess_v2(user_input);
     Token *tok = tokenize(preprocessed);
     Program *prog = parse(tok);
 
