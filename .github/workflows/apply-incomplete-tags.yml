@@ -1,12 +1,9 @@
 name: Apply incomplete record tags
 
 on:
-  push:
+  pull_request:
     branches:
-      - agent/incomplete-tag-scopes
-    paths:
-      - tools/apply_incomplete_tags.py
-      - .github/workflows/apply-incomplete-tags.yml
+      - main
 
 permissions:
   contents: write
@@ -24,7 +21,7 @@ jobs:
         run: make clean && make test
       - name: Commit verified implementation
         run: |
-          rm -f tools/apply_incomplete_tags.py .github/workflows/apply-incomplete-tags.yml
+          rm -f tools/apply_incomplete_tags.py .github/workflows/apply-incomplete-tags.yml .trigger-incomplete-tags
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -A
