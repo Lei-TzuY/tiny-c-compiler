@@ -6,6 +6,7 @@ on:
       - agent/float-double-core
     paths:
       - tools/apply_float_abi.py
+      - tools/fix_float_abi_test.py
       - .github/workflows/apply-float-abi.yml
 
 permissions:
@@ -18,13 +19,15 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: agent/float-double-core
+      - name: Fix external ABI regression setup
+        run: python3 tools/fix_float_abi_test.py
       - name: Apply migration
         run: python3 tools/apply_float_abi.py
       - name: Test migrated compiler
         run: make clean && make test
       - name: Commit migration
         run: |
-          rm tools/apply_float_abi.py .github/workflows/apply-float-abi.yml
+          rm tools/apply_float_abi.py tools/fix_float_abi_test.py .github/workflows/apply-float-abi.yml
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -A
