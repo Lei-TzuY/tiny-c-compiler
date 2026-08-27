@@ -183,6 +183,7 @@ static Type *declarator_impl(Token **rest, Token *tok, Type *ty, Token **ident,
 static Type *type_suffix(Token **rest, Token *tok, Type *ty);
 static Type *declarator(Token **rest, Token *tok, Type *ty, Token **ident);
 static Type *abstract_declarator(Token **rest, Token *tok, Type *ty, Token **ident);
+static Type *type_name(Token **rest, Token *tok);
 
 static bool is_typename(Token *tok) {
     if (equal(tok, "int") || equal(tok, "char") || equal(tok, "void") ||
@@ -828,6 +829,15 @@ static Type *declarator_impl(Token **rest, Token *tok, Type *ty, Token **ident,
     while (consume(&tok, tok, "*"))
         ty = pointer_to(ty);
 
+    // In an abstract declarator, a leading parameter list is a function
+    // suffix rather than a grouping. Grouping forms such as `(*)` still enter
+    // the recursive parenthesized path below.
+    if (allow_abstract && equal(tok, "(") &&
+        (equal(tok->next, ")") || is_typename(tok->next) ||
+         equal(tok->next, "const") || equal(tok->next, "volatile") ||
+         equal(tok->next, "register")))
+        return type_suffix(rest, tok, ty);
+
     if (equal(tok, "(")) {
         Token *start = tok;
         Type dummy = {};
@@ -855,6 +865,28 @@ static Type *declarator(Token **rest, Token *tok, Type *ty, Token **ident) {
 
 static Type *abstract_declarator(Token **rest, Token *tok, Type *ty, Token **ident) {
     return declarator_impl(rest, tok, ty, ident, true);
+}
+
+// type-name = declaration-specifiers abstract-declarator?
+//
+// Casts and sizeof(type-name) use the same recursive declarator machinery as
+// declarations, so pointer/array/function grouping has one source of truth.
+static Type *type_name(Token **rest, Token *tok) {
+    Type *ty = declspec(&tok, tok);
+    Token *ident = NULL;
+    ty = abstract_declarator(&tok, tok, ty, &ident);
+    if (ident)
+        error_at(ident->loc, "identifier is not allowed in a type name");
+    *rest = tok;
+    return ty;
+}
+
+static bool invalid_sizeof_type(Type *ty) {
+    if (!ty || ty->kind == TY_VOID || ty->kind == TY_FUNC)
+        return true;
+    if (ty->kind == TY_ARRAY && ty->array_len == 0)
+        return true;
+    return is_incomplete_object_type(ty);
 }
 
 // Parse a constant integer (with optional sign) for global initializers
@@ -1383,9 +1415,9 @@ static Node *mul(Token **rest, Token *tok) {
 static Node *unary(Token **rest, Token *tok) {
     if (equal(tok, "(") && is_typename(tok->next)) {
         tok = tok->next;
-        Type *ty = declspec(&tok, tok);
-        while (consume(&tok, tok, "*"))
-            ty = pointer_to(ty);
+        Type *ty = type_name(&tok, tok);
+        if (ty->kind == TY_ARRAY || ty->kind == TY_FUNC)
+            error_at(tok->loc, "cast specifies non-scalar type");
         tok = skip(tok, ")");
         Node *node = new_unary(ND_CAST, unary(rest, tok));
         node->ty = ty;
@@ -1559,18 +1591,16 @@ static Node *primary(Token **rest, Token *tok) {
         tok = tok->next;
         if (equal(tok, "(") && is_typename(tok->next)) {
             tok = tok->next;
-            Type *ty = declspec(&tok, tok);
-            while (consume(&tok, tok, "*"))
-                ty = pointer_to(ty);
-            if (is_incomplete_object_type(ty))
-                error_at(tok->loc, "invalid sizeof on incomplete type");
+            Type *ty = type_name(&tok, tok);
+            if (invalid_sizeof_type(ty))
+                error_at(tok->loc, "invalid operand type for sizeof");
             *rest = skip(tok, ")");
             return new_num(ty->size);
         }
         Node *n = unary(rest, tok);
         add_type(n);
-        if (is_incomplete_object_type(n->ty))
-            error_at(tok->loc, "invalid sizeof on incomplete type");
+        if (invalid_sizeof_type(n->ty))
+            error_at(tok->loc, "invalid operand type for sizeof");
         return new_num(n->ty->size);
     }
 

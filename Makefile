@@ -23,6 +23,7 @@ test: minicc
 	bash ./test/callable_declarators.sh
 	bash ./test/prototype_arity.sh
 	bash ./test/recursive_declarators.sh
+	bash ./test/type_names.sh
 
 clean:
 	rm -f minicc *.o *~ tmp*
