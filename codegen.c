@@ -198,6 +198,11 @@ static void gen_addr(Node *node) {
     if (node->kind == ND_VAR) {
         if (node->var->is_local)
             printf("  lea %d(%%rbp), %%rax\n", node->var->offset);
+        else if (node->var->is_function && !node->var->is_static)
+            // A default-visible function may be interposed, so materialize its
+            // address through the GOT. This is valid in PIE code and also works
+            // for functions defined in the current translation unit.
+            printf("  mov %s@GOTPCREL(%%rip), %%rax\n", node->var->name);
         else
             printf("  lea %s(%%rip), %%rax\n", node->var->name);
         return;

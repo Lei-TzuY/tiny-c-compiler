@@ -87,6 +87,7 @@ struct Type {
     int array_len;    // Array
     Member *members;  // Struct members
     Type *return_ty;  // TY_FUNC: return type
+    Obj *params;       // TY_FUNC: declared parameter types (metadata Obj list)
     bool is_variadic; // TY_FUNC: variadic function (...)
 };
 

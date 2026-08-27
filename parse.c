@@ -752,38 +752,57 @@ static Type *declarator(Token **rest, Token *tok, Type *ty, Token **ident) {
         tok = skip(tok, ")");
         tok = skip(tok, "(");
 
-        // Skip parameter declarations (we don't store them)
+        // Retain the complete scalar/pointer prototype on TY_FUNC so calls
+        // through function pointers can perform the same coercions as direct calls.
+        Obj param_head = {};
+        Obj *pcur = &param_head;
+        bool is_variadic = false;
+
         if (equal(tok, "void") && equal(tok->next, ")")) {
-            tok = tok->next; // void param list = no params
+            tok = tok->next; // void parameter list = no parameters
         } else {
             while (!equal(tok, ")")) {
-                if (!equal(tok, ",") || equal(tok, ")")) {
-                    // Skip tokens until ',' or ')'
-                    // Simple approach: skip type + optional name
-                    if (is_typename(tok) || equal(tok, "const") || equal(tok, "volatile")) {
-                        Type *dummy_ty = declspec(&tok, tok);
-                        (void)dummy_ty;
-                        while (consume(&tok, tok, "*")) {} // skip pointer stars
-                        // Skip optional parameter name
-                        if (tok->kind == TK_IDENT && !equal(tok->next, "("))
-                            tok = tok->next;
-                        // Skip array declarators in params: int arr[]
-                        if (consume(&tok, tok, "[")) {
-                            while (!equal(tok, "]")) tok = tok->next;
-                            tok = skip(tok, "]");
-                        }
-                    } else {
-                        tok = tok->next;
-                    }
+                if (pcur != &param_head)
+                    tok = skip(tok, ",");
+                if (equal(tok, "...")) {
+                    tok = tok->next;
+                    is_variadic = true;
+                    break;
                 }
-                if (!equal(tok, ")"))
-                    consume(&tok, tok, ",");
+
+                consume(&tok, tok, "const");
+                consume(&tok, tok, "volatile");
+                consume(&tok, tok, "register");
+
+                Type *param_ty = declspec(&tok, tok);
+                while (consume(&tok, tok, "*"))
+                    param_ty = pointer_to(param_ty);
+
+                // Parameter names inside a function-pointer prototype are optional.
+                // If present, consume the full declarator (including nested callbacks).
+                Token *pident = NULL;
+                if (tok->kind == TK_IDENT ||
+                    (equal(tok, "(") && equal(tok->next, "*"))) {
+                    param_ty = declarator(&tok, tok, param_ty, &pident);
+                } else if (!equal(tok, ",") && !equal(tok, ")")) {
+                    error_at(tok->loc, "expected function pointer parameter declarator");
+                }
+
+                if (is_incomplete_object_type(param_ty))
+                    error_at(pident ? pident->loc : tok->loc,
+                             "parameter has incomplete type");
+
+                Obj *param = calloc(1, sizeof(Obj));
+                param->ty = param_ty;
+                pcur = pcur->param_next = param;
             }
         }
         tok = skip(tok, ")");
 
-        // Build type: pointer_to(func_type(return_ty))
+        // Build type: pointer_to(func_type(return_ty)) and attach prototype metadata.
         Type *fty = func_type(ty); // ty is the return type (the base)
+        fty->params = param_head.param_next;
+        fty->is_variadic = is_variadic;
         ty = pointer_to(fty);
         for (int i = 0; i < extra_ptrs; i++)
             ty = pointer_to(ty);
@@ -1472,22 +1491,55 @@ static Node *primary(Token **rest, Token *tok) {
             Obj *var = find_var(tok);
 
             if (var && !var->is_function) {
-                // Indirect call through function pointer variable. The current
-                // declarator keeps the return type even though it does not yet
-                // retain a full function-pointer parameter prototype.
+                // Indirect call through a function-pointer variable. If the
+                // pointer carries a prototype, use it for scalar coercion and
+                // default promotions of variadic arguments.
                 Node *node = new_node(ND_FUNCALL);
                 node->funcname = NULL; // NULL = indirect call
                 node->lhs = new_var_node(var); // callee expression
+
+                Type *fty = NULL;
                 if (var->ty->kind == TY_PTR && var->ty->base &&
-                    var->ty->base->kind == TY_FUNC)
-                    node->ty = var->ty->base->return_ty;
+                    var->ty->base->kind == TY_FUNC) {
+                    fty = var->ty->base;
+                    node->ty = fty->return_ty;
+                }
                 tok = skip(tok->next, "(");
 
+                Obj *expected = fty ? fty->params : NULL;
+                bool variadic = fty && fty->is_variadic;
                 Node head = {};
                 Node *cur = &head;
                 while (!equal(tok, ")")) {
-                    if (cur != &head) tok = skip(tok, ",");
-                    cur = cur->next = assign(&tok, tok);
+                    if (cur != &head)
+                        tok = skip(tok, ",");
+
+                    Node *arg = assign(&tok, tok);
+                    add_type(arg);
+
+                    if (expected) {
+                        if (is_numeric(arg->ty) && is_numeric(expected->ty) &&
+                            arg->ty != expected->ty) {
+                            Node *cast = new_unary(ND_CAST, arg);
+                            cast->ty = expected->ty;
+                            arg = cast;
+                        }
+                        expected = expected->param_next;
+                    } else if (variadic) {
+                        Type *promoted = NULL;
+                        if (arg->ty->kind == TY_FLOAT)
+                            promoted = ty_double;
+                        else if (arg->ty->kind == TY_BOOL || arg->ty->kind == TY_CHAR ||
+                                 arg->ty->kind == TY_SHORT)
+                            promoted = ty_int;
+                        if (promoted) {
+                            Node *cast = new_unary(ND_CAST, arg);
+                            cast->ty = promoted;
+                            arg = cast;
+                        }
+                    }
+
+                    cur = cur->next = arg;
                 }
                 *rest = skip(tok, ")");
                 node->args = head.next;
@@ -1620,6 +1672,8 @@ static void register_function_symbol(char *name, Type *return_ty, bool is_static
     for (Obj *var = globals; var; var = var->next) {
         if (!strcmp(var->name, name) && var->is_function) {
             var->ty = func_type(return_ty);
+            var->ty->params = params;
+            var->ty->is_variadic = is_variadic;
             var->func_params = params;
             var->func_variadic = is_variadic;
             var->is_static = is_static;
@@ -1630,6 +1684,8 @@ static void register_function_symbol(char *name, Type *return_ty, bool is_static
     Obj *fn_obj = calloc(1, sizeof(Obj));
     fn_obj->name = name;
     fn_obj->ty = func_type(return_ty);
+    fn_obj->ty->params = params;
+    fn_obj->ty->is_variadic = is_variadic;
     fn_obj->func_params = params;
     fn_obj->func_variadic = is_variadic;
     fn_obj->is_local = false;
