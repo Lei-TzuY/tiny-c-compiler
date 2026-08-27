@@ -1,0 +1,28 @@
+name: Apply usual arithmetic conversions migration
+
+on:
+  push:
+    branches:
+      - agent/usual-arithmetic-conversions
+
+permissions:
+  contents: write
+
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/usual-arithmetic-conversions
+      - name: Apply migration
+        run: python3 tools/apply_usual_arithmetic_conversions.py
+      - name: Run full test suite
+        run: make clean && make test
+      - name: Commit generated changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add type.c codegen.c Makefile README.md test/arithmetic_conversions.sh
+          git commit -m "Enforce usual arithmetic conversions"
+          git push origin HEAD:agent/usual-arithmetic-conversions
