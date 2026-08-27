@@ -1,0 +1,30 @@
+name: Apply nested switch case-label migration
+
+on:
+  push:
+    branches:
+      - agent/nested-switch-case-labels
+    paths:
+      - .github/workflows/apply-nested-switch-case-labels.yml
+
+permissions:
+  contents: write
+
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/nested-switch-case-labels
+      - name: Apply migration
+        run: python3 tools/apply_nested_switch_case_labels.py
+      - name: Run full test suite
+        run: make clean && make test
+      - name: Commit generated changes
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add parse.c codegen.c Makefile README.md test/nested_switch_labels.sh
+          git commit -m 'Support nested switch case labels'
+          git push
