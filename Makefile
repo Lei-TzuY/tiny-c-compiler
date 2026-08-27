@@ -51,6 +51,7 @@ test: minicc
 	bash ./test/call_arguments.sh
 	bash ./test/record_abi_firewall.sh
 	bash ./test/sysv_record_abi.sh
+	bash ./test/sysv_mixed_union_abi.sh
 	bash ./test/string_array_initializers.sh
 	bash ./test/nested_string_initializers.sh
 	bash ./test/sysv_variadic_callee.sh
