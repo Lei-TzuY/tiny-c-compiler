@@ -34,9 +34,12 @@ bool is_numeric(Type *ty) {
 
 // Conservative SysV AMD64 aggregate subset shared by semantic ABI checks and
 // code generation. A record is supported by value only when its complete
-// representation fits in one or two eightbytes and every leaf is INTEGER-class.
-// Arrays/nested records recurse; floating/SSE and >16-byte MEMORY shapes stay
-// behind the ABI firewall until their full classifier/lowering is implemented.
+// representation fits in one or two eightbytes and every resulting eightbyte
+// is INTEGER-class. Arrays/nested records recurse. For unions, the SysV merge
+// rule makes INTEGER dominate SSE in an overlapping eightbyte; conservatively
+// recognize that case only when one INTEGER-only member spans the full union
+// representation. Other SSE and >16-byte MEMORY shapes remain behind the ABI
+// firewall until the full classifier/lowering is implemented.
 static bool sysv_integer_record_component(Type *ty) {
     if (!ty)
         return false;
@@ -47,6 +50,15 @@ static bool sysv_integer_record_component(Type *ty) {
     if (ty->kind == TY_STRUCT) {
         if (ty->is_incomplete || !ty->members)
             return false;
+
+        if (ty->is_union) {
+            for (Member *m = ty->members; m; m = m->next)
+                if (m->ty->size == ty->size &&
+                    sysv_integer_record_component(m->ty))
+                    return true;
+            return false;
+        }
+
         for (Member *m = ty->members; m; m = m->next)
             if (!sysv_integer_record_component(m->ty))
                 return false;
