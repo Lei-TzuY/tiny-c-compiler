@@ -41,6 +41,7 @@ test: minicc
 	bash ./test/constant_expressions.sh
 	bash ./test/static_integer_initializers.sh
 	bash ./test/static_address_initializers.sh
+	bash ./test/aggregate_initializers.sh
 	bash ./test/call_arguments.sh
 	bash ./test/string_array_initializers.sh
 	bash ./test/sysv_variadic_callee.sh

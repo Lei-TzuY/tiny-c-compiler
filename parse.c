@@ -1413,6 +1413,49 @@ static char *build_string_array_image(Type *ty, Token *str) {
     return data;
 }
 
+
+// Append zero-initialization statements for an automatic aggregate subobject.
+// C requires omitted array elements and record members to be initialized as if
+// they had static storage duration. Recurse so omitted nested aggregates are
+// fully zeroed rather than attempting an invalid aggregate-from-integer assign.
+static void append_zero_initializer(Node **tail, Node *lhs, Type *ty, Token *where) {
+    if (ty->kind == TY_ARRAY) {
+        for (int i = 0; i < ty->array_len; i++) {
+            Node *elem = new_unary(ND_DEREF, new_add(lhs, new_num(i)));
+            append_zero_initializer(tail, elem, ty->base, where);
+        }
+        return;
+    }
+
+    if (ty->kind == TY_STRUCT) {
+        for (Member *m = ty->members; m; m = m->next) {
+            Node *member = new_node(ND_MEMBER);
+            member->lhs = lhs;
+            member->member = m;
+            append_zero_initializer(tail, member, m->ty, where);
+        }
+        return;
+    }
+
+    Node *assign = new_initializer_assign(lhs, new_num(0), where);
+    *tail = (*tail)->next = new_unary(ND_EXPR_STMT, assign);
+}
+
+static int record_member_index(Type *ty, Member *target) {
+    int index = 0;
+    for (Member *m = ty->members; m; m = m->next, index++)
+        if (m == target)
+            return index;
+    return -1;
+}
+
+static int record_member_count(Type *ty) {
+    int count = 0;
+    for (Member *m = ty->members; m; m = m->next)
+        count++;
+    return count;
+}
+
 // declaration = declspec (declarator ("=" (expr | "{" initializer "}"))?)
 //               ("," declarator ("=" (expr | "{" initializer "}"))?)* ";"
 static Node *declaration(Token **rest, Token *tok, bool is_static, bool is_extern) {
@@ -1481,6 +1524,8 @@ static Node *declaration(Token **rest, Token *tok, bool is_static, bool is_exter
                 while (!equal(tok, "}")) {
                     if (cnt > 0) tok = skip(tok, ",");
                     if (equal(tok, "}")) break;
+                    if (ty->kind == TY_ARRAY && ty->array_len > 0 && cnt >= ty->array_len)
+                        error_at(tok->loc, "excess elements in array initializer");
                     if (cnt >= cap) { cap *= 2; vals = realloc(vals, cap * sizeof(int64_t)); }
                     Type *elem_ty = (ty->kind == TY_ARRAY) ? ty->base : NULL;
                     vals[cnt++] = parse_static_integer_initializer(&tok, tok, elem_ty);
@@ -1500,10 +1545,20 @@ static Node *declaration(Token **rest, Token *tok, bool is_static, bool is_exter
 
         // Brace-enclosed initializer: { expr, expr, ... }
         if (equal(tok, "{")) {
+            Token *brace = tok;
             tok = tok->next;
 
+            if (ty->kind != TY_ARRAY && ty->kind != TY_STRUCT)
+                error_at(brace->loc, "brace initializer requires an aggregate type");
+
             int cur_idx = 0;
+            int max_idx = -1;
+            int elem_cap = ty->kind == TY_ARRAY && ty->array_len > 0 ? ty->array_len : 8;
+            bool *elem_init = ty->kind == TY_ARRAY ? calloc(elem_cap, sizeof(bool)) : NULL;
+            int member_count = ty->kind == TY_STRUCT ? record_member_count(ty) : 0;
+            bool *member_init = member_count ? calloc(member_count, sizeof(bool)) : NULL;
             Member *cur_mem = (ty->kind == TY_STRUCT) ? ty->members : NULL;
+            Node *before_init = block_cur;
 
             while (!equal(tok, "}")) {
                 if (equal(tok, ",")) tok = tok->next;
@@ -1511,6 +1566,8 @@ static Node *declaration(Token **rest, Token *tok, bool is_static, bool is_exter
 
                 // Designated initializer: .member = expr
                 if (consume(&tok, tok, ".")) {
+                    if (ty->kind != TY_STRUCT)
+                        error_at(tok->loc, "member designator requires a record initializer");
                     if (tok->kind != TK_IDENT) error_at(tok->loc, "expected member name in designated initializer");
                     char *mname = strndup(tok->loc, tok->len);
                     tok = skip(tok->next, "=");
@@ -1521,24 +1578,42 @@ static Node *declaration(Token **rest, Token *tok, bool is_static, bool is_exter
                         if (!strcmp(m->name, mname)) break;
                     if (!m) error_at(tok->loc, "unknown member in designated initializer");
 
+                    int mi = record_member_index(ty, m);
+                    if (mi >= 0) member_init[mi] = true;
                     Node *var_node = new_var_node(var);
                     Node *member_node = new_node(ND_MEMBER);
                     member_node->lhs = var_node;
                     member_node->member = m;
                     Node *a = new_initializer_assign(member_node, e, tok);
                     block_cur = block_cur->next = new_unary(ND_EXPR_STMT, a);
-                    if (m) cur_mem = m->next;
+                    cur_mem = m->next;
                     continue;
                 }
 
                 // Designated initializer: [index] = expr
                 if (consume(&tok, tok, "[")) {
-                    if (tok->kind != TK_NUM) error_at(tok->loc, "expected array index in designated initializer");
-                    int idx = tok->val;
+                    if (ty->kind != TY_ARRAY)
+                        error_at(tok->loc, "array designator requires an array initializer");
+                    if (tok->kind != TK_NUM || tok->is_float)
+                        error_at(tok->loc, "expected integer array index in designated initializer");
+                    int64_t raw_idx = tok->val;
+                    if (raw_idx < 0 || raw_idx > INT32_MAX)
+                        error_at(tok->loc, "array designator index is out of range");
+                    int idx = (int)raw_idx;
                     tok = skip(tok->next, "]");
                     tok = skip(tok, "=");
+                    if (ty->array_len > 0 && idx >= ty->array_len)
+                        error_at(tok->loc, "array designator index exceeds array bounds");
+                    while (idx >= elem_cap) {
+                        int old_cap = elem_cap;
+                        elem_cap *= 2;
+                        elem_init = realloc(elem_init, elem_cap * sizeof(bool));
+                        memset(elem_init + old_cap, 0, (elem_cap - old_cap) * sizeof(bool));
+                    }
                     Node *e = assign(&tok, tok);
 
+                    elem_init[idx] = true;
+                    if (idx > max_idx) max_idx = idx;
                     Node *lhs = new_unary(ND_DEREF, new_add(new_var_node(var), new_num(idx)));
                     Node *a = new_initializer_assign(lhs, e, tok);
                     block_cur = block_cur->next = new_unary(ND_EXPR_STMT, a);
@@ -1549,10 +1624,24 @@ static Node *declaration(Token **rest, Token *tok, bool is_static, bool is_exter
                 // Positional initializer
                 Node *e = assign(&tok, tok);
                 if (ty->kind == TY_ARRAY) {
+                    if (ty->array_len > 0 && cur_idx >= ty->array_len)
+                        error_at(tok->loc, "excess elements in array initializer");
+                    while (cur_idx >= elem_cap) {
+                        int old_cap = elem_cap;
+                        elem_cap *= 2;
+                        elem_init = realloc(elem_init, elem_cap * sizeof(bool));
+                        memset(elem_init + old_cap, 0, (elem_cap - old_cap) * sizeof(bool));
+                    }
+                    elem_init[cur_idx] = true;
+                    if (cur_idx > max_idx) max_idx = cur_idx;
                     Node *lhs = new_unary(ND_DEREF, new_add(new_var_node(var), new_num(cur_idx++)));
                     Node *a = new_initializer_assign(lhs, e, tok);
                     block_cur = block_cur->next = new_unary(ND_EXPR_STMT, a);
-                } else if (ty->kind == TY_STRUCT && cur_mem) {
+                } else {
+                    if (!cur_mem)
+                        error_at(tok->loc, "excess elements in record initializer");
+                    int mi = record_member_index(ty, cur_mem);
+                    if (mi >= 0) member_init[mi] = true;
                     Node *var_node = new_var_node(var);
                     Node *member_node = new_node(ND_MEMBER);
                     member_node->lhs = var_node;
@@ -1564,11 +1653,46 @@ static Node *declaration(Token **rest, Token *tok, bool is_static, bool is_exter
             }
             tok = skip(tok, "}");
 
-            // Infer array length
+            // Infer array length from the largest initialized subscript, not
+            // merely the last designator seen.
             if (ty->kind == TY_ARRAY && ty->array_len == 0) {
-                ty = array_of(ty->base, cur_idx);
+                int inferred = max_idx + 1;
+                if (inferred <= 0)
+                    error_at(brace->loc, "cannot infer array size from empty initializer");
+                ty = array_of(ty->base, inferred);
                 var->ty = ty;
             }
+
+            // Materialize implicit zero initialization before the explicit
+            // initializer expressions while touching only omitted subobjects.
+            Node zero_head = {};
+            Node *zero_cur = &zero_head;
+            if (ty->kind == TY_ARRAY) {
+                for (int i = 0; i < ty->array_len; i++) {
+                    if (i < elem_cap && elem_init[i]) continue;
+                    Node *lhs = new_unary(ND_DEREF, new_add(new_var_node(var), new_num(i)));
+                    append_zero_initializer(&zero_cur, lhs, ty->base, brace);
+                }
+            } else {
+                int mi = 0;
+                for (Member *m = ty->members; m; m = m->next, mi++) {
+                    if (mi < member_count && member_init[mi]) continue;
+                    Node *member = new_node(ND_MEMBER);
+                    member->lhs = new_var_node(var);
+                    member->member = m;
+                    append_zero_initializer(&zero_cur, member, m->ty, brace);
+                }
+            }
+
+            if (zero_head.next) {
+                Node *explicit_first = before_init->next;
+                zero_cur->next = explicit_first;
+                before_init->next = zero_head.next;
+                if (block_cur == before_init)
+                    block_cur = zero_cur;
+            }
+            free(elem_init);
+            free(member_init);
             continue;
         }
 
