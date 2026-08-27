@@ -1,34 +1,53 @@
 #include "minicc.h"
 #include "preprocess_v2.h"
 
+static char *read_stream(FILE *fp, char *name) {
+    size_t cap = 4096;
+    size_t len = 0;
+    char *buf = calloc(1, cap);
+
+    for (;;) {
+        if (len + 2 > cap) {
+            cap *= 2;
+            char *new_buf = realloc(buf, cap);
+            if (!new_buf) {
+                free(buf);
+                error("%s: out of memory while reading input", name);
+            }
+            buf = new_buf;
+        }
+
+        size_t n = fread(buf + len, 1, cap - len - 1, fp);
+        len += n;
+        if (n == 0) {
+            if (ferror(fp))
+                error("%s: fread failed", name);
+            break;
+        }
+    }
+
+    if (len == 0 || buf[len - 1] != '\n')
+        buf[len++] = '\n';
+    buf[len] = '\0';
+    return buf;
+}
+
 static char *read_file(char *path) {
+    if (!strcmp(path, "-"))
+        return read_stream(stdin, "<stdin>");
+
     FILE *fp = fopen(path, "r");
     if (!fp)
         error("cannot open %s", path);
 
-    if (fseek(fp, 0, SEEK_END) == -1)
-        error("%s: fseek failed", path);
-    long file_size = ftell(fp);
-    if (file_size == -1)
-        error("%s: ftell failed", path);
-    size_t size = file_size;
-    rewind(fp);
-
-    char *buf = calloc(1, size + 2);
-    if (fread(buf, 1, size, fp) != size)
-        error("%s: fread failed", path);
+    char *buf = read_stream(fp, path);
     fclose(fp);
-
-    if (size == 0 || buf[size - 1] != '\n')
-        buf[size++] = '\n';
-    buf[size] = '\0';
     return buf;
 }
 
 int main(int argc, char **argv) {
-    if (argc != 2) {
+    if (argc != 2)
         error("%s: invalid number of arguments", argv[0]);
-    }
 
     char *user_input = read_file(argv[1]);
     char *preprocessed = preprocess_v2(user_input);
