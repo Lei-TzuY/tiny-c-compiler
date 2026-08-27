@@ -36,6 +36,7 @@ struct Scope {
     Scope *parent;
     VarScope *vars;
     StructTag *tags;
+    TypeDef *typedefs;
 };
 
 static Scope *current_scope;
@@ -77,12 +78,39 @@ static StructTag *push_tag(const char *name, Type *ty) {
     return tag;
 }
 
+static bool token_matches_name(Token *tok, const char *name) {
+    return tok->kind == TK_IDENT && strlen(name) == (size_t)tok->len &&
+           !strncmp(tok->loc, name, tok->len);
+}
+
+// Typedef names live in the ordinary identifier namespace. A variable in a
+// nearer block therefore hides an outer typedef name.
+static TypeDef *find_typedef(Token *tok) {
+    for (Scope *scope = current_scope; scope; scope = scope->parent) {
+        for (VarScope *vs = scope->vars; vs; vs = vs->next)
+            if (token_matches_name(tok, vs->name))
+                return NULL;
+
+        for (TypeDef *td = scope->typedefs; td; td = td->next)
+            if (token_matches_name(tok, td->name))
+                return td;
+    }
+    return NULL;
+}
+
+static void push_typedef(Token *ident, Type *ty) {
+    TypeDef *td = calloc(1, sizeof(TypeDef));
+    td->name = strndup(ident->loc, ident->len);
+    td->ty = ty;
+    td->next = current_scope->typedefs;
+    current_scope->typedefs = td;
+}
+
 // ---- End Block Scope ----
 
 static Obj *locals;
 static Obj *globals;
 static EnumConst *enum_consts;
-static TypeDef *typedefs;
 
 // goto / label tracking for current function
 static Node *current_gotos;
@@ -115,11 +143,7 @@ static bool is_typename(Token *tok) {
         equal(tok, "short") || equal(tok, "long") || equal(tok, "unsigned") ||
         equal(tok, "_Bool") || equal(tok, "float") || equal(tok, "double"))
         return true;
-    for (TypeDef *td = typedefs; td; td = td->next)
-        if ((int)strlen(td->name) == tok->len &&
-            !strncmp(tok->loc, td->name, tok->len))
-            return true;
-    return false;
+    return find_typedef(tok) != NULL;
 }
 
 // Check if the current position starts a declaration
@@ -514,19 +538,19 @@ static Type *declspec(Token **rest, Token *tok) {
             continue;
         }
 
-        // Check for typedef name
+        // Check for a typedef name visible in the current lexical scope.
+        // Once a concrete type specifier was already consumed, an identifier
+        // that happens to match an outer typedef is the declarator name, not a
+        // second type specifier (e.g. `typedef char T;` or `int T;`).
         if (tok->kind == TK_IDENT) {
-            bool found = false;
-            for (TypeDef *td = typedefs; td; td = td->next) {
-                if ((int)strlen(td->name) == tok->len &&
-                    !strncmp(tok->loc, td->name, tok->len)) {
-                    tok = tok->next;
-                    ty = td->ty;
-                    found = true;
-                    break;
-                }
+            if (ty)
+                break;
+            TypeDef *td = find_typedef(tok);
+            if (td) {
+                tok = tok->next;
+                ty = td->ty;
+                continue;
             }
-            if (found) continue;
         }
 
         break;
@@ -960,11 +984,7 @@ static Node *stmt(Token **rest, Token *tok) {
             for (;;) {
                 Token *ident;
                 Type *ty = declarator(&tok, tok, basety, &ident);
-                TypeDef *td = calloc(1, sizeof(TypeDef));
-                td->name = strndup(ident->loc, ident->len);
-                td->ty = ty;
-                td->next = typedefs;
-                typedefs = td;
+                push_typedef(ident, ty);
                 if (!consume(&tok, tok, ","))
                     break;
             }
@@ -1465,11 +1485,7 @@ Program *parse(Token *tok) {
                 for (;;) {
                     Token *ident;
                     Type *ty = declarator(&tok, tok, basety, &ident);
-                    TypeDef *td = calloc(1, sizeof(TypeDef));
-                    td->name = strndup(ident->loc, ident->len);
-                    td->ty = ty;
-                    td->next = typedefs;
-                    typedefs = td;
+                    push_typedef(ident, ty);
                     if (!consume(&tok, tok, ","))
                         break;
                 }
