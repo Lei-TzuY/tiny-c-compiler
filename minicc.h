@@ -229,6 +229,14 @@ struct Node {
     Node *label_next;    // linked list of labels in a function
 };
 
+typedef struct Relocation Relocation;
+struct Relocation {
+    Relocation *next;
+    int offset;          // byte offset within the initialized object
+    char *label;         // linker symbol
+    int64_t addend;      // byte addend applied to the linker symbol
+};
+
 struct Obj {
     Obj *next;
     Obj *param_next;
@@ -249,6 +257,15 @@ struct Obj {
     int64_t init_reloc_addend; // byte addend applied to relocation target
     bool has_init_reloc;
 
+    // Aggregate static initializer. The zero-filled byte image contains every
+    // non-relocatable scalar byte and padding; relocation entries replace the
+    // pointer-sized ranges at their offsets during assembly emission.
+    char *init_image;
+    int init_image_size;
+    Relocation *init_relocs;
+
+    // Legacy homogeneous aggregate storage retained for compatibility.
+    // New brace-enclosed static aggregates use init_image/init_relocs instead.
     // Global array/struct initializer (list of int64/double values, one per element)
     int64_t *init_vals;
     double *finit_vals;

@@ -1311,28 +1311,34 @@ static StaticAddress eval_static_address(Node *node) {
     }
 }
 
-static void parse_static_pointer_initializer(Obj *var, Token **rest, Token *tok,
-                                             Type *target) {
+static StaticAddress parse_static_address_initializer(Token **rest, Token *tok,
+                                                       Type *target) {
     Token *start = tok;
     Node *node = assign(&tok, tok);
     add_type(node);
 
-    // Preserve the broader null-pointer-constant rule already supported by
-    // static integer initializers: any integer constant expression of value 0.
+    // Any integer constant expression whose value is zero is a null pointer
+    // constant. Nonzero integer-to-pointer static initialization remains
+    // outside this C subset even when written through an explicit cast.
     if (is_integer(node->ty)) {
         int64_t val = eval_const_expr(node);
         if (val != 0)
             error_at(start->loc, "nonzero integer is not a valid static pointer initializer");
-        var->init_val = 0;
-        var->has_init_val = true;
         *rest = tok;
-        return;
+        return (StaticAddress){0};
     }
 
     if (!assignment_compatible(target, node))
         error_at(start->loc, "incompatible static pointer initializer");
 
     StaticAddress addr = eval_static_address(node);
+    *rest = tok;
+    return addr;
+}
+
+static void parse_static_pointer_initializer(Obj *var, Token **rest, Token *tok,
+                                             Type *target) {
+    StaticAddress addr = parse_static_address_initializer(rest, tok, target);
     if (!addr.label) {
         var->init_val = 0;
         var->has_init_val = true;
@@ -1341,7 +1347,6 @@ static void parse_static_pointer_initializer(Obj *var, Token **rest, Token *tok,
         var->init_reloc_addend = addr.addend;
         var->has_init_reloc = true;
     }
-    *rest = tok;
 }
 
 static void parse_static_scalar_initializer(Obj *var, Token **rest, Token *tok,
@@ -1361,6 +1366,221 @@ static void parse_static_scalar_initializer(Obj *var, Token **rest, Token *tok,
         return;
     }
     error_at(tok->loc, "unsupported scalar static initializer type");
+}
+
+
+static void ensure_static_image(Obj *var, int size) {
+    if (size <= var->init_image_size)
+        return;
+    int old = var->init_image_size;
+    var->init_image = realloc(var->init_image, size);
+    memset(var->init_image + old, 0, size - old);
+    var->init_image_size = size;
+}
+
+static void clear_static_reloc_range(Obj *var, int offset, int size) {
+    Relocation head = {};
+    Relocation *tail = &head;
+    for (Relocation *rel = var->init_relocs; rel;) {
+        Relocation *next = rel->next;
+        if (rel->offset < offset || rel->offset >= offset + size) {
+            tail = tail->next = rel;
+            rel->next = NULL;
+        } else {
+            free(rel);
+        }
+        rel = next;
+    }
+    var->init_relocs = head.next;
+}
+
+static void reset_static_subobject(Obj *var, int offset, int size) {
+    ensure_static_image(var, offset + size);
+    memset(var->init_image + offset, 0, size);
+    clear_static_reloc_range(var, offset, size);
+}
+
+static void add_static_image_reloc(Obj *var, int offset, StaticAddress addr) {
+    Relocation *rel = calloc(1, sizeof(Relocation));
+    rel->offset = offset;
+    rel->label = addr.label;
+    rel->addend = addr.addend;
+    rel->next = var->init_relocs;
+    var->init_relocs = rel;
+}
+
+static void write_static_integer_bytes(Obj *var, int offset, Type *ty, int64_t val) {
+    ensure_static_image(var, offset + ty->size);
+    uint64_t bits = (uint64_t)val;
+    for (int i = 0; i < ty->size; i++)
+        var->init_image[offset + i] = (char)(bits >> (i * 8));
+}
+
+static void parse_static_image_scalar(Obj *var, Token **rest, Token *tok,
+                                      Type *ty, int offset) {
+    reset_static_subobject(var, offset, ty->size);
+
+    if (is_integer(ty)) {
+        int64_t val = parse_static_integer_initializer(rest, tok, ty);
+        write_static_integer_bytes(var, offset, ty, val);
+        return;
+    }
+
+    if (is_flonum(ty)) {
+        double val = parse_const_double(rest, tok);
+        if (ty->kind == TY_FLOAT) {
+            float f = (float)val;
+            memcpy(var->init_image + offset, &f, sizeof(f));
+        } else {
+            memcpy(var->init_image + offset, &val, sizeof(val));
+        }
+        return;
+    }
+
+    if (ty->kind == TY_PTR) {
+        StaticAddress addr = parse_static_address_initializer(rest, tok, ty);
+        if (addr.label)
+            add_static_image_reloc(var, offset, addr);
+        return;
+    }
+
+    error_at(tok->loc, "unsupported scalar in static aggregate initializer");
+}
+
+static Member *find_initializer_member(Type *ty, Token *tok) {
+    for (Member *m = ty->members; m; m = m->next)
+        if ((int)strlen(m->name) == tok->len &&
+            !strncmp(m->name, tok->loc, tok->len))
+            return m;
+    return NULL;
+}
+
+static int parse_static_designator_index(Token **rest, Token *tok) {
+    Token *start = tok;
+    Node *node = ternary(&tok, tok);
+    add_type(node);
+    if (!is_integer(node->ty))
+        error_at(start->loc, "array designator requires integer constant expression");
+
+    int64_t raw = eval_const_expr(node);
+    uint64_t value;
+    if (node->ty->is_unsigned)
+        value = (uint64_t)cast_const_integer(raw, node->ty);
+    else {
+        int64_t signed_value = cast_const_integer(raw, node->ty);
+        if (signed_value < 0)
+            error_at(start->loc, "array designator index is out of range");
+        value = (uint64_t)signed_value;
+    }
+    if (value > INT32_MAX)
+        error_at(start->loc, "array designator index is out of range");
+
+    *rest = tok;
+    return (int)value;
+}
+
+// Build a zero-filled static byte image recursively. Scalar leaves either
+// write representation bytes or attach a linker relocation at the leaf's byte
+// offset. This naturally preserves record padding and supports nested arrays
+// and records without assuming homogeneous element values.
+static Type *parse_static_image_initializer(Obj *var, Token **rest, Token *tok,
+                                            Type *ty, int offset) {
+    if (ty->kind != TY_ARRAY && ty->kind != TY_STRUCT) {
+        if (equal(tok, "{")) {
+            tok = tok->next;
+            parse_static_image_scalar(var, &tok, tok, ty, offset);
+            if (equal(tok, ","))
+                tok = tok->next;
+            *rest = skip(tok, "}");
+            return ty;
+        }
+        parse_static_image_scalar(var, rest, tok, ty, offset);
+        return ty;
+    }
+
+    Token *brace = tok;
+    if (!equal(tok, "{"))
+        error_at(tok->loc, "nested static aggregate initializer requires braces");
+    tok = tok->next;
+
+    if (ty->kind == TY_ARRAY) {
+        if (ty->array_len > 0)
+            ensure_static_image(var, offset + ty->size);
+
+        int next_index = 0;
+        int max_index = -1;
+        while (!equal(tok, "}")) {
+            if (equal(tok, ",")) {
+                tok = tok->next;
+                if (equal(tok, "}"))
+                    break;
+            }
+
+            int index = next_index;
+            if (consume(&tok, tok, "[")) {
+                index = parse_static_designator_index(&tok, tok);
+                tok = skip(tok, "]");
+                tok = skip(tok, "=");
+            }
+
+            if (ty->array_len > 0 && index >= ty->array_len)
+                error_at(tok->loc, "array designator or element exceeds array bounds");
+
+            int elem_offset = offset + index * ty->base->size;
+            reset_static_subobject(var, elem_offset, ty->base->size);
+            Type *elem_ty = parse_static_image_initializer(var, &tok, tok,
+                                                           ty->base, elem_offset);
+            if (elem_ty != ty->base)
+                error_at(brace->loc, "nested incomplete arrays are not supported");
+
+            if (index > max_index)
+                max_index = index;
+            next_index = index + 1;
+        }
+        tok = skip(tok, "}");
+
+        if (ty->array_len == 0) {
+            if (max_index < 0)
+                error_at(brace->loc, "cannot infer array size from empty initializer");
+            ty = array_of(ty->base, max_index + 1);
+        }
+        ensure_static_image(var, offset + ty->size);
+        *rest = tok;
+        return ty;
+    }
+
+    ensure_static_image(var, offset + ty->size);
+    Member *next_member = ty->members;
+    while (!equal(tok, "}")) {
+        if (equal(tok, ",")) {
+            tok = tok->next;
+            if (equal(tok, "}"))
+                break;
+        }
+
+        Member *member = next_member;
+        if (consume(&tok, tok, ".")) {
+            if (tok->kind != TK_IDENT)
+                error_at(tok->loc, "expected member name in designated initializer");
+            member = find_initializer_member(ty, tok);
+            if (!member)
+                error_at(tok->loc, "unknown member in designated initializer");
+            tok = skip(tok->next, "=");
+        } else if (!member) {
+            error_at(tok->loc, "excess elements in record initializer");
+        }
+
+        reset_static_subobject(var, offset + member->offset, member->ty->size);
+        Type *member_ty = parse_static_image_initializer(var, &tok, tok,
+                                                         member->ty,
+                                                         offset + member->offset);
+        if (member_ty != member->ty)
+            error_at(brace->loc, "incomplete array record members are not supported");
+        next_member = member->next;
+    }
+
+    *rest = skip(tok, "}");
+    return ty;
 }
 
 static Token *string_initializer_token(Token *tok, Token **after) {
@@ -1515,28 +1735,12 @@ static Node *declaration(Token **rest, Token *tok, bool is_static, bool is_exter
             continue;
         }
 
-        // Static/extern: constant initializer only
+        // Static/extern: constant initializer only. Brace-enclosed
+        // aggregates use a byte image plus per-offset linker relocations.
         if (is_static || is_extern) {
             if (equal(tok, "{")) {
-                tok = tok->next;
-                int cap = 16, cnt = 0;
-                int64_t *vals = calloc(cap, sizeof(int64_t));
-                while (!equal(tok, "}")) {
-                    if (cnt > 0) tok = skip(tok, ",");
-                    if (equal(tok, "}")) break;
-                    if (ty->kind == TY_ARRAY && ty->array_len > 0 && cnt >= ty->array_len)
-                        error_at(tok->loc, "excess elements in array initializer");
-                    if (cnt >= cap) { cap *= 2; vals = realloc(vals, cap * sizeof(int64_t)); }
-                    Type *elem_ty = (ty->kind == TY_ARRAY) ? ty->base : NULL;
-                    vals[cnt++] = parse_static_integer_initializer(&tok, tok, elem_ty);
-                }
-                tok = skip(tok, "}");
-                if (ty->kind == TY_ARRAY && ty->array_len == 0) {
-                    ty = array_of(ty->base, cnt);
-                    var->ty = ty;
-                }
-                var->init_vals = vals;
-                var->init_vals_count = cnt;
+                ty = parse_static_image_initializer(var, &tok, tok, ty, 0);
+                var->ty = ty;
             } else {
                 parse_static_scalar_initializer(var, &tok, tok, ty);
             }
@@ -2810,7 +3014,7 @@ static Obj *find_global_symbol(const char *name) {
 }
 
 static bool object_has_initializer(Obj *var) {
-    return var->has_init_val || var->has_init_reloc ||
+    return var->has_init_val || var->has_init_reloc || var->init_image ||
            var->init_vals_count > 0 || var->init_data;
 }
 
@@ -3002,25 +3206,8 @@ Program *parse(Token *tok) {
                         var->init_data = build_string_array_image(ty, string_tok);
                         tok = after_string;
                     } else if (equal(tok, "{")) {
-                        tok = tok->next;
-                        int cap = 16, cnt = 0;
-                        int64_t *vals = calloc(cap, sizeof(int64_t));
-                        while (!equal(tok, "}")) {
-                            if (cnt > 0) tok = skip(tok, ",");
-                            if (equal(tok, "}")) break;
-                            if (cnt >= cap) { cap *= 2; vals = realloc(vals, cap * sizeof(int64_t)); }
-                            Type *elem_ty = (ty->kind == TY_ARRAY) ? ty->base : NULL;
-                    vals[cnt++] = parse_static_integer_initializer(&tok, tok, elem_ty);
-                        }
-                        tok = skip(tok, "}");
-
-                        if (ty->kind == TY_ARRAY && ty->array_len == 0) {
-                            ty = array_of(ty->base, cnt);
-                            var->ty = ty;
-                        }
-
-                        var->init_vals = vals;
-                        var->init_vals_count = cnt;
+                        ty = parse_static_image_initializer(var, &tok, tok, ty, 0);
+                        var->ty = ty;
                     } else {
                         parse_static_scalar_initializer(var, &tok, tok, ty);
                     }
