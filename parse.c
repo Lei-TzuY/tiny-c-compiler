@@ -158,6 +158,7 @@ static Obj *globals;
 // goto / label tracking for current function
 static Node *current_gotos;
 static Node *current_labels;
+static Type *current_return_ty;
 
 static int align_up(int n, int a) { return (n + a - 1) / a * a; }
 
@@ -184,6 +185,9 @@ static Type *type_suffix(Token **rest, Token *tok, Type *ty);
 static Type *declarator(Token **rest, Token *tok, Type *ty, Token **ident);
 static Type *abstract_declarator(Token **rest, Token *tok, Type *ty, Token **ident);
 static Type *type_name(Token **rest, Token *tok);
+static bool type_compatible(Type *a, Type *b);
+static bool assignment_compatible(Type *dst, Node *rhs);
+static Node *new_checked_assign(Node *lhs, Node *rhs, Token *op);
 
 static bool is_typename(Token *tok) {
     if (equal(tok, "int") || equal(tok, "char") || equal(tok, "void") ||
@@ -1007,7 +1011,7 @@ static Node *declaration(Token **rest, Token *tok, bool is_static, bool is_exter
                     Node *member_node = new_node(ND_MEMBER);
                     member_node->lhs = var_node;
                     member_node->member = m;
-                    Node *a = new_binary(ND_ASSIGN, member_node, e);
+                    Node *a = new_checked_assign(member_node, e, tok);
                     block_cur = block_cur->next = new_unary(ND_EXPR_STMT, a);
                     if (m) cur_mem = m->next;
                     continue;
@@ -1022,7 +1026,7 @@ static Node *declaration(Token **rest, Token *tok, bool is_static, bool is_exter
                     Node *e = assign(&tok, tok);
 
                     Node *lhs = new_unary(ND_DEREF, new_add(new_var_node(var), new_num(idx)));
-                    Node *a = new_binary(ND_ASSIGN, lhs, e);
+                    Node *a = new_checked_assign(lhs, e, tok);
                     block_cur = block_cur->next = new_unary(ND_EXPR_STMT, a);
                     cur_idx = idx + 1;
                     continue;
@@ -1032,14 +1036,14 @@ static Node *declaration(Token **rest, Token *tok, bool is_static, bool is_exter
                 Node *e = assign(&tok, tok);
                 if (ty->kind == TY_ARRAY) {
                     Node *lhs = new_unary(ND_DEREF, new_add(new_var_node(var), new_num(cur_idx++)));
-                    Node *a = new_binary(ND_ASSIGN, lhs, e);
+                    Node *a = new_checked_assign(lhs, e, tok);
                     block_cur = block_cur->next = new_unary(ND_EXPR_STMT, a);
                 } else if (ty->kind == TY_STRUCT && cur_mem) {
                     Node *var_node = new_var_node(var);
                     Node *member_node = new_node(ND_MEMBER);
                     member_node->lhs = var_node;
                     member_node->member = cur_mem;
-                    Node *a = new_binary(ND_ASSIGN, member_node, e);
+                    Node *a = new_checked_assign(member_node, e, tok);
                     block_cur = block_cur->next = new_unary(ND_EXPR_STMT, a);
                     cur_mem = cur_mem->next;
                 }
@@ -1057,7 +1061,7 @@ static Node *declaration(Token **rest, Token *tok, bool is_static, bool is_exter
         // Simple scalar initializer
         Node *vnode = new_var_node(var);
         Node *rhs = assign(&tok, tok);
-        Node *a = new_binary(ND_ASSIGN, vnode, rhs);
+        Node *a = new_checked_assign(vnode, rhs, tok);
         block_cur = block_cur->next = new_unary(ND_EXPR_STMT, a);
     } while (equal(tok, ","));
 
@@ -1082,11 +1086,18 @@ static bool is_label(Token *tok) {
 
 static Node *stmt(Token **rest, Token *tok) {
     if (equal(tok, "return")) {
+        Token *ret_tok = tok;
         Node *node = new_node(ND_RETURN);
-        if (!equal(tok->next, ";"))
+        if (!equal(tok->next, ";")) {
             node->lhs = expr(&tok, tok->next);
-        else
+            if (current_return_ty && current_return_ty->kind == TY_VOID)
+                error_at(ret_tok->loc, "void function should not return a value");
+            if (current_return_ty &&
+                !assignment_compatible(current_return_ty, node->lhs))
+                error_at(ret_tok->loc, "incompatible return type");
+        } else {
             tok = tok->next;
+        }
         *rest = skip(tok, ";");
         return node;
     }
@@ -1276,10 +1287,124 @@ static Node *expr(Token **rest, Token *tok) {
     return node;
 }
 
+static bool is_null_pointer_constant(Node *node) {
+    add_type(node);
+    return node->kind == ND_NUM && is_integer(node->ty) && node->val == 0;
+}
+
+static bool record_has_visible_tag(Type *ty) {
+    for (Scope *sc = current_scope; sc; sc = sc->parent)
+        for (StructTag *tag = sc->tags; tag; tag = tag->next)
+            if (tag->ty == ty)
+                return true;
+    return false;
+}
+
+static bool record_shape_compatible(Type *a, Type *b) {
+    if (a == b)
+        return true;
+    if (!a || !b || a->kind != TY_STRUCT || b->kind != TY_STRUCT)
+        return false;
+
+    // Tagged records retain C's nominal identity. Structural matching exists
+    // only for the compiler's historical anonymous-record extension.
+    if (record_has_visible_tag(a) || record_has_visible_tag(b))
+        return false;
+
+    if (a->size != b->size || a->align != b->align)
+        return false;
+
+    Member *ma = a->members;
+    Member *mb = b->members;
+    while (ma && mb) {
+        if (ma->offset != mb->offset || strcmp(ma->name, mb->name) ||
+            !type_compatible(ma->ty, mb->ty))
+            return false;
+        ma = ma->next;
+        mb = mb->next;
+    }
+    return !ma && !mb;
+}
+
+static bool pointer_assignment_compatible(Type *dst, Type *src) {
+    if (!dst || !src || dst->kind != TY_PTR)
+        return false;
+
+    if (src->kind == TY_FUNC)
+        return dst->base && dst->base->kind == TY_FUNC &&
+               type_compatible(dst->base, src);
+
+    if (src->kind != TY_PTR)
+        return false;
+
+    if (type_compatible(dst->base, src->base))
+        return true;
+
+    // Preserve the compiler's long-standing educational extension for
+    // pointers to separately declared anonymous records that have the same
+    // member layout. Tagged records and file-scope redeclarations remain
+    // nominally typed.
+    if (dst->base && src->base && dst->base->kind == TY_STRUCT &&
+        src->base->kind == TY_STRUCT &&
+        record_shape_compatible(dst->base, src->base))
+        return true;
+
+    // Object/incomplete-object pointers implicitly convert to and from void*.
+    // Function pointers remain a separate pointer domain.
+    bool dst_void = dst->base && dst->base->kind == TY_VOID;
+    bool src_void = src->base && src->base->kind == TY_VOID;
+    bool dst_func = dst->base && dst->base->kind == TY_FUNC;
+    bool src_func = src->base && src->base->kind == TY_FUNC;
+    return !dst_func && !src_func && (dst_void || src_void);
+}
+
+static bool assignment_compatible(Type *dst, Node *rhs) {
+    if (!dst || !rhs)
+        return false;
+
+    add_type(rhs);
+    Type *src = rhs->ty;
+    if (!src)
+        return false;
+
+    // Array expressions decay before assignment/argument/return conversion.
+    if (src->kind == TY_ARRAY)
+        src = pointer_to(src->base);
+
+    if (dst->kind == TY_ARRAY || dst->kind == TY_FUNC || dst->kind == TY_VOID)
+        return false;
+
+    if (is_numeric(dst) && is_numeric(src))
+        return true;
+
+    // _Bool accepts scalar values, including object/function pointers.
+    if (dst->kind == TY_BOOL &&
+        (src->kind == TY_PTR || src->kind == TY_FUNC))
+        return true;
+
+    if (dst->kind == TY_PTR)
+        return pointer_assignment_compatible(dst, src) ||
+               is_null_pointer_constant(rhs);
+
+    if (dst->kind == TY_STRUCT && src->kind == TY_STRUCT)
+        return type_compatible(dst, src) || record_shape_compatible(dst, src);
+
+    return type_compatible(dst, src);
+}
+
+static Node *new_checked_assign(Node *lhs, Node *rhs, Token *op) {
+    add_type(lhs);
+    if (!assignment_compatible(lhs->ty, rhs))
+        error_at(op->loc, "incompatible types in assignment");
+    return new_binary(ND_ASSIGN, lhs, rhs);
+}
+
 static Node *assign(Token **rest, Token *tok) {
     Node *node = ternary(&tok, tok);
-    if (equal(tok, "="))
-        node = new_binary(ND_ASSIGN, node, assign(&tok, tok->next));
+    if (equal(tok, "=")) {
+        Token *op = tok;
+        node = new_checked_assign(node, assign(&tok, tok->next), op);
+    }
     else if (equal(tok, "+="))
         node = new_compound_assign(ND_ADD_EQ, node, assign(&tok, tok->next));
     else if (equal(tok, "-="))
@@ -1472,6 +1597,8 @@ static Node *indirect_funcall(Token **rest, Token *tok, Node *callee) {
         add_type(arg);
 
         if (expected) {
+            if (!assignment_compatible(expected->ty, arg))
+                error_at(tok->loc, "incompatible argument type");
             if (is_numeric(arg->ty) && is_numeric(expected->ty) &&
                 arg->ty != expected->ty) {
                 Node *cast = new_unary(ND_CAST, arg);
@@ -1649,6 +1776,8 @@ static Node *primary(Token **rest, Token *tok) {
                     add_type(arg);
 
                     if (expected) {
+                        if (!assignment_compatible(expected->ty, arg))
+                            error_at(tok->loc, "incompatible argument type");
                         if (is_numeric(arg->ty) && is_numeric(expected->ty) &&
                             arg->ty != expected->ty) {
                             Node *cast = new_unary(ND_CAST, arg);
@@ -1704,6 +1833,8 @@ static Node *primary(Token **rest, Token *tok) {
                 add_type(arg);
 
                 if (expected) {
+                    if (!assignment_compatible(expected->ty, arg))
+                        error_at(tok->loc, "incompatible argument type");
                     if (is_numeric(arg->ty) && is_numeric(expected->ty) &&
                         arg->ty != expected->ty) {
                         Node *cast = new_unary(ND_CAST, arg);
@@ -2026,7 +2157,10 @@ Program *parse(Token *tok) {
             fn->is_static = is_static;
             fn->is_variadic = ty->is_variadic;
 
+            Type *saved_return_ty = current_return_ty;
+            current_return_ty = ty->return_ty;
             Node *block = compound_stmt(&tok, tok);
+            current_return_ty = saved_return_ty;
             fn->body = block->body;
             fn->locals = locals;
 

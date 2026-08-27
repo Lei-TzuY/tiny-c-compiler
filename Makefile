@@ -25,6 +25,7 @@ test: minicc
 	bash ./test/recursive_declarators.sh
 	bash ./test/type_names.sh
 	bash ./test/type_compatibility.sh
+	bash ./test/semantic_assignments.sh
 
 clean:
 	rm -f minicc *.o *~ tmp*
