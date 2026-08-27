@@ -45,3 +45,5 @@ The compiler is designed as an educational systems-programming project rather th
 - Union types retain their record kind through semantic analysis; automatic/static union initializers select exactly one member (the first by default or a designated member), preserve overlapping storage correctly, and reject excess initializer elements.
 
 - Static-storage objects are emitted at their declared type alignment, including initialized/uninitialized scalars, relocatable pointers, arrays, records, unions, and block-static objects.
+
+- Character-array string initialization is supported recursively inside automatic/static aggregates, including struct/union members, multidimensional character arrays, and designated subobjects, with C-compatible NUL truncation and zero-fill.
