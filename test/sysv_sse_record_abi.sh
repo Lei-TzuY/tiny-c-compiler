@@ -43,35 +43,47 @@ assert_run 0 'struct D{double a;double b;};double f(double a,double b,double c,d
 assert_run 0 'struct M{double d;long i;};double f(long a,long b,long c,long d,long e,long q,struct M m,double z){return a+b+c+d+e+q+m.d+m.i+z;}int main(){struct M m={10.0,12};return f(1,1,1,1,1,1,m,14.0)==42.0?0:1;}'
 assert_run 0 'struct M{double d;long i;};double f(double a,double b,double c,double d,double e,double q,double g,double h,struct M m,long z){return a+b+c+d+e+q+g+h+m.d+m.i+z;}int main(){struct M m={10.0,11};return f(1,1,1,1,1,1,1,1,m,13)==42.0?0:1;}'
 
-# Minicc caller -> host GCC callee, including SSE exhaustion and a variadic
-# aggregate whose XMM use must be reflected in AL.
+# Minicc caller -> host GCC callee, including both mixed return orders, mixed
+# register arguments, whole-record fallback, and a variadic aggregate whose XMM
+# use must be reflected in AL.
 cat > tmp-sse-record-host.c <<'EOF'
 #include <stdarg.h>
 struct D { double a,b; };
 struct M { double d; long i; };
+struct R { long i; double d; };
 struct P { float f; int i; };
 double host_d(struct D x){return x.a+x.b;}
+double host_mix(struct M x){return x.d+x.i;}
 struct M host_m(double d,long i){struct M x={d,i};return x;}
+struct R host_r(long i,double d){struct R x={i,d};return x;}
 int host_p(struct P x){return x.i;}
 double host_stack(double a,double b,double c,double d,double e,double f,double g,struct D p,double z){return a+b+c+d+e+f+g+p.a+p.b+z;}
+double host_mixed_stack(long a,long b,long c,long d,long e,long f,struct M m,double z){return a+b+c+d+e+f+m.d+m.i+z;}
 double host_var(int tag,...){va_list ap;va_start(ap,tag);struct D x=va_arg(ap,struct D);va_end(ap);return x.a+x.b;}
 EOF
 cc -c -o tmp-sse-record-host.o tmp-sse-record-host.c
 cat > tmp-sse-record-mini-caller.c <<'EOF'
 struct D { double a,b; };
 struct M { double d; long i; };
+struct R { long i; double d; };
 struct P { float f; int i; };
 double host_d(struct D);
+double host_mix(struct M);
 struct M host_m(double,long);
+struct R host_r(long,double);
 int host_p(struct P);
 double host_stack(double,double,double,double,double,double,double,struct D,double);
+double host_mixed_stack(long,long,long,long,long,long,struct M,double);
 double host_var(int,...);
 int main(void){
   struct D d={20.0,22.0}; if(host_d(d)!=42.0) return 1;
-  struct M m=host_m(20.0,22); if(m.d+m.i!=42.0) return 2;
-  struct P p={1.0f,42}; if(host_p(p)!=42) return 3;
-  struct D s={10.0,11.0}; if(host_stack(1,1,1,1,1,1,1,s,14)!=42.0) return 4;
-  if(host_var(0,d)!=42.0) return 5;
+  struct M a={20.0,22}; if(host_mix(a)!=42.0) return 2;
+  struct M m=host_m(20.0,22); if(m.d+m.i!=42.0) return 3;
+  struct R r=host_r(22,20.0); if(r.i+r.d!=42.0) return 4;
+  struct P p={1.0f,42}; if(host_p(p)!=42) return 5;
+  struct D s={10.0,11.0}; if(host_stack(1,1,1,1,1,1,1,s,14)!=42.0) return 6;
+  struct M ms={10.0,12}; if(host_mixed_stack(1,1,1,1,1,1,ms,14.0)!=42.0) return 7;
+  if(host_var(0,d)!=42.0) return 8;
   return 0;
 }
 EOF
@@ -80,35 +92,46 @@ cc -o tmp-sse-record-mini-caller tmp-sse-record-mini-caller.s tmp-sse-record-hos
 ./tmp-sse-record-mini-caller
 printf '%s\n' 'OK(SSE record ABI): minicc caller interoperates with host GCC'
 
-# Host GCC caller -> minicc callee verifies incoming SSE/mixed values, mixed
-# return registers, whole-record stack fallback, and named-record va_start state.
+# Host GCC caller -> minicc callee verifies incoming SSE/mixed values, both mixed
+# return-register orders, whole-record stack fallback, and named-record va_start.
 cat > tmp-sse-record-mini-callee.c <<'EOF'
 #include <stdarg.h>
 struct D { double a,b; };
 struct M { double d; long i; };
+struct R { long i; double d; };
 struct P { float f; int i; };
 double mini_d(struct D x){return x.a+x.b;}
+double mini_mix(struct M x){return x.d+x.i;}
 struct M mini_m(double d,long i){struct M x={d,i};return x;}
+struct R mini_r(long i,double d){struct R x={i,d};return x;}
 int mini_p(struct P x){return x.i;}
 double mini_stack(double a,double b,double c,double d,double e,double f,double g,struct D p,double z){return a+b+c+d+e+f+g+p.a+p.b+z;}
+double mini_mixed_stack(long a,long b,long c,long d,long e,long f,struct M m,double z){return a+b+c+d+e+f+m.d+m.i+z;}
 double mini_named_var(struct D fixed,int tag,...){va_list ap;va_start(ap,tag);double z=va_arg(ap,double);va_end(ap);return fixed.a+fixed.b+z;}
 EOF
 ./minicc tmp-sse-record-mini-callee.c > tmp-sse-record-mini-callee.s
 cat > tmp-sse-record-host-main.c <<'EOF'
 struct D { double a,b; };
 struct M { double d; long i; };
+struct R { long i; double d; };
 struct P { float f; int i; };
 double mini_d(struct D);
+double mini_mix(struct M);
 struct M mini_m(double,long);
+struct R mini_r(long,double);
 int mini_p(struct P);
 double mini_stack(double,double,double,double,double,double,double,struct D,double);
+double mini_mixed_stack(long,long,long,long,long,long,struct M,double);
 double mini_named_var(struct D,int,...);
 int main(void){
   struct D d={20.0,22.0}; if(mini_d(d)!=42.0) return 1;
-  struct M m=mini_m(20.0,22); if(m.d+m.i!=42.0) return 2;
-  struct P p={1.0f,42}; if(mini_p(p)!=42) return 3;
-  struct D s={10.0,11.0}; if(mini_stack(1,1,1,1,1,1,1,s,14)!=42.0) return 4;
-  struct D fixed={10.0,12.0}; if(mini_named_var(fixed,0,20.0)!=42.0) return 5;
+  struct M a={20.0,22}; if(mini_mix(a)!=42.0) return 2;
+  struct M m=mini_m(20.0,22); if(m.d+m.i!=42.0) return 3;
+  struct R r=mini_r(22,20.0); if(r.i+r.d!=42.0) return 4;
+  struct P p={1.0f,42}; if(mini_p(p)!=42) return 5;
+  struct D s={10.0,11.0}; if(mini_stack(1,1,1,1,1,1,1,s,14)!=42.0) return 6;
+  struct M ms={10.0,12}; if(mini_mixed_stack(1,1,1,1,1,1,ms,14.0)!=42.0) return 7;
+  struct D fixed={10.0,12.0}; if(mini_named_var(fixed,0,20.0)!=42.0) return 8;
   return 0;
 }
 EOF
