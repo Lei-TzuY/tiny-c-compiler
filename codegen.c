@@ -1205,4 +1205,9 @@ void codegen(Program *prog) {
         printf("  pop %%rbp\n");
         printf("  ret\n");
     }
+
+    // GNU/ELF linkers treat an input object without this marker as potentially
+    // requiring an executable stack. Generated C code never needs one, so emit
+    // the conventional empty note section explicitly.
+    printf("  .section .note.GNU-stack,\"\",@progbits\n");
 }
