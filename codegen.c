@@ -153,7 +153,14 @@ static void value_to_bool(Type *ty) {
 }
 
 static void cast_value(Type *from, Type *to) {
-    if (!from || !to || from == to || from->kind == to->kind)
+    if (!from || !to || from == to)
+        return;
+
+    // Most same-kind conversions are representation-preserving, but signed
+    // and unsigned integer types of the same rank still require the target
+    // width/sign interpretation (notably int <-> unsigned int).
+    if (from->kind == to->kind &&
+        (!is_integer(from) || from->is_unsigned == to->is_unsigned))
         return;
 
     if (to->kind == TY_VOID)
@@ -304,14 +311,6 @@ static void gen_compound_assign(Node *node) {
         return;
     }
 
-    gen_addr(node->lhs);
-    push();
-    load(node->ty);
-    push();
-    gen_expr(node->rhs);
-    printf("  mov %%rax, %%rsi\n");
-    pop("%rax");
-
     Type *operation_ty = NULL;
     if (node->kind == ND_DIV_EQ || node->kind == ND_MOD_EQ)
         operation_ty = get_common_type(node->lhs->ty, node->rhs->ty);
@@ -319,6 +318,19 @@ static void gen_compound_assign(Node *node) {
         // Integer promotion of the left operand.  Using int as the second
         // operand is a compact way to request exactly that promotion here.
         operation_ty = get_common_type(node->lhs->ty, ty_int);
+
+    gen_addr(node->lhs);
+    push();
+    load(node->ty);
+    if (operation_ty)
+        cast_value(node->lhs->ty, operation_ty);
+    push();
+    gen_expr(node->rhs);
+    if (operation_ty &&
+        (node->kind == ND_DIV_EQ || node->kind == ND_MOD_EQ))
+        cast_value(node->rhs->ty, operation_ty);
+    printf("  mov %%rax, %%rsi\n");
+    pop("%rax");
 
     switch (node->kind) {
     case ND_ADD_EQ: printf("  add %%rsi, %%rax\n"); break;
@@ -648,7 +660,8 @@ static void gen_expr(Node *node) {
 
     bool arithmetic = node->kind == ND_ADD || node->kind == ND_SUB ||
                       node->kind == ND_MUL || node->kind == ND_DIV ||
-                      node->kind == ND_MOD;
+                      node->kind == ND_MOD || node->kind == ND_BITAND ||
+                      node->kind == ND_BITOR || node->kind == ND_BITXOR;
     bool comparison = node->kind == ND_EQ || node->kind == ND_NE ||
                       node->kind == ND_LT || node->kind == ND_LE;
     Type *common = NULL;
@@ -712,14 +725,27 @@ static void gen_expr(Node *node) {
     }
 
     gen_expr(node->rhs);
+    if (common && is_integer(common))
+        cast_value(node->rhs->ty, common);
     push();
     gen_expr(node->lhs);
+    if (common && is_integer(common))
+        cast_value(node->lhs->ty, common);
     pop("%rdi");
 
     switch (node->kind) {
-    case ND_ADD: printf("  add %%rdi, %%rax\n"); return;
-    case ND_SUB: printf("  sub %%rdi, %%rax\n"); return;
-    case ND_MUL: printf("  imul %%rdi, %%rax\n"); return;
+    case ND_ADD:
+        printf("  add %%rdi, %%rax\n");
+        if (common && is_integer(common)) normalize(common);
+        return;
+    case ND_SUB:
+        printf("  sub %%rdi, %%rax\n");
+        if (common && is_integer(common)) normalize(common);
+        return;
+    case ND_MUL:
+        printf("  imul %%rdi, %%rax\n");
+        if (common && is_integer(common)) normalize(common);
+        return;
     case ND_DIV:
         if (common && common->is_unsigned) {
             printf("  mov $0, %%rdx\n");
@@ -728,6 +754,7 @@ static void gen_expr(Node *node) {
             printf("  cqo\n");
             printf("  idiv %%rdi\n");
         }
+        if (common && is_integer(common)) normalize(common);
         return;
     case ND_MOD:
         if (common && common->is_unsigned) {
@@ -739,13 +766,24 @@ static void gen_expr(Node *node) {
             printf("  idiv %%rdi\n");
             printf("  mov %%rdx, %%rax\n");
         }
+        if (common && is_integer(common)) normalize(common);
         return;
-    case ND_BITAND: printf("  and %%rdi, %%rax\n"); return;
-    case ND_BITOR:  printf("  or %%rdi, %%rax\n"); return;
-    case ND_BITXOR: printf("  xor %%rdi, %%rax\n"); return;
+    case ND_BITAND:
+        printf("  and %%rdi, %%rax\n");
+        if (common) normalize(common);
+        return;
+    case ND_BITOR:
+        printf("  or %%rdi, %%rax\n");
+        if (common) normalize(common);
+        return;
+    case ND_BITXOR:
+        printf("  xor %%rdi, %%rax\n");
+        if (common) normalize(common);
+        return;
     case ND_SHL:
         printf("  mov %%rdi, %%rcx\n");
         printf("  shl %%cl, %%rax\n");
+        normalize(node->ty);
         return;
     case ND_SHR:
         printf("  mov %%rdi, %%rcx\n");
@@ -753,6 +791,7 @@ static void gen_expr(Node *node) {
             printf("  shr %%cl, %%rax\n");
         else
             printf("  sar %%cl, %%rax\n");
+        normalize(node->ty);
         return;
     case ND_EQ: case ND_NE: case ND_LT: case ND_LE:
         printf("  cmp %%rdi, %%rax\n");

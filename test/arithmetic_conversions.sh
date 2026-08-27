@@ -47,4 +47,18 @@ assert_run 1 'int main(){unsigned long x=5;long y=-2;x%=y;return x==5;}'
 assert_run 1 'int main(){unsigned long x=(unsigned long)-1;x>>=1;return (long)x>0;}'
 assert_run 1 'int main(){long x=-2;x>>=1;return x==-1;}'
 
+# Same-rank signed/unsigned conversion must change the actual register value,
+# not merely the instruction signedness.  Integer results are normalized back
+# to their C width so unsigned-int arithmetic wraps modulo 2^32.
+assert_run 1 'int main(){int a=-2;unsigned int b=(unsigned int)-1;return a<b;}'
+assert_run 1 'int main(){unsigned int a=(unsigned int)-1;return (a+1)==0;}'
+assert_run 1 'int main(){unsigned int a=0;return a-1==(unsigned int)-1;}'
+assert_run 1 'int main(){unsigned int a=(unsigned int)-1;return a*2==(unsigned int)-2;}'
+assert_run 1 'int main(){unsigned int a=(unsigned int)-1;return (a<<1)==(unsigned int)-2;}'
+assert_run 1 'int main(){int a=-2;unsigned int b=2;return a/b==(unsigned int)2147483647;}'
+assert_run 1 'int main(){int a=-2;unsigned int b=7;return a%b==2;}'
+assert_run 1 'int main(){int x=-2;unsigned int y=2;x/=y;return x==2147483647;}'
+assert_run 1 'int main(){int a=-2;unsigned int b=0;return (a|b)==(unsigned int)-2;}'
+assert_run 1 'int main(){return (1?-1:(unsigned int)0)==(unsigned int)-1;}'
+
 echo 'All arithmetic-conversion tests passed!'
