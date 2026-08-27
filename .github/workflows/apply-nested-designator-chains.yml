@@ -1,0 +1,30 @@
+name: Apply nested designator chains migration
+
+on:
+  push:
+    branches:
+      - agent/nested-designator-chains
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/nested-designator-chains
+      - name: Apply migration
+        run: python3 tools/apply_nested_designator_chains.py
+      - name: Test compiler
+        run: make clean && make test
+      - name: Commit verified implementation
+        run: |
+          rm tools/apply_nested_designator_chains.py
+          rm .github/workflows/apply-nested-designator-chains.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'Support nested designated initializer chains'
+          git push origin HEAD:agent/nested-designator-chains
