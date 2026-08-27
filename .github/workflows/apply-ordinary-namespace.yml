@@ -1,0 +1,34 @@
+name: Apply ordinary namespace migration
+
+on:
+  push:
+    branches:
+      - agent/ordinary-identifier-namespace
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/ordinary-identifier-namespace
+          fetch-depth: 0
+
+      - name: Apply migration
+        run: python3 tools/apply_ordinary_namespace.py
+
+      - name: Test compiler
+        run: make clean && make test
+
+      - name: Commit verified implementation
+        run: |
+          rm -f tools/apply_ordinary_namespace.py
+          rm -f .github/workflows/apply-ordinary-namespace.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add parse.c Makefile README.md test/ordinary_namespace.sh tools/apply_ordinary_namespace.py .github/workflows/apply-ordinary-namespace.yml
+          git commit -m "Enforce the ordinary identifier namespace"
+          git push origin HEAD:agent/ordinary-identifier-namespace
