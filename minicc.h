@@ -90,6 +90,14 @@ struct Type {
     Obj *params;       // TY_FUNC: declared parameter types (metadata Obj list)
     bool is_variadic; // TY_FUNC: variadic function (...)
     bool has_prototype; // TY_FUNC: distinguish f(void)/f(int) from old-style f()
+
+    // C type qualifiers. Qualified types are shallow clones; origin preserves
+    // record identity and qual_next keeps incomplete tagged-record clones in
+    // sync when the canonical tag is completed later.
+    bool is_const;
+    bool is_volatile;
+    Type *origin;
+    Type *qual_next;
 };
 
 struct Member {
@@ -118,6 +126,7 @@ bool is_numeric(Type *ty);
 Type *pointer_to(Type *base);
 Type *array_of(Type *base, int size);
 Type *func_type(Type *return_ty);
+Type *qualify_type(Type *ty, bool is_const, bool is_volatile);
 Type *get_common_type(Type *ty1, Type *ty2);
 void add_type(Node *node);
 

@@ -29,6 +29,7 @@ test: minicc
 	bash ./test/expression_operators.sh
 	bash ./test/pointer_arithmetic.sh
 	bash ./test/lvalue_semantics.sh
+	bash ./test/type_qualifiers.sh
 	bash ./test/cast_constraints.sh
 	bash ./test/switch_constraints.sh
 	bash ./test/arithmetic_conversions.sh

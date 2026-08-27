@@ -29,6 +29,43 @@ bool is_numeric(Type *ty) {
     return is_integer(ty) || is_flonum(ty);
 }
 
+Type *qualify_type(Type *ty, bool is_const, bool is_volatile) {
+    if (!ty || (!is_const && !is_volatile))
+        return ty;
+
+    // Qualifying an array type through a typedef qualifies its element type.
+    // Direct declarations such as `const int a[3]` already arrive in this
+    // shape because the declaration specifiers qualify the element base first.
+    if (ty->kind == TY_ARRAY) {
+        Type *copy = calloc(1, sizeof(Type));
+        *copy = *ty;
+        copy->base = qualify_type(ty->base, is_const, is_volatile);
+        copy->origin = ty->origin ? ty->origin : ty;
+        copy->qual_next = NULL;
+        return copy;
+    }
+
+    // Qualifiers on function types have no useful semantics in this compiler;
+    // pointer qualifiers are attached to TY_PTR by the declarator parser.
+    if (ty->kind == TY_FUNC)
+        return ty;
+
+    Type *copy = calloc(1, sizeof(Type));
+    *copy = *ty;
+    copy->origin = ty->origin ? ty->origin : ty;
+    copy->is_const = copy->is_const || is_const;
+    copy->is_volatile = copy->is_volatile || is_volatile;
+    copy->qual_next = NULL;
+
+    // A qualified clone of a forward-declared record must observe completion
+    // of the canonical tag later in the translation unit.
+    if (copy->kind == TY_STRUCT && copy->origin->is_incomplete) {
+        copy->qual_next = copy->origin->qual_next;
+        copy->origin->qual_next = copy;
+    }
+    return copy;
+}
+
 Type *pointer_to(Type *base) {
     Type *ty = calloc(1, sizeof(Type));
     ty->kind = TY_PTR;
@@ -222,7 +259,12 @@ void add_type(Node *node) {
         node->ty = node->var->ty;
         return;
     case ND_MEMBER:
-        node->ty = node->member->ty;
+        // Accessing a member through a const/volatile aggregate carries those
+        // qualifiers onto the member lvalue. This makes both `s.x` and
+        // `p->x` honor a qualified struct/union object.
+        node->ty = qualify_type(node->member->ty,
+                                node->lhs->ty && node->lhs->ty->is_const,
+                                node->lhs->ty && node->lhs->ty->is_volatile);
         return;
     case ND_ADDR:
         node->ty = pointer_to(node->lhs->ty);

@@ -185,7 +185,9 @@ static Type *declarator(Token **rest, Token *tok, Type *ty, Token **ident);
 static Type *abstract_declarator(Token **rest, Token *tok, Type *ty, Token **ident);
 static Type *type_name(Token **rest, Token *tok);
 static bool type_compatible(Type *a, Type *b);
+static bool type_compatible_ignoring_top_qual(Type *a, Type *b);
 static bool assignment_compatible(Type *dst, Node *rhs);
+static Node *new_initializer_assign(Node *lhs, Node *rhs, Token *at);
 static Node *new_checked_assign(Node *lhs, Node *rhs, Token *op);
 
 static Type *current_return_ty;
@@ -294,13 +296,29 @@ static bool is_lvalue(Node *node) {
     }
 }
 
+static bool type_has_const_subobject(Type *ty) {
+    if (!ty)
+        return false;
+    if (ty->is_const)
+        return true;
+    if (ty->kind == TY_ARRAY)
+        return type_has_const_subobject(ty->base);
+    if (ty->kind == TY_STRUCT) {
+        for (Member *m = ty->members; m; m = m->next)
+            if (type_has_const_subobject(m->ty))
+                return true;
+    }
+    return false;
+}
+
 static bool is_modifiable_lvalue(Node *node) {
     if (!is_lvalue(node))
         return false;
 
     Type *ty = node->ty;
     if (!ty || ty->kind == TY_ARRAY || ty->kind == TY_FUNC ||
-        ty->kind == TY_VOID || ty->is_incomplete)
+        ty->kind == TY_VOID || ty->is_incomplete ||
+        type_has_const_subobject(ty))
         return false;
     return true;
 }
@@ -407,7 +425,7 @@ static Node *new_sub(Node *lhs, Node *rhs) {
     }
 
     if (lp && rp) {
-        if (!type_compatible(lp->base, rp->base))
+        if (!type_compatible_ignoring_top_qual(lp->base, rp->base))
             error("incompatible pointer subtraction");
 
         Node *diff = new_binary(ND_SUB, lhs, rhs);
@@ -646,6 +664,12 @@ static Type *record_decl(Token **rest, Token *tok, bool is_union) {
     ty->align = align;
     ty->members = head.next;
     ty->is_incomplete = false;
+    for (Type *q = ty->qual_next; q; q = q->qual_next) {
+        q->size = ty->size;
+        q->align = ty->align;
+        q->members = ty->members;
+        q->is_incomplete = false;
+    }
     *rest = tok;
     return ty;
 }
@@ -800,10 +824,19 @@ static Type *enum_decl(Token **rest, Token *tok) {
 
 static Type *declspec(Token **rest, Token *tok) {
     Type *ty = NULL;
+    bool is_const = false;
+    bool is_volatile = false;
 
     while (is_decl_start(tok)) {
-        if (consume(&tok, tok, "const") || consume(&tok, tok, "volatile") ||
-            consume(&tok, tok, "register") || consume(&tok, tok, "inline") ||
+        if (consume(&tok, tok, "const")) {
+            is_const = true;
+            continue;
+        }
+        if (consume(&tok, tok, "volatile")) {
+            is_volatile = true;
+            continue;
+        }
+        if (consume(&tok, tok, "register") || consume(&tok, tok, "inline") ||
             consume(&tok, tok, "static") || consume(&tok, tok, "extern"))
             continue;
 
@@ -868,7 +901,8 @@ static Type *declspec(Token **rest, Token *tok) {
     }
 
     *rest = tok;
-    return ty ? ty : ty_int;
+    ty = ty ? ty : ty_int;
+    return qualify_type(ty, is_const, is_volatile);
 }
 
 static Type *adjust_param_type(Type *ty) {
@@ -959,8 +993,18 @@ static Type *type_suffix(Token **rest, Token *tok, Type *ty) {
 // special cases.
 static Type *declarator_impl(Token **rest, Token *tok, Type *ty, Token **ident,
                              bool allow_abstract) {
-    while (consume(&tok, tok, "*"))
+    while (consume(&tok, tok, "*")) {
         ty = pointer_to(ty);
+        bool ptr_const = false;
+        bool ptr_volatile = false;
+        while (equal(tok, "const") || equal(tok, "volatile")) {
+            if (consume(&tok, tok, "const"))
+                ptr_const = true;
+            else if (consume(&tok, tok, "volatile"))
+                ptr_volatile = true;
+        }
+        ty = qualify_type(ty, ptr_const, ptr_volatile);
+    }
 
     // In an abstract declarator, a leading parameter list is a function
     // suffix rather than a grouping. Grouping forms such as `(*)` still enter
@@ -1140,7 +1184,7 @@ static Node *declaration(Token **rest, Token *tok, bool is_static, bool is_exter
                     Node *member_node = new_node(ND_MEMBER);
                     member_node->lhs = var_node;
                     member_node->member = m;
-                    Node *a = new_checked_assign(member_node, e, tok);
+                    Node *a = new_initializer_assign(member_node, e, tok);
                     block_cur = block_cur->next = new_unary(ND_EXPR_STMT, a);
                     if (m) cur_mem = m->next;
                     continue;
@@ -1155,7 +1199,7 @@ static Node *declaration(Token **rest, Token *tok, bool is_static, bool is_exter
                     Node *e = assign(&tok, tok);
 
                     Node *lhs = new_unary(ND_DEREF, new_add(new_var_node(var), new_num(idx)));
-                    Node *a = new_checked_assign(lhs, e, tok);
+                    Node *a = new_initializer_assign(lhs, e, tok);
                     block_cur = block_cur->next = new_unary(ND_EXPR_STMT, a);
                     cur_idx = idx + 1;
                     continue;
@@ -1165,14 +1209,14 @@ static Node *declaration(Token **rest, Token *tok, bool is_static, bool is_exter
                 Node *e = assign(&tok, tok);
                 if (ty->kind == TY_ARRAY) {
                     Node *lhs = new_unary(ND_DEREF, new_add(new_var_node(var), new_num(cur_idx++)));
-                    Node *a = new_checked_assign(lhs, e, tok);
+                    Node *a = new_initializer_assign(lhs, e, tok);
                     block_cur = block_cur->next = new_unary(ND_EXPR_STMT, a);
                 } else if (ty->kind == TY_STRUCT && cur_mem) {
                     Node *var_node = new_var_node(var);
                     Node *member_node = new_node(ND_MEMBER);
                     member_node->lhs = var_node;
                     member_node->member = cur_mem;
-                    Node *a = new_checked_assign(member_node, e, tok);
+                    Node *a = new_initializer_assign(member_node, e, tok);
                     block_cur = block_cur->next = new_unary(ND_EXPR_STMT, a);
                     cur_mem = cur_mem->next;
                 }
@@ -1190,7 +1234,7 @@ static Node *declaration(Token **rest, Token *tok, bool is_static, bool is_exter
         // Simple scalar initializer
         Node *vnode = new_var_node(var);
         Node *rhs = assign(&tok, tok);
-        Node *a = new_checked_assign(vnode, rhs, tok);
+        Node *a = new_initializer_assign(vnode, rhs, tok);
         block_cur = block_cur->next = new_unary(ND_EXPR_STMT, a);
     } while (equal(tok, ","));
 
@@ -1463,6 +1507,25 @@ static bool is_null_pointer_constant(Node *node) {
     return is_integer(node->ty) && node->kind == ND_NUM && node->val == 0;
 }
 
+static bool qualifier_superset(Type *dst, Type *src) {
+    return dst && src &&
+           (!src->is_const || dst->is_const) &&
+           (!src->is_volatile || dst->is_volatile);
+}
+
+static bool pointed_assignment_compatible(Type *dst, Type *src) {
+    if (!dst || !src || !qualifier_superset(dst, src))
+        return false;
+    if (type_compatible_ignoring_top_qual(dst, src))
+        return true;
+
+    bool dst_void = dst->kind == TY_VOID;
+    bool src_void = src->kind == TY_VOID;
+    bool dst_func = dst->kind == TY_FUNC;
+    bool src_func = src->kind == TY_FUNC;
+    return !dst_func && !src_func && (dst_void || src_void);
+}
+
 static bool pointer_assignment_compatible(Type *dst, Type *src) {
     if (!dst || !src || dst->kind != TY_PTR)
         return false;
@@ -1475,21 +1538,11 @@ static bool pointer_assignment_compatible(Type *dst, Type *src) {
     // Array expressions decay to pointers to their first element in value
     // contexts such as assignment, initialization, return and arguments.
     if (src->kind == TY_ARRAY)
-        return type_compatible(dst->base, src->base) ||
-               (dst->base && dst->base->kind == TY_VOID);
+        return pointed_assignment_compatible(dst->base, src->base);
 
     if (src->kind != TY_PTR)
         return false;
-    if (type_compatible(dst->base, src->base))
-        return true;
-
-    // C permits object pointers to convert to/from void*. Function pointers
-    // deliberately do not participate in this conversion.
-    bool dst_void = dst->base && dst->base->kind == TY_VOID;
-    bool src_void = src->base && src->base->kind == TY_VOID;
-    bool dst_func = dst->base && dst->base->kind == TY_FUNC;
-    bool src_func = src->base && src->base->kind == TY_FUNC;
-    return !dst_func && !src_func && (dst_void || src_void);
+    return pointed_assignment_compatible(dst->base, src->base);
 }
 
 static bool assignment_compatible(Type *dst, Node *rhs) {
@@ -1522,6 +1575,13 @@ static Node *new_checked_assign(Node *lhs, Node *rhs, Token *op) {
         error_at(op->loc, "left operand is not a modifiable lvalue");
     if (!assignment_compatible(lhs->ty, rhs))
         error_at(op->loc, "incompatible types in assignment");
+    return new_binary(ND_ASSIGN, lhs, rhs);
+}
+
+static Node *new_initializer_assign(Node *lhs, Node *rhs, Token *at) {
+    add_type(lhs);
+    if (!assignment_compatible(lhs->ty, rhs))
+        error_at(at->loc, "incompatible types in initializer");
     return new_binary(ND_ASSIGN, lhs, rhs);
 }
 
@@ -1577,7 +1637,7 @@ static bool pointer_pair_compatible(Type *a, Type *b, bool relational_only) {
     if (!a || !b || a->kind != TY_PTR || b->kind != TY_PTR)
         return false;
 
-    if (type_compatible(a->base, b->base)) {
+    if (type_compatible_ignoring_top_qual(a->base, b->base)) {
         if (!relational_only)
             return true;
         return a->base && a->base->kind != TY_VOID && a->base->kind != TY_FUNC;
@@ -1645,15 +1705,18 @@ static Type *conditional_result_type(Node *then, Node *els, Token *question) {
         return et;
 
     if (tp && ep) {
-        if (type_compatible(tt->base, et->base))
-            return tt;
+        bool merged_const = tt->base->is_const || et->base->is_const;
+        bool merged_volatile = tt->base->is_volatile || et->base->is_volatile;
+
+        if (type_compatible_ignoring_top_qual(tt->base, et->base))
+            return pointer_to(qualify_type(tt->base, merged_const, merged_volatile));
 
         bool t_void = tt->base && tt->base->kind == TY_VOID;
         bool e_void = et->base && et->base->kind == TY_VOID;
         bool t_func = tt->base && tt->base->kind == TY_FUNC;
         bool e_func = et->base && et->base->kind == TY_FUNC;
         if (!t_func && !e_func && (t_void || e_void))
-            return pointer_to(ty_void);
+            return pointer_to(qualify_type(ty_void, merged_const, merged_volatile));
     }
 
     error_at(question->loc, "incompatible conditional operands");
@@ -2245,10 +2308,17 @@ static void resolve_gotos(void) {
     }
 }
 
-static bool type_compatible(Type *a, Type *b) {
+static Type *type_identity(Type *ty) {
+    return ty && ty->origin ? ty->origin : ty;
+}
+
+static bool type_compatible_impl(Type *a, Type *b, bool ignore_top_qual) {
     if (a == b)
         return true;
     if (!a || !b || a->kind != b->kind)
+        return false;
+    if (!ignore_top_qual &&
+        (a->is_const != b->is_const || a->is_volatile != b->is_volatile))
         return false;
 
     switch (a->kind) {
@@ -2258,21 +2328,20 @@ static bool type_compatible(Type *a, Type *b) {
     case TY_LONG:
         return a->is_unsigned == b->is_unsigned;
     case TY_PTR:
-        return type_compatible(a->base, b->base);
+        return type_compatible_impl(a->base, b->base, false);
     case TY_ARRAY:
-        return type_compatible(a->base, b->base) &&
+        return type_compatible_impl(a->base, b->base, false) &&
                (!a->array_len || !b->array_len || a->array_len == b->array_len);
     case TY_STRUCT:
-        // Tagged records are completed in place, so pointer identity captures
-        // C record-type identity. Distinct anonymous records are incompatible.
-        return false;
+        return type_identity(a) == type_identity(b);
     case TY_FUNC: {
-        if (!type_compatible(a->return_ty, b->return_ty))
+        if (!type_compatible_impl(a->return_ty, b->return_ty, false))
             return false;
 
-        // An old-style f() declaration carries no parameter information. Keep
-        // it compatible with a real prototype so the stronger declaration can
-        // be retained, matching the compiler's existing C11-era behavior.
+        // Old-style f() remains compatible with a prototype. For prototype
+        // comparison, C ignores only the top-level qualifiers on each parameter
+        // after array/function parameter adjustment; nested pointer qualifiers
+        // remain significant.
         if (!a->has_prototype || !b->has_prototype)
             return true;
         if (a->is_variadic != b->is_variadic)
@@ -2281,7 +2350,7 @@ static bool type_compatible(Type *a, Type *b) {
         Obj *pa = a->params;
         Obj *pb = b->params;
         while (pa && pb) {
-            if (!type_compatible(pa->ty, pb->ty))
+            if (!type_compatible_impl(pa->ty, pb->ty, true))
                 return false;
             pa = pa->param_next;
             pb = pb->param_next;
@@ -2291,6 +2360,14 @@ static bool type_compatible(Type *a, Type *b) {
     default:
         return true;
     }
+}
+
+static bool type_compatible(Type *a, Type *b) {
+    return type_compatible_impl(a, b, false);
+}
+
+static bool type_compatible_ignoring_top_qual(Type *a, Type *b) {
+    return type_compatible_impl(a, b, true);
 }
 
 static Type *composite_redecl_type(Type *old_ty, Type *new_ty) {
