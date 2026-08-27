@@ -946,12 +946,17 @@ static void gen_stmt(Node *node) {
     if (node->kind == ND_SWITCH) {
         int c = count();
         gen_expr(node->cond);
+        cast_value(node->cond->ty, node->ty);
 
         bool has_default = false;
         int case_idx = 0;
         for (Node *n = node->then->body; n; n = n->next) {
             if (n->kind == ND_CASE) {
-                printf("  cmp $%" PRId64 ", %%rax\n", n->val);
+                // Materialize the normalized case value in a full register.
+                // This avoids x86-64 cmp-immediate sign-extension changing the
+                // meaning of values such as UINT_MAX.
+                printf("  movabs $%" PRId64 ", %%rdi\n", n->val);
+                printf("  cmp %%rdi, %%rax\n");
                 printf("  je .L.case.%d.%d\n", c, case_idx++);
             } else if (n->kind == ND_DEFAULT) {
                 has_default = true;

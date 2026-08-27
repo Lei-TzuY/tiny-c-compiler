@@ -190,6 +190,22 @@ static Node *new_checked_assign(Node *lhs, Node *rhs, Token *op);
 
 static Type *current_return_ty;
 
+typedef struct CaseValue CaseValue;
+struct CaseValue {
+    int64_t val;
+    CaseValue *next;
+};
+
+typedef struct SwitchContext SwitchContext;
+struct SwitchContext {
+    Type *ty;
+    CaseValue *cases;
+    bool has_default;
+    SwitchContext *prev;
+};
+
+static SwitchContext *current_switch;
+
 static bool is_typename(Token *tok) {
     if (equal(tok, "int") || equal(tok, "char") || equal(tok, "void") ||
         equal(tok, "enum") || equal(tok, "struct") || equal(tok, "union") ||
@@ -1250,25 +1266,66 @@ static Node *stmt(Token **rest, Token *tok) {
     }
 
     if (equal(tok, "switch")) {
+        Token *switch_tok = tok;
         Node *node = new_node(ND_SWITCH);
         tok = skip(tok->next, "(");
         node->cond = expr(&tok, tok);
+        add_type(node->cond);
+        if (!is_integer(node->cond->ty))
+            error_at(switch_tok->loc, "switch condition must have integer type");
+
+        // The controlling expression undergoes integer promotion.  Using int
+        // as the second operand requests exactly that promotion for the small
+        // integer types supported by this LP64 target.
+        node->ty = get_common_type(node->cond->ty, ty_int);
         tok = skip(tok, ")");
+
+        SwitchContext ctx = {};
+        ctx.ty = node->ty;
+        ctx.prev = current_switch;
+        current_switch = &ctx;
         node->then = stmt(rest, tok);
+        current_switch = ctx.prev;
         return node;
     }
 
     if (equal(tok, "case")) {
-        if (tok->next->kind != TK_NUM)
-            error_at(tok->next->loc, "expected integer constant after 'case'");
+        Token *case_tok = tok;
+        if (!current_switch)
+            error_at(case_tok->loc, "case label is not within a switch statement");
+
+        Node *value = ternary(&tok, tok->next);
+        add_type(value);
+        if (!is_integer(value->ty))
+            error_at(case_tok->loc, "case label does not reduce to an integer constant expression");
+
+        int64_t val = eval_const_expr(value);
+        val = cast_const_integer(val, current_switch->ty);
+
+        for (CaseValue *cv = current_switch->cases; cv; cv = cv->next)
+            if (cv->val == val)
+                error_at(case_tok->loc, "duplicate case value");
+
+        CaseValue *cv = calloc(1, sizeof(CaseValue));
+        cv->val = val;
+        cv->next = current_switch->cases;
+        current_switch->cases = cv;
+
+        tok = skip(tok, ":");
         Node *node = new_node(ND_CASE);
-        node->val = tok->next->val;
-        tok = skip(tok->next->next, ":");
+        node->val = val;
         *rest = tok;
         return node;
     }
 
     if (equal(tok, "default")) {
+        Token *default_tok = tok;
+        if (!current_switch)
+            error_at(default_tok->loc, "default label is not within a switch statement");
+        if (current_switch->has_default)
+            error_at(default_tok->loc, "multiple default labels in one switch");
+        current_switch->has_default = true;
+
         tok = skip(tok->next, ":");
         Node *node = new_node(ND_DEFAULT);
         *rest = tok;
