@@ -2330,6 +2330,10 @@ static Type *parse_static_image_initializer(Obj *var, Token **rest, Token *tok,
 // braces. Zero the complete subobject first, then overwrite explicitly supplied
 // positional leaves. In unbraced mode the helper consumes only separators that
 // belong inside the subobject and leaves the next enclosing comma untouched.
+static void parse_automatic_designated_initializer(Node **tail, Node *lhs,
+                                                    Type *ty, Token **rest,
+                                                    Token *tok, Token *where);
+
 static void parse_automatic_aggregate_subobject(Node **tail, Node *lhs, Type *ty,
                                                  Token **rest, Token *tok,
                                                  Token *where) {
@@ -2338,9 +2342,141 @@ static void parse_automatic_aggregate_subobject(Node **tail, Node *lhs, Type *ty
     if (ty->kind == TY_ARRAY && ty->array_len == 0)
         error_at(where->loc, "nested incomplete arrays are not supported");
 
+    // Automatic aggregates are zero-initialized before their explicit
+    // initializer-list entries are applied.  This is especially important for
+    // repeated nested designators: later writes must preserve earlier siblings
+    // rather than re-zeroing the whole enclosing subobject.
     append_zero_initializer(tail, lhs, ty, where);
     bool braced = consume(&tok, tok, "{");
 
+    // A braced nested initializer is a real initializer-list, so it may contain
+    // designators at any entry.  Reuse the same designator-path parser used by
+    // top-level automatic initializers and then lower the resolved path to an
+    // lvalue rooted at this nested subobject.
+    if (braced) {
+        if (ty->kind == TY_ARRAY) {
+            int next_index = 0;
+            bool first = true;
+
+            while (!equal(tok, "}")) {
+                if (!first) {
+                    tok = skip(tok, ",");
+                    if (equal(tok, "}"))
+                        break;
+                }
+                first = false;
+
+                if (equal(tok, "[") || equal(tok, ".")) {
+                    InitializerDesignatorPath path =
+                        parse_initializer_designator_path(&tok, tok, ty);
+                    if (path.first_index < 0)
+                        error_at(where->loc,
+                                 "array initializer designator must start with an index");
+
+                    int index = path.first_index;
+                    AutomaticDesignatedTarget target =
+                        apply_automatic_designator_path(lhs, ty, &path);
+                    free_initializer_designator_path(&path);
+
+                    parse_automatic_designated_initializer(tail, target.lhs,
+                                                            target.ty, &tok, tok,
+                                                            where);
+                    next_index = index + 1;
+                    continue;
+                }
+
+                if (next_index >= ty->array_len)
+                    error_at(tok->loc, "excess elements in array initializer");
+
+                int index = next_index++;
+                Node *child = new_unary(ND_DEREF,
+                                        new_add(lhs, new_num(index)));
+                if (append_automatic_string_array_initializer(tail, child,
+                                                               ty->base,
+                                                               &tok, tok))
+                    continue;
+                if (is_initializer_aggregate(ty->base)) {
+                    parse_automatic_aggregate_subobject(tail, child, ty->base,
+                                                         &tok, tok, where);
+                    continue;
+                }
+
+                Node *rhs = assign(&tok, tok);
+                Node *a = new_initializer_assign(child, rhs, where);
+                *tail = (*tail)->next = new_unary(ND_EXPR_STMT, a);
+            }
+        } else {
+            Member *next_member = ty->members;
+            bool first = true;
+            int initialized_union_members = 0;
+
+            while (!equal(tok, "}")) {
+                if (!first) {
+                    tok = skip(tok, ",");
+                    if (equal(tok, "}"))
+                        break;
+                }
+                first = false;
+
+                if (ty->is_union && initialized_union_members)
+                    error_at(tok->loc, "excess elements in union initializer");
+
+                if (equal(tok, ".") || equal(tok, "[")) {
+                    InitializerDesignatorPath path =
+                        parse_initializer_designator_path(&tok, tok, ty);
+                    if (!path.first_member)
+                        error_at(where->loc,
+                                 "record initializer designator must start with a member");
+
+                    Member *member = path.first_member;
+                    AutomaticDesignatedTarget target =
+                        apply_automatic_designator_path(lhs, ty, &path);
+                    free_initializer_designator_path(&path);
+
+                    parse_automatic_designated_initializer(tail, target.lhs,
+                                                            target.ty, &tok, tok,
+                                                            where);
+                    if (ty->is_union)
+                        initialized_union_members++;
+                    next_member = member->next;
+                    continue;
+                }
+
+                if (!next_member)
+                    error_at(tok->loc, "excess elements in record initializer");
+
+                Node *child = new_node(ND_MEMBER);
+                child->lhs = lhs;
+                child->member = next_member;
+                if (append_automatic_string_array_initializer(tail, child,
+                                                               next_member->ty,
+                                                               &tok, tok)) {
+                    // String literal consumed as one member initializer.
+                } else if (is_initializer_aggregate(next_member->ty)) {
+                    parse_automatic_aggregate_subobject(tail, child,
+                                                         next_member->ty,
+                                                         &tok, tok, where);
+                } else {
+                    Node *rhs = assign(&tok, tok);
+                    Node *a = new_initializer_assign(child, rhs, where);
+                    *tail = (*tail)->next = new_unary(ND_EXPR_STMT, a);
+                }
+
+                if (ty->is_union)
+                    initialized_union_members++;
+                next_member = next_member->next;
+            }
+        }
+
+        if (equal(tok, ","))
+            tok = tok->next;
+        *rest = skip(tok, "}");
+        return;
+    }
+
+    // Brace elision remains positional.  A designator is part of an
+    // initializer-list grammar and therefore requires braces at this nested
+    // level; direct chained designators are handled by the enclosing list.
     if (ty->kind == TY_ARRAY) {
         for (int i = 0; i < ty->array_len; i++) {
             if (i > 0) {
@@ -2351,7 +2487,8 @@ static void parse_automatic_aggregate_subobject(Node **tail, Node *lhs, Type *ty
                     break;
             }
             if (equal(tok, "[") || equal(tok, "."))
-                error_at(tok->loc, "designators in nested aggregate initializers are not yet supported");
+                error_at(tok->loc,
+                         "designators in brace-elided nested aggregates require braces");
 
             Node *child = new_unary(ND_DEREF, new_add(lhs, new_num(i)));
             if (append_automatic_string_array_initializer(tail, child, ty->base,
@@ -2378,7 +2515,8 @@ static void parse_automatic_aggregate_subobject(Node **tail, Node *lhs, Type *ty
                     break;
             }
             if (equal(tok, "[") || equal(tok, "."))
-                error_at(tok->loc, "designators in nested aggregate initializers are not yet supported");
+                error_at(tok->loc,
+                         "designators in brace-elided nested aggregates require braces");
 
             Node *child = new_node(ND_MEMBER);
             child->lhs = lhs;
@@ -2402,16 +2540,8 @@ static void parse_automatic_aggregate_subobject(Node **tail, Node *lhs, Type *ty
         }
     }
 
-    if (braced) {
-        if (equal(tok, ","))
-            tok = tok->next;
-        *rest = skip(tok, "}");
-    } else {
-        *rest = tok;
-    }
-}
-
-static void parse_automatic_designated_initializer(Node **tail, Node *lhs, Type *ty,
+    *rest = tok;
+}static void parse_automatic_designated_initializer(Node **tail, Node *lhs, Type *ty,
                                                     Token **rest, Token *tok,
                                                     Token *where) {
     if (append_automatic_string_array_initializer(tail, lhs, ty, rest, tok))
