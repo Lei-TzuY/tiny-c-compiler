@@ -17,7 +17,27 @@ jobs:
         with:
           ref: agent/semantic-assignments
       - name: Apply migration
-        run: python3 migration_semantic_assignments.py
+        run: |
+          sed -i 's/assert count == 3, count/assert count == 1, count/' migration_semantic_assignments.py
+          python3 migration_semantic_assignments.py
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          p = Path('parse.c')
+          s = p.read_text()
+          pattern = re.compile(r'(?m)^(?P<i>\s*)if \(expected\) \{\n(?P=i)    if \(is_numeric\(arg->ty\) && is_numeric\(expected->ty\) &&\n(?P=i)        arg->ty != expected->ty\) \{')
+          def repl(m):
+              i = m.group('i')
+              return (f'{i}if (expected) {{\n'
+                      f'{i}    if (!assignment_compatible(expected->ty, arg))\n'
+                      f'{i}        error_at(tok->loc, "incompatible argument type");\n'
+                      f'{i}    if (is_numeric(arg->ty) && is_numeric(expected->ty) &&\n'
+                      f'{i}        arg->ty != expected->ty) {{')
+          s, n = pattern.subn(repl, s)
+          if n != 2:
+              raise SystemExit(f'expected 2 remaining fixed-argument call sites, got {n}')
+          p.write_text(s)
+          PY
       - name: Test compiler
         run: make clean && make test
       - name: Commit verified implementation
