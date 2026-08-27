@@ -41,6 +41,7 @@ test: minicc
 	bash ./test/escape_sequences.sh
 	bash ./test/constant_expressions.sh
 	bash ./test/static_integer_initializers.sh
+	bash ./test/static_floating_initializers.sh
 	bash ./test/static_address_initializers.sh
 	bash ./test/aggregate_static_relocations.sh
 	bash ./test/union_initializers.sh

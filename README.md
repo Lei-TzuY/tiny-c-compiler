@@ -49,3 +49,5 @@ The compiler is designed as an educational systems-programming project rather th
 - Character-array string initialization is supported recursively inside automatic/static aggregates, including struct/union members, multidimensional character arrays, and designated subobjects, with C-compatible NUL truncation and zero-fill.
 
 - Small INTEGER-class records use the SysV AMD64 by-value ABI across direct/indirect calls and returns, including whole-record stack fallback when remaining GP registers cannot hold every eightbyte and interoperability with host-compiled C.
+
+Static-storage floating scalars and aggregate floating subobjects accept arithmetic constant-expression initializers, including casts, conditionals, and mixed integer/floating arithmetic.
