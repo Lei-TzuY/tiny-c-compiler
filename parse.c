@@ -681,83 +681,178 @@ static int64_t cast_const_integer(int64_t val, Type *ty) {
     if (ty->kind == TY_BOOL)
         return val != 0;
 
-    if (ty->size == 1)
-        return ty->is_unsigned ? (uint8_t)val : (int8_t)val;
-    if (ty->size == 2)
-        return ty->is_unsigned ? (uint16_t)val : (int16_t)val;
-    if (ty->size == 4)
-        return ty->is_unsigned ? (uint32_t)val : (int32_t)val;
+    if (ty->size == 1) {
+        if (ty->is_unsigned) return (uint8_t)val;
+        return (int8_t)val;
+    }
+    if (ty->size == 2) {
+        if (ty->is_unsigned) return (uint16_t)val;
+        return (int16_t)val;
+    }
+    if (ty->size == 4) {
+        if (ty->is_unsigned) return (uint32_t)val;
+        return (int32_t)val;
+    }
     return val;
+}
+
+static Type *const_binary_type(Node *node) {
+    add_type(node->lhs);
+    add_type(node->rhs);
+    if (!is_integer(node->lhs->ty) || !is_integer(node->rhs->ty))
+        error("integer operands required in integer constant expression");
+    return get_common_type(node->lhs->ty, node->rhs->ty);
 }
 
 static int64_t eval_const_expr(Node *node) {
     if (!node)
         error("expected integer constant expression");
 
+    add_type(node);
+
     switch (node->kind) {
     case ND_NUM:
-        if (node->ty && is_flonum(node->ty))
+        if (!node->ty || !is_integer(node->ty))
             error("floating value is not an integer constant expression");
-        return node->val;
+        return cast_const_integer(node->val, node->ty);
+
+    case ND_NEG: {
+        if (!is_integer(node->ty))
+            error("floating value is not an integer constant expression");
+        int64_t val = cast_const_integer(eval_const_expr(node->lhs), node->ty);
+        uint64_t bits = 0 - (uint64_t)val;
+        return cast_const_integer((int64_t)bits, node->ty);
+    }
+
     case ND_ADD:
-        return eval_const_expr(node->lhs) + eval_const_expr(node->rhs);
     case ND_SUB:
-        return eval_const_expr(node->lhs) - eval_const_expr(node->rhs);
-    case ND_MUL:
-        return eval_const_expr(node->lhs) * eval_const_expr(node->rhs);
-    case ND_DIV: {
-        int64_t lhs = eval_const_expr(node->lhs);
-        int64_t rhs = eval_const_expr(node->rhs);
-        if (!rhs)
-            error("division by zero in integer constant expression");
-        return lhs / rhs;
+    case ND_MUL: {
+        if (!is_integer(node->ty))
+            error("non-integer arithmetic in integer constant expression");
+        Type *ty = const_binary_type(node);
+        int64_t lhs = cast_const_integer(eval_const_expr(node->lhs), ty);
+        int64_t rhs = cast_const_integer(eval_const_expr(node->rhs), ty);
+        uint64_t bits;
+        if (node->kind == ND_ADD)
+            bits = (uint64_t)lhs + (uint64_t)rhs;
+        else if (node->kind == ND_SUB)
+            bits = (uint64_t)lhs - (uint64_t)rhs;
+        else
+            bits = (uint64_t)lhs * (uint64_t)rhs;
+        return cast_const_integer((int64_t)bits, ty);
     }
+
+    case ND_DIV:
     case ND_MOD: {
-        int64_t lhs = eval_const_expr(node->lhs);
-        int64_t rhs = eval_const_expr(node->rhs);
+        Type *ty = const_binary_type(node);
+        int64_t lhs = cast_const_integer(eval_const_expr(node->lhs), ty);
+        int64_t rhs = cast_const_integer(eval_const_expr(node->rhs), ty);
         if (!rhs)
-            error("modulo by zero in integer constant expression");
-        return lhs % rhs;
+            error(node->kind == ND_DIV
+                      ? "division by zero in integer constant expression"
+                      : "modulo by zero in integer constant expression");
+
+        if (ty->is_unsigned) {
+            uint64_t uleft = (uint64_t)lhs;
+            uint64_t uright = (uint64_t)rhs;
+            uint64_t bits = node->kind == ND_DIV ? uleft / uright
+                                                 : uleft % uright;
+            return cast_const_integer((int64_t)bits, ty);
+        }
+
+        if (rhs == -1 &&
+            ((ty->size == 4 && lhs == INT32_MIN) ||
+             (ty->size == 8 && lhs == INT64_MIN)))
+            error("signed division overflow in integer constant expression");
+
+        int64_t val = node->kind == ND_DIV ? lhs / rhs : lhs % rhs;
+        return cast_const_integer(val, ty);
     }
+
     case ND_BITAND:
-        return eval_const_expr(node->lhs) & eval_const_expr(node->rhs);
     case ND_BITOR:
-        return eval_const_expr(node->lhs) | eval_const_expr(node->rhs);
-    case ND_BITXOR:
-        return eval_const_expr(node->lhs) ^ eval_const_expr(node->rhs);
-    case ND_BITNOT:
-        return ~eval_const_expr(node->lhs);
+    case ND_BITXOR: {
+        Type *ty = const_binary_type(node);
+        uint64_t lhs = (uint64_t)cast_const_integer(eval_const_expr(node->lhs), ty);
+        uint64_t rhs = (uint64_t)cast_const_integer(eval_const_expr(node->rhs), ty);
+        uint64_t bits = node->kind == ND_BITAND ? lhs & rhs
+                        : node->kind == ND_BITOR ? lhs | rhs
+                                                 : lhs ^ rhs;
+        return cast_const_integer((int64_t)bits, ty);
+    }
+
+    case ND_BITNOT: {
+        if (!is_integer(node->ty))
+            error("integer operand required in integer constant expression");
+        int64_t val = cast_const_integer(eval_const_expr(node->lhs), node->ty);
+        return cast_const_integer((int64_t)~(uint64_t)val, node->ty);
+    }
+
     case ND_SHL:
     case ND_SHR: {
-        int64_t lhs = eval_const_expr(node->lhs);
+        add_type(node->lhs);
+        add_type(node->rhs);
+        if (!is_integer(node->lhs->ty) || !is_integer(node->rhs->ty))
+            error("integer operands required in integer constant expression");
+
+        Type *left_ty = node->ty;
+        int64_t lhs = cast_const_integer(eval_const_expr(node->lhs), left_ty);
         int64_t rhs = eval_const_expr(node->rhs);
-        if (rhs < 0 || rhs >= 64)
+        if (!node->rhs->ty->is_unsigned && rhs < 0)
             error("invalid shift count in integer constant expression");
-        return node->kind == ND_SHL ? (lhs << rhs) : (lhs >> rhs);
+        uint64_t count = (uint64_t)rhs;
+        int width = left_ty->size * 8;
+        if (count >= (uint64_t)width)
+            error("invalid shift count in integer constant expression");
+
+        if (node->kind == ND_SHL)
+            return cast_const_integer((int64_t)((uint64_t)lhs << count), left_ty);
+        if (left_ty->is_unsigned)
+            return cast_const_integer((int64_t)((uint64_t)lhs >> count), left_ty);
+        return cast_const_integer((int64_t)(lhs >> count), left_ty);
     }
+
     case ND_EQ:
-        return eval_const_expr(node->lhs) == eval_const_expr(node->rhs);
     case ND_NE:
-        return eval_const_expr(node->lhs) != eval_const_expr(node->rhs);
     case ND_LT:
-        return eval_const_expr(node->lhs) < eval_const_expr(node->rhs);
-    case ND_LE:
-        return eval_const_expr(node->lhs) <= eval_const_expr(node->rhs);
+    case ND_LE: {
+        Type *ty = const_binary_type(node);
+        int64_t lhs = cast_const_integer(eval_const_expr(node->lhs), ty);
+        int64_t rhs = cast_const_integer(eval_const_expr(node->rhs), ty);
+        if (node->kind == ND_EQ)
+            return (uint64_t)lhs == (uint64_t)rhs;
+        if (node->kind == ND_NE)
+            return (uint64_t)lhs != (uint64_t)rhs;
+        if (ty->is_unsigned)
+            return node->kind == ND_LT ? (uint64_t)lhs < (uint64_t)rhs
+                                       : (uint64_t)lhs <= (uint64_t)rhs;
+        return node->kind == ND_LT ? lhs < rhs : lhs <= rhs;
+    }
+
     case ND_NOT:
         return !eval_const_expr(node->lhs);
+
     case ND_LOGAND: {
         int64_t lhs = eval_const_expr(node->lhs);
         return lhs ? !!eval_const_expr(node->rhs) : 0;
     }
+
     case ND_LOGOR: {
         int64_t lhs = eval_const_expr(node->lhs);
         return lhs ? 1 : !!eval_const_expr(node->rhs);
     }
-    case ND_TERNARY:
-        return eval_const_expr(node->cond) ? eval_const_expr(node->then)
-                                           : eval_const_expr(node->els);
+
+    case ND_TERNARY: {
+        Node *selected = eval_const_expr(node->cond) ? node->then : node->els;
+        int64_t val = eval_const_expr(selected);
+        if (!is_integer(node->ty))
+            error("non-integer conditional in integer constant expression");
+        return cast_const_integer(val, node->ty);
+    }
+
     case ND_CAST:
         return cast_const_integer(eval_const_expr(node->lhs), node->ty);
+
     default:
         error("not an integer constant expression");
     }
@@ -975,11 +1070,27 @@ static Type *type_suffix(Token **rest, Token *tok, Type *ty) {
         return func_params(rest, tok->next, ty);
 
     if (equal(tok, "[")) {
+        Token *bracket = tok;
         tok = tok->next;
         int len = 0;
-        if (tok->kind == TK_NUM) {
-            len = tok->val;
-            tok = tok->next;
+        if (!equal(tok, "]")) {
+            Node *bound = ternary(&tok, tok);
+            add_type(bound);
+            if (!is_integer(bound->ty))
+                error_at(bracket->loc, "array bound must have integer type");
+
+            int64_t raw = eval_const_expr(bound);
+            if (bound->ty->is_unsigned) {
+                uint64_t val = (uint64_t)cast_const_integer(raw, bound->ty);
+                if (val == 0 || val > INT32_MAX)
+                    error_at(bracket->loc, "array bound is out of range");
+                len = (int)val;
+            } else {
+                int64_t val = cast_const_integer(raw, bound->ty);
+                if (val <= 0 || val > INT32_MAX)
+                    error_at(bracket->loc, "array bound is out of range");
+                len = (int)val;
+            }
         }
         tok = skip(tok, "]");
         ty = type_suffix(rest, tok, ty);

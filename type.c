@@ -228,13 +228,15 @@ void add_type(Node *node) {
     case ND_NEG:
         if (!is_numeric(node->lhs->ty))
             error("numeric operand required");
-        node->ty = node->lhs->ty;
+        node->ty = is_integer(node->lhs->ty)
+                     ? integer_promotion(node->lhs->ty)
+                     : node->lhs->ty;
         return;
 
     case ND_BITNOT:
         if (!is_integer(node->lhs->ty))
             error("integer operand required");
-        node->ty = node->lhs->ty;
+        node->ty = integer_promotion(node->lhs->ty);
         return;
 
     case ND_EQ:

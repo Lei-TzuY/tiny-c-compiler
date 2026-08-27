@@ -38,6 +38,7 @@ test: minicc
 	bash ./test/uint64_fp_conversions.sh
 	bash ./test/integer_literals.sh
 	bash ./test/escape_sequences.sh
+	bash ./test/constant_expressions.sh
 
 clean:
 	rm -f minicc *.o *~ tmp*
