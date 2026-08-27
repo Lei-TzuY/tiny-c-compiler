@@ -31,3 +31,5 @@ The test target builds `minicc`, compiles small C programs with it, links them w
 ## Notes
 
 The compiler is designed as an educational systems-programming project rather than a packaged commercial product.
+
+- Function calls share prototype-aware argument coercion and C default argument promotions for variadic and unprototyped calls.

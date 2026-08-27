@@ -2055,6 +2055,68 @@ static Node *unary(Token **rest, Token *tok) {
     return postfix(rest, tok);
 }
 
+static Type *default_argument_promotion(Type *ty) {
+    if (!ty)
+        return NULL;
+    if (ty->kind == TY_FLOAT)
+        return ty_double;
+    if (ty->kind == TY_BOOL || ty->kind == TY_CHAR || ty->kind == TY_SHORT)
+        return ty_int;
+    return NULL;
+}
+
+static Node *cast_call_argument(Node *arg, Type *ty) {
+    if (!ty || arg->ty == ty)
+        return arg;
+    Node *cast = new_unary(ND_CAST, arg);
+    cast->ty = ty;
+    return cast;
+}
+
+// Parse a call's comma-separated argument list after the opening parenthesis.
+// All call forms use this one path so prototype arity, assignment compatibility,
+// numeric coercion, and default argument promotions cannot drift apart.
+static Node *parse_call_arguments(Token **rest, Token *tok, Type *fty) {
+    Obj *expected = fty && fty->has_prototype ? fty->params : NULL;
+    bool has_prototype = fty && fty->has_prototype;
+    bool variadic = fty && fty->is_variadic;
+
+    Node head = {};
+    Node *cur = &head;
+    while (!equal(tok, ")")) {
+        if (cur != &head)
+            tok = skip(tok, ",");
+
+        if (has_prototype && !expected && !variadic)
+            error_at(tok->loc, "too many arguments");
+
+        Node *arg = assign(&tok, tok);
+        add_type(arg);
+
+        if (expected) {
+            if (!assignment_compatible(expected->ty, arg))
+                error_at(tok->loc, "incompatible argument type");
+            if (is_numeric(arg->ty) && is_numeric(expected->ty))
+                arg = cast_call_argument(arg, expected->ty);
+            expected = expected->param_next;
+        } else if (!has_prototype || variadic) {
+            // C default argument promotions apply to every argument of an
+            // unprototyped call and to the variadic tail after fixed params.
+            Type *promoted = default_argument_promotion(arg->ty);
+            if (promoted)
+                arg = cast_call_argument(arg, promoted);
+        }
+
+        cur = cur->next = arg;
+    }
+
+    if (has_prototype && expected)
+        error_at(tok->loc, "too few arguments");
+
+    *rest = skip(tok, ")");
+    return head.next;
+}
+
 static Node *indirect_funcall(Token **rest, Token *tok, Node *callee) {
     add_type(callee);
 
@@ -2072,56 +2134,10 @@ static Node *indirect_funcall(Token **rest, Token *tok, Node *callee) {
     node->funcname = NULL;
     node->lhs = callee;
     node->ty = fty->return_ty;
+
     tok = skip(tok, "(");
-
-    Obj *expected = fty->params;
-    bool variadic = fty->is_variadic;
-    bool has_prototype = fty->has_prototype;
-    Node head = {};
-    Node *cur = &head;
-
-    while (!equal(tok, ")")) {
-        if (cur != &head)
-            tok = skip(tok, ",");
-
-        if (has_prototype && !expected && !variadic)
-            error_at(tok->loc, "too many arguments");
-
-        Node *arg = assign(&tok, tok);
-        add_type(arg);
-
-        if (expected) {
-            if (!assignment_compatible(expected->ty, arg))
-                error_at(tok->loc, "incompatible argument type");
-            if (is_numeric(arg->ty) && is_numeric(expected->ty) &&
-                arg->ty != expected->ty) {
-                Node *cast = new_unary(ND_CAST, arg);
-                cast->ty = expected->ty;
-                arg = cast;
-            }
-            expected = expected->param_next;
-        } else if (variadic) {
-            Type *promoted = NULL;
-            if (arg->ty->kind == TY_FLOAT)
-                promoted = ty_double;
-            else if (arg->ty->kind == TY_BOOL || arg->ty->kind == TY_CHAR ||
-                     arg->ty->kind == TY_SHORT)
-                promoted = ty_int;
-            if (promoted) {
-                Node *cast = new_unary(ND_CAST, arg);
-                cast->ty = promoted;
-                arg = cast;
-            }
-        }
-
-        cur = cur->next = arg;
-    }
-
-    if (has_prototype && expected)
-        error_at(tok->loc, "too few arguments");
-
-    *rest = skip(tok, ")");
-    node->args = head.next;
+    node->args = parse_call_arguments(&tok, tok, fty);
+    *rest = tok;
     return node;
 }
 
@@ -2233,132 +2249,26 @@ static Node *primary(Token **rest, Token *tok) {
             return new_num(ec->val);
         }
 
-        // Function call
+        // Direct function calls keep a named callee for codegen. A variable
+        // of function-pointer type falls through to ND_VAR and is handled by
+        // the ordinary postfix-call path, sharing the same argument parser.
         if (equal(tok->next, "(")) {
-            // Check if this is a variable (function pointer) or a direct call
-            Obj *var = find_var(tok);
-
-            if (var && !var->is_function) {
-                // Indirect call through a function-pointer variable. If the
-                // pointer carries a prototype, use it for scalar coercion and
-                // default promotions of variadic arguments.
+            Obj *fn = find_var(tok);
+            if (!fn || fn->is_function) {
                 Node *node = new_node(ND_FUNCALL);
-                node->funcname = NULL; // NULL = indirect call
-                node->lhs = new_var_node(var); // callee expression
+                node->funcname = strndup(tok->loc, tok->len);
 
                 Type *fty = NULL;
-                if (var->ty->kind == TY_PTR && var->ty->base &&
-                    var->ty->base->kind == TY_FUNC) {
-                    fty = var->ty->base;
+                if (fn && fn->ty && fn->ty->kind == TY_FUNC) {
+                    fty = fn->ty;
                     node->ty = fty->return_ty;
                 }
+
                 tok = skip(tok->next, "(");
-
-                Obj *expected = fty ? fty->params : NULL;
-                bool variadic = fty && fty->is_variadic;
-                bool has_prototype = fty && fty->has_prototype;
-                Node head = {};
-                Node *cur = &head;
-                while (!equal(tok, ")")) {
-                    if (cur != &head)
-                        tok = skip(tok, ",");
-
-                    if (has_prototype && !expected && !variadic)
-                        error_at(tok->loc, "too many arguments");
-
-                    Node *arg = assign(&tok, tok);
-                    add_type(arg);
-
-                    if (expected) {
-                        if (!assignment_compatible(expected->ty, arg))
-                            error_at(tok->loc, "incompatible argument type");
-                        if (is_numeric(arg->ty) && is_numeric(expected->ty) &&
-                            arg->ty != expected->ty) {
-                            Node *cast = new_unary(ND_CAST, arg);
-                            cast->ty = expected->ty;
-                            arg = cast;
-                        }
-                        expected = expected->param_next;
-                    } else if (variadic) {
-                        Type *promoted = NULL;
-                        if (arg->ty->kind == TY_FLOAT)
-                            promoted = ty_double;
-                        else if (arg->ty->kind == TY_BOOL || arg->ty->kind == TY_CHAR ||
-                                 arg->ty->kind == TY_SHORT)
-                            promoted = ty_int;
-                        if (promoted) {
-                            Node *cast = new_unary(ND_CAST, arg);
-                            cast->ty = promoted;
-                            arg = cast;
-                        }
-                    }
-
-                    cur = cur->next = arg;
-                }
-                if (has_prototype && expected)
-                    error_at(tok->loc, "too few arguments");
-
-                *rest = skip(tok, ")");
-                node->args = head.next;
+                node->args = parse_call_arguments(&tok, tok, fty);
+                *rest = tok;
                 return node;
             }
-
-            // Direct call
-            Node *node = new_node(ND_FUNCALL);
-            node->funcname = strndup(tok->loc, tok->len);
-            if (var && var->is_function && var->ty->kind == TY_FUNC)
-                node->ty = var->ty->return_ty;
-            tok = skip(tok->next, "(");
-
-            Obj *expected = (var && var->is_function) ? var->func_params : NULL;
-            bool variadic = var && var->is_function && var->func_variadic;
-            bool has_prototype = var && var->is_function && var->ty->kind == TY_FUNC &&
-                                 var->ty->has_prototype;
-            Node head = {};
-            Node *cur = &head;
-            while (!equal(tok, ")")) {
-                if (cur != &head)
-                    tok = skip(tok, ",");
-
-                if (has_prototype && !expected && !variadic)
-                    error_at(tok->loc, "too many arguments");
-
-                Node *arg = assign(&tok, tok);
-                add_type(arg);
-
-                if (expected) {
-                    if (!assignment_compatible(expected->ty, arg))
-                        error_at(tok->loc, "incompatible argument type");
-                    if (is_numeric(arg->ty) && is_numeric(expected->ty) &&
-                        arg->ty != expected->ty) {
-                        Node *cast = new_unary(ND_CAST, arg);
-                        cast->ty = expected->ty;
-                        arg = cast;
-                    }
-                    expected = expected->param_next;
-                } else if (variadic) {
-                    // C default argument promotions for the scalar subset.
-                    Type *promoted = NULL;
-                    if (arg->ty->kind == TY_FLOAT)
-                        promoted = ty_double;
-                    else if (arg->ty->kind == TY_BOOL || arg->ty->kind == TY_CHAR ||
-                             arg->ty->kind == TY_SHORT)
-                        promoted = ty_int;
-                    if (promoted) {
-                        Node *cast = new_unary(ND_CAST, arg);
-                        cast->ty = promoted;
-                        arg = cast;
-                    }
-                }
-
-                cur = cur->next = arg;
-            }
-            if (has_prototype && expected)
-                error_at(tok->loc, "too few arguments");
-
-            *rest = skip(tok, ")");
-            node->args = head.next;
-            return node;
         }
 
         Obj *var = find_var(tok);
@@ -2568,8 +2478,6 @@ static void register_function_symbol(char *name, Type *return_ty, bool is_static
             error("redefinition of function '%s'", name);
 
         var->ty = composite_redecl_type(var->ty, fty);
-        var->func_params = var->ty->params;
-        var->func_variadic = var->ty->is_variadic;
         var->is_static = var->is_static || is_static;
         var->is_defined = var->is_defined || is_definition;
         return;
@@ -2578,8 +2486,6 @@ static void register_function_symbol(char *name, Type *return_ty, bool is_static
     Obj *fn_obj = calloc(1, sizeof(Obj));
     fn_obj->name = strdup(name);
     fn_obj->ty = fty;
-    fn_obj->func_params = fty->params;
-    fn_obj->func_variadic = fty->is_variadic;
     fn_obj->is_local = false;
     fn_obj->is_function = true;
     fn_obj->is_static = is_static;

@@ -39,6 +39,7 @@ test: minicc
 	bash ./test/integer_literals.sh
 	bash ./test/escape_sequences.sh
 	bash ./test/constant_expressions.sh
+	bash ./test/call_arguments.sh
 
 clean:
 	rm -f minicc *.o *~ tmp*

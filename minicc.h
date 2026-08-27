@@ -248,10 +248,6 @@ struct Obj {
     double *finit_vals;
     int init_vals_count;
 
-    // Function-symbol metadata
-    Obj *func_params;    // declared named parameters for direct-call coercion
-    bool func_variadic;  // function declaration has an ellipsis
-
     // Flags
     bool is_function;  // true = function symbol (not a variable)
     bool is_static;    // static storage class
