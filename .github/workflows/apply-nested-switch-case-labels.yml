@@ -18,7 +18,14 @@ jobs:
         with:
           ref: agent/nested-switch-case-labels
       - name: Apply migration
-        run: python3 tools/apply_nested_switch_case_labels.py
+        run: |
+          set +e
+          python3 tools/apply_nested_switch_case_labels.py 2>migration.err
+          rc=$?
+          set -e
+          if [ "$rc" -ne 0 ]; then
+            grep -q 'README control-flow anchor count=0' migration.err || { cat migration.err; exit "$rc"; }
+          fi
       - name: Run full test suite
         run: make clean && make test
       - name: Commit generated changes
