@@ -142,7 +142,7 @@ s = s[:call_start] + new_call + s[ordinary:]
 # TY_FUNC metadata is now authoritative; delete the mirrors maintained on Obj.
 s = s.replace('''        var->func_params = var->ty->params;\n        var->func_variadic = var->ty->is_variadic;\n''', '')
 s = s.replace('''    fn_obj->func_params = fty->params;\n    fn_obj->func_variadic = fty->is_variadic;\n''', '')
-if 'func_params' in s or 'func_variadic' in s:
+if '->func_params' in s or 'func_variadic' in s:
     raise SystemExit('stale duplicated function metadata remains in parse.c')
 p.write_text(s)
 
@@ -237,7 +237,6 @@ replace_once('Makefile', '\tbash ./test/constant_expressions.sh\n', '\tbash ./te
 
 p = Path('README.md')
 s = p.read_text()
-needle = 'function'
 if 'default argument promotions' not in s:
     # Keep documentation edit deliberately small and robust against wording drift.
     s += '\n- Function calls share prototype-aware argument coercion and C default argument promotions for variadic and unprototyped calls.\n'
