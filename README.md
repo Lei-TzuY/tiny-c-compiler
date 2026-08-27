@@ -55,3 +55,5 @@ Static-storage floating scalars and aggregate floating subobjects accept arithme
 Designated aggregate initializers support nested designator lists such as `[1][2]`, `[1].field`, `.inner.x`, and `.rows[1]` for both static storage and automatic objects.
 
 Nested braced aggregate initializer-lists accept member/array designators at every level, including positional continuation after a designator for automatic objects.
+
+Ordinary identifiers (objects/functions, typedef names, and enumerators) now obey one lexical namespace with same-scope conflict diagnostics and correct cross-kind shadowing.

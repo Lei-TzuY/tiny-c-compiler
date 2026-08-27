@@ -49,6 +49,10 @@ struct Scope {
 
 static Scope *current_scope;
 
+static bool type_compatible(Type *a, Type *b);
+static Type *composite_redecl_type(Type *old_ty, Type *new_ty);
+static Obj *find_global_symbol(const char *name);
+
 static void enter_scope(void) {
     Scope *sc = calloc(1, sizeof(Scope));
     sc->parent = current_scope;
@@ -101,14 +105,63 @@ static bool token_matches_name(Token *tok, const char *name) {
            !strncmp(tok->loc, name, tok->len);
 }
 
-// Typedef names live in the ordinary identifier namespace. A variable in a
-// nearer block therefore hides an outer typedef name.
+static VarScope *find_var_name_in_scope(Scope *scope, const char *name) {
+    if (!scope)
+        return NULL;
+    for (VarScope *vs = scope->vars; vs; vs = vs->next)
+        if (!strcmp(vs->name, name))
+            return vs;
+    return NULL;
+}
+
+static TypeDef *find_typedef_name_in_scope(Scope *scope, const char *name) {
+    if (!scope)
+        return NULL;
+    for (TypeDef *td = scope->typedefs; td; td = td->next)
+        if (!strcmp(td->name, name))
+            return td;
+    return NULL;
+}
+
+static EnumConst *find_enum_name_in_scope(Scope *scope, const char *name) {
+    if (!scope)
+        return NULL;
+    for (EnumConst *ec = scope->enum_consts; ec; ec = ec->next)
+        if (!strcmp(ec->name, name))
+            return ec;
+    return NULL;
+}
+
+static void bind_var_in_current_scope(char *name, Obj *var, bool allow_same) {
+    if (find_typedef_name_in_scope(current_scope, name) ||
+        find_enum_name_in_scope(current_scope, name))
+        error("ordinary identifier '%s' conflicts with typedef or enumerator", name);
+
+    VarScope *old = find_var_name_in_scope(current_scope, name);
+    if (old) {
+        if (allow_same && old->var == var)
+            return;
+        error("redefinition of ordinary identifier '%s'", name);
+    }
+
+    VarScope *vs = calloc(1, sizeof(VarScope));
+    vs->name = name;
+    vs->var = var;
+    vs->next = current_scope->vars;
+    current_scope->vars = vs;
+}
+
+// Typedef names, object/function identifiers and enumeration constants share
+// C's ordinary identifier namespace. A binding in a nearer lexical scope hides
+// every outer binding of the same namespace, regardless of its kind.
 static TypeDef *find_typedef(Token *tok) {
     for (Scope *scope = current_scope; scope; scope = scope->parent) {
         for (VarScope *vs = scope->vars; vs; vs = vs->next)
             if (token_matches_name(tok, vs->name))
                 return NULL;
-
+        for (EnumConst *ec = scope->enum_consts; ec; ec = ec->next)
+            if (token_matches_name(tok, ec->name))
+                return NULL;
         for (TypeDef *td = scope->typedefs; td; td = td->next)
             if (token_matches_name(tok, td->name))
                 return td;
@@ -117,16 +170,26 @@ static TypeDef *find_typedef(Token *tok) {
 }
 
 static void push_typedef(Token *ident, Type *ty) {
+    char *name = strndup(ident->loc, ident->len);
+    if (find_var_name_in_scope(current_scope, name) ||
+        find_enum_name_in_scope(current_scope, name))
+        error_at(ident->loc, "typedef name conflicts with ordinary identifier");
+
+    TypeDef *old = find_typedef_name_in_scope(current_scope, name);
+    if (old) {
+        if (!type_compatible(old->ty, ty))
+            error_at(ident->loc, "conflicting typedef for '%s'", name);
+        free(name);
+        return;
+    }
+
     TypeDef *td = calloc(1, sizeof(TypeDef));
-    td->name = strndup(ident->loc, ident->len);
+    td->name = name;
     td->ty = ty;
     td->next = current_scope->typedefs;
     current_scope->typedefs = td;
 }
 
-// Enumeration constants share C's ordinary identifier namespace with
-// variables and typedef names. A nearer variable/typedef therefore hides an
-// outer enumerator, while an enumerator in the current scope hides outer names.
 static EnumConst *find_enum_const(Token *tok) {
     for (Scope *scope = current_scope; scope; scope = scope->parent) {
         for (VarScope *vs = scope->vars; vs; vs = vs->next)
@@ -142,7 +205,13 @@ static EnumConst *find_enum_const(Token *tok) {
     return NULL;
 }
 
-static void push_enum_const(char *name, int64_t val) {
+static void push_enum_const(Token *ident, int64_t val) {
+    char *name = strndup(ident->loc, ident->len);
+    if (find_var_name_in_scope(current_scope, name) ||
+        find_typedef_name_in_scope(current_scope, name) ||
+        find_enum_name_in_scope(current_scope, name))
+        error_at(ident->loc, "redefinition of ordinary identifier '%s'", name);
+
     EnumConst *ec = calloc(1, sizeof(EnumConst));
     ec->name = name;
     ec->val = val;
@@ -231,15 +300,16 @@ static bool is_decl_start(Token *tok) {
 // Find a variable by name, respecting block scope.
 static Obj *find_var(Token *tok) {
     for (Scope *sc = current_scope; sc; sc = sc->parent) {
-        for (VarScope *vs = sc->vars; vs; vs = vs->next) {
-            if (strlen(vs->name) == (size_t)tok->len &&
-                !strncmp(tok->loc, vs->name, tok->len))
+        for (VarScope *vs = sc->vars; vs; vs = vs->next)
+            if (token_matches_name(tok, vs->name))
                 return vs->var;
-        }
+        for (TypeDef *td = sc->typedefs; td; td = td->next)
+            if (token_matches_name(tok, td->name))
+                return NULL;
+        for (EnumConst *ec = sc->enum_consts; ec; ec = ec->next)
+            if (token_matches_name(tok, ec->name))
+                return NULL;
     }
-    for (Obj *var = globals; var; var = var->next)
-        if (strlen(var->name) == (size_t)tok->len && !strncmp(tok->loc, var->name, tok->len))
-            return var;
     return NULL;
 }
 
@@ -488,15 +558,9 @@ static Obj *create_lvar(char *name) {
     Obj *var = calloc(1, sizeof(Obj));
     var->name = name;
     var->is_local = true;
+    bind_var_in_current_scope(name, var, false);
     var->next = locals;
     locals = var;
-
-    VarScope *vs = calloc(1, sizeof(VarScope));
-    vs->name = name;
-    vs->var = var;
-    vs->next = current_scope->vars;
-    current_scope->vars = vs;
-
     return var;
 }
 
@@ -529,42 +593,52 @@ static Obj *create_static_lvar(char *name) {
 
     Obj *var = calloc(1, sizeof(Obj));
     var->name = unique;
-    var->is_local = false; // stored as global
+    var->is_local = false;
     var->is_static = true;
+    bind_var_in_current_scope(name, var, false);
     var->next = globals;
     globals = var;
-
-    // Register in current scope with original name
-    VarScope *vs = calloc(1, sizeof(VarScope));
-    vs->name = name;
-    vs->var = var;
-    vs->next = current_scope->vars;
-    current_scope->vars = vs;
-
     return var;
 }
 
-// Create an extern local reference (refers to a global, no storage allocated)
-static Obj *create_extern_ref(char *name) {
-    // Check if already in globals
-    for (Obj *var = globals; var; var = var->next)
-        if (!strcmp(var->name, name))
-            return var;
+// Create a block-scope declaration with linkage. A prior file-scope or earlier
+// block-scope extern declaration is reused when compatible, but the lexical
+// binding itself belongs only to the current block.
+static Obj *create_extern_ref(char *name, Type *ty) {
+    if (find_typedef_name_in_scope(current_scope, name) ||
+        find_enum_name_in_scope(current_scope, name))
+        error("extern declaration of '%s' conflicts with ordinary identifier", name);
 
-    Obj *var = calloc(1, sizeof(Obj));
-    var->name = name;
-    var->is_local = false;
-    var->is_extern = true;
-    var->next = globals;
-    globals = var;
+    bool wants_function = ty->kind == TY_FUNC;
+    VarScope *same_scope = find_var_name_in_scope(current_scope, name);
+    if (same_scope) {
+        Obj *old = same_scope->var;
+        if (old->is_local || strcmp(old->name, name) ||
+            old->is_function != wants_function || !type_compatible(old->ty, ty))
+            error("conflicting block-scope declaration of '%s'", name);
+        old->ty = composite_redecl_type(old->ty, ty);
+        return old;
+    }
 
-    // Register in current scope
-    VarScope *vs = calloc(1, sizeof(VarScope));
-    vs->name = name;
-    vs->var = var;
-    vs->next = current_scope->vars;
-    current_scope->vars = vs;
+    Obj *var = find_global_symbol(name);
+    if (var) {
+        if (var->is_function != wants_function)
+            error("'%s' redeclared as different kind of symbol", name);
+        if (!type_compatible(var->ty, ty))
+            error("conflicting types for '%s'", name);
+        var->ty = composite_redecl_type(var->ty, ty);
+    } else {
+        var = calloc(1, sizeof(Obj));
+        var->name = name;
+        var->ty = ty;
+        var->is_local = false;
+        var->is_extern = true;
+        var->is_function = wants_function;
+        var->next = globals;
+        globals = var;
+    }
 
+    bind_var_in_current_scope(name, var, false);
     return var;
 }
 
@@ -921,7 +995,7 @@ static Type *enum_decl(Token **rest, Token *tok) {
         if (tok->kind != TK_IDENT)
             error_at(tok->loc, "expected enumerator name");
 
-        char *name = strndup(tok->loc, tok->len);
+        Token *enumerator = tok;
         tok = tok->next;
 
         if (consume(&tok, tok, "=")) {
@@ -929,7 +1003,7 @@ static Type *enum_decl(Token **rest, Token *tok) {
             val = eval_const_expr(value);
         }
 
-        push_enum_const(name, val++);
+        push_enum_const(enumerator, val++);
 
         if (consume(&tok, tok, ","))
             continue;
@@ -1073,6 +1147,12 @@ static Type *func_params(Token **rest, Token *tok, Type *return_ty) {
 
         if (is_incomplete_object_type(param_ty))
             error_at(name ? name->loc : tok->loc, "parameter has incomplete type");
+
+        if (name) {
+            for (Obj *prev = head.param_next; prev; prev = prev->param_next)
+                if (prev->name && token_matches_name(name, prev->name))
+                    error_at(name->loc, "duplicate parameter name");
+        }
 
         Obj *param = calloc(1, sizeof(Obj));
         param->ty = param_ty;
@@ -2581,14 +2661,21 @@ static Node *declaration(Token **rest, Token *tok, bool is_static, bool is_exter
         if (!is_extern && is_incomplete_object_type(ty))
             error_at(ident->loc, "variable has incomplete type");
 
+        char *name = strndup(ident->loc, ident->len);
         Obj *var;
-        if (is_static)
-            var = create_static_lvar(strndup(ident->loc, ident->len));
-        else if (is_extern)
-            var = create_extern_ref(strndup(ident->loc, ident->len));
-        else
-            var = create_lvar(strndup(ident->loc, ident->len));
-        var->ty = ty;
+        if (ty->kind == TY_FUNC) {
+            if (is_static)
+                error_at(ident->loc, "block-scope function declaration cannot be static");
+            var = create_extern_ref(name, ty);
+        } else if (is_static) {
+            var = create_static_lvar(name);
+            var->ty = ty;
+        } else if (is_extern) {
+            var = create_extern_ref(name, ty);
+        } else {
+            var = create_lvar(name);
+            var->ty = ty;
+        }
 
         if (!equal(tok, "="))
             continue;
@@ -3794,6 +3881,8 @@ static Node *primary(Token **rest, Token *tok) {
         // the ordinary postfix-call path, sharing the same argument parser.
         if (equal(tok->next, "(")) {
             Obj *fn = find_var(tok);
+            if (!fn && find_typedef(tok))
+                error_at(tok->loc, "typedef name is not callable");
             if (!fn || fn->is_function) {
                 Node *node = new_node(ND_FUNCALL);
                 node->funcname = strndup(tok->loc, tok->len);
@@ -3852,7 +3941,10 @@ static Node *primary(Token **rest, Token *tok) {
 }
 
 static Node *compound_stmt(Token **rest, Token *tok) {
-    enter_scope();
+    // The caller creates the function-definition scope before binding parameters.
+    // Keep the outermost compound statement in that same scope so a declaration
+    // cannot redeclare a parameter; nested `{ ... }` statements still create
+    // ordinary child block scopes in stmt().
     Node head = {};
     Node *cur = &head;
 
@@ -3865,7 +3957,6 @@ static Node *compound_stmt(Token **rest, Token *tok) {
     *rest = skip(tok, "}");
     Node *node = new_node(ND_BLOCK);
     node->body = head.next;
-    leave_scope();
     return node;
 }
 
@@ -3985,6 +4076,7 @@ static Obj *register_global_symbol(Token *ident, Type *ty, bool is_static,
         var->is_static = is_static;
         if (!is_extern)
             var->is_extern = false;
+        bind_var_in_current_scope(var->name, var, true);
         return var;
     }
 
@@ -3996,6 +4088,7 @@ static Obj *register_global_symbol(Token *ident, Type *ty, bool is_static,
     var->is_extern = is_extern;
     var->next = globals;
     globals = var;
+    bind_var_in_current_scope(var->name, var, false);
     return var;
 }
 
@@ -4024,6 +4117,7 @@ static void register_function_symbol(char *name, Type *return_ty, bool is_static
         var->ty = composite_redecl_type(var->ty, fty);
         var->is_static = var->is_static || is_static;
         var->is_defined = var->is_defined || is_definition;
+        bind_var_in_current_scope(var->name, var, true);
         return;
     }
 
@@ -4036,6 +4130,7 @@ static void register_function_symbol(char *name, Type *return_ty, bool is_static
     fn_obj->is_defined = is_definition;
     fn_obj->next = globals;
     globals = fn_obj;
+    bind_var_in_current_scope(fn_obj->name, fn_obj, false);
 }
 
 // program = (function | global-var | typedef)*
