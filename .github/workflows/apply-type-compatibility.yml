@@ -1,0 +1,31 @@
+name: Apply type compatibility migration
+
+on:
+  push:
+    branches: [agent/type-compatibility]
+    paths:
+      - 'tools/apply_type_compatibility.py'
+      - '.github/workflows/apply-type-compatibility.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/type-compatibility
+      - name: Apply migration
+        run: python3 tools/apply_type_compatibility.py
+      - name: Test compiler
+        run: make clean && make test
+      - name: Commit verified implementation
+        run: |
+          rm -f tools/apply_type_compatibility.py .github/workflows/apply-type-compatibility.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Enforce compatible symbol redeclarations"
+          git push origin HEAD:agent/type-compatibility
