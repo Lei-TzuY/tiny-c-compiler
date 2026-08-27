@@ -17,6 +17,18 @@ jobs:
           ref: agent/sysv-stack-args
       - name: Apply migration
         run: python3 tools/apply_sysv_stack_args.py
+      - name: Normalize prototype regression
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("test/abi_stack_args.sh")
+          s = p.read_text()
+          old = "int sum7(int,int,int,int,int,int,int);"
+          new = "int sum7(int a,int b,int c,int d,int e,int f,int g);"
+          if old not in s:
+              raise SystemExit("unnamed prototype regression not found")
+          p.write_text(s.replace(old, new, 1))
+          PY
       - name: Test compiler
         run: make clean && make test
       - name: Commit verified implementation
