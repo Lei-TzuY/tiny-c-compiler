@@ -312,13 +312,13 @@ assert 1 "int main() { struct { int x; int y; } p; p.x=1; p.y=2; return p.x; }"
 assert 2 "int main() { struct { int x; int y; } p; p.x=1; p.y=2; return p.y; }"
 assert 3 "int main() { struct { int x; int y; } p; p.x=1; p.y=2; return p.x+p.y; }"
 assert 7 "int main() { struct { char a; int b; } s; s.a=3; s.b=4; return s.a+s.b; }"
-assert 5 "int main() { struct { int x; int y; } p; p.x=5; struct { int x; int y; } *q=&p; return q->x; }"
-assert 9 "int main() { struct { int x; } s; s.x=9; struct { int x; } *p=&s; return p->x; }"
+assert 5 "int main() { struct P { int x; int y; }; struct P p; p.x=5; struct P *q=&p; return q->x; }"
+assert 9 "int main() { struct S { int x; }; struct S s; s.x=9; struct S *p=&s; return p->x; }"
 assert 4 "struct P { int x; int y; }; int main() { struct P p; p.x=1; p.y=3; return p.x+p.y; }"
 assert 6 "struct P { int x; int y; }; int add(struct P *p) { return p->x+p->y; } int main() { struct P p; p.x=2; p.y=4; return add(&p); }"
 assert 8 "int main() { struct { int x; int y; } p; return sizeof(p); }"
 assert 8 "int main() { return sizeof(struct { int x; int y; }); }"
-assert 3 "int main() { struct { int x; } a; struct { int x; } b; a.x=3; b=a; return b.x; }"
+assert 3 "int main() { struct S { int x; }; struct S a; struct S b; a.x=3; b=a; return b.x; }"
 
 # ============================================================
 # typedef
