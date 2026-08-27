@@ -185,7 +185,6 @@ void add_type(Node *node) {
 
     switch (node->kind) {
     case ND_ADD:
-    case ND_SUB:
         if (node->lhs->ty->base) {
             node->ty = node->lhs->ty;
             return;
@@ -194,6 +193,23 @@ void add_type(Node *node) {
             node->ty = node->rhs->ty;
             return;
         }
+        if (!is_numeric(node->lhs->ty) || !is_numeric(node->rhs->ty))
+            error("invalid arithmetic operands");
+        node->ty = get_common_type(node->lhs->ty, node->rhs->ty);
+        return;
+
+    case ND_SUB:
+        if (node->lhs->ty->base) {
+            node->ty = node->lhs->ty;
+            return;
+        }
+        // Subtraction is not commutative: only pointer - integer is a valid
+        // pointer-valued form.  A pointer on the right (notably the parser's
+        // internal `0 - operand` representation of unary minus) must not turn
+        // an otherwise-invalid expression such as `-ptr` or `-array` into
+        // pointer arithmetic.
+        if (node->rhs->ty && node->rhs->ty->base)
+            error("invalid arithmetic operands");
         if (!is_numeric(node->lhs->ty) || !is_numeric(node->rhs->ty))
             error("invalid arithmetic operands");
         node->ty = get_common_type(node->lhs->ty, node->rhs->ty);
