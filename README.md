@@ -16,6 +16,8 @@ An educational C compiler implemented in C. The pipeline includes preprocessing,
 
 ## Build and test
 
+The x86-64 ELF backend emits a `.note.GNU-stack` marker so generated objects do not request an executable process stack.
+
 Run on Linux or WSL with GCC and GNU Make:
 
 ```sh
