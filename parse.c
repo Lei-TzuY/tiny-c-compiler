@@ -1484,6 +1484,36 @@ static bool is_scalar_expr(Node *node) {
     return ty && (is_numeric(ty) || ty->kind == TY_PTR);
 }
 
+static bool cast_compatible(Type *dst, Node *expr) {
+    add_type(expr);
+
+    // A cast to void explicitly discards the value and accepts any complete
+    // expression type, including aggregates and void-valued expressions.
+    if (dst && dst->kind == TY_VOID)
+        return true;
+
+    Type *src = decay_value_type(expr->ty);
+    if (!dst || !src)
+        return false;
+
+    // Non-void cast targets must be scalar.  Arrays/functions have already
+    // decayed above when they appear as values.
+    bool dst_arith = is_numeric(dst);
+    bool src_arith = is_numeric(src);
+    bool dst_ptr = dst->kind == TY_PTR;
+    bool src_ptr = src->kind == TY_PTR;
+
+    if (dst_arith && src_arith)
+        return true;
+    if (dst_ptr && src_ptr)
+        return true;
+    if (dst_ptr && is_integer(src))
+        return true;
+    if (is_integer(dst) && src_ptr)
+        return true;
+    return false;
+}
+
 static bool pointer_pair_compatible(Type *a, Type *b, bool relational_only) {
     a = decay_value_type(a);
     b = decay_value_type(b);
@@ -1743,12 +1773,17 @@ static Node *mul(Token **rest, Token *tok) {
 
 static Node *unary(Token **rest, Token *tok) {
     if (equal(tok, "(") && is_typename(tok->next)) {
+        Token *cast_tok = tok;
         tok = tok->next;
         Type *ty = type_name(&tok, tok);
-        if (ty->kind == TY_ARRAY || ty->kind == TY_FUNC)
-            error_at(tok->loc, "cast specifies non-scalar type");
+        if (ty->kind == TY_ARRAY || ty->kind == TY_FUNC ||
+            (ty->kind != TY_VOID && !is_numeric(ty) && ty->kind != TY_PTR))
+            error_at(cast_tok->loc, "cast specifies non-scalar type");
         tok = skip(tok, ")");
-        Node *node = new_unary(ND_CAST, unary(rest, tok));
+        Node *operand = unary(rest, tok);
+        if (!cast_compatible(ty, operand))
+            error_at(cast_tok->loc, "invalid cast operand type");
+        Node *node = new_unary(ND_CAST, operand);
         node->ty = ty;
         return node;
     }
