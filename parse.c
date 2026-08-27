@@ -1456,6 +1456,100 @@ static int record_member_count(Type *ty) {
     return count;
 }
 
+// Array designators use an integer constant expression, not merely a numeric
+// token. Evaluate with the shared type-aware constant-expression machinery so
+// enum constants, casts, arithmetic, and unsigned range checks behave exactly
+// like array bounds and case labels.
+static int parse_array_designator_index(Token **rest, Token *tok, Token *where) {
+    Node *index = ternary(&tok, tok);
+    add_type(index);
+    if (!is_integer(index->ty))
+        error_at(where->loc, "array designator index must have integer type");
+
+    int64_t raw = eval_const_expr(index);
+    int64_t converted = cast_const_integer(raw, index->ty);
+    if (index->ty->is_unsigned) {
+        uint64_t value = (uint64_t)converted;
+        if (value > INT32_MAX)
+            error_at(where->loc, "array designator index is out of range");
+        *rest = tok;
+        return (int)value;
+    }
+
+    if (converted < 0 || converted > INT32_MAX)
+        error_at(where->loc, "array designator index is out of range");
+    *rest = tok;
+    return (int)converted;
+}
+
+// Parse a static-storage-duration integer array initializer. The backing value
+// vector is indexed by the actual designated subscript, so omitted elements are
+// represented as zero and out-of-order/repeated designators retain C semantics.
+static void parse_static_integer_array_initializer(Obj *var, Type **ty,
+                                                   Token **rest, Token *tok) {
+    Token *brace = tok;
+    if ((*ty)->kind != TY_ARRAY || !is_integer((*ty)->base))
+        error_at(brace->loc, "static brace initializer currently supports integer arrays");
+
+    Type *elem_ty = (*ty)->base;
+    tok = tok->next;
+    int cap = (*ty)->array_len > 0 ? (*ty)->array_len : 16;
+    if (cap < 1)
+        cap = 16;
+    int64_t *vals = calloc(cap, sizeof(int64_t));
+    int cur_idx = 0;
+    int max_idx = -1;
+    bool first_elem = true;
+
+    while (!equal(tok, "}")) {
+        if (!first_elem) {
+            tok = skip(tok, ",");
+            if (equal(tok, "}"))
+                break;
+        }
+        first_elem = false;
+
+        if (equal(tok, "."))
+            error_at(tok->loc, "member designator requires a record initializer");
+
+        if (equal(tok, "[")) {
+            Token *designator = tok;
+            tok = tok->next;
+            cur_idx = parse_array_designator_index(&tok, tok, designator);
+            tok = skip(tok, "]");
+            tok = skip(tok, "=");
+        }
+
+        if ((*ty)->array_len > 0 && cur_idx >= (*ty)->array_len)
+            error_at(tok->loc, "array designator index exceeds array bounds");
+
+        while (cur_idx >= cap) {
+            int old_cap = cap;
+            cap *= 2;
+            vals = realloc(vals, cap * sizeof(int64_t));
+            memset(vals + old_cap, 0, (cap - old_cap) * sizeof(int64_t));
+        }
+
+        vals[cur_idx] = parse_static_integer_initializer(&tok, tok, elem_ty);
+        if (cur_idx > max_idx)
+            max_idx = cur_idx;
+        cur_idx++;
+    }
+    tok = skip(tok, "}");
+
+    if ((*ty)->array_len == 0) {
+        int inferred = max_idx + 1;
+        if (inferred <= 0)
+            error_at(brace->loc, "cannot infer array size from empty initializer");
+        *ty = array_of(elem_ty, inferred);
+        var->ty = *ty;
+    }
+
+    var->init_vals = vals;
+    var->init_vals_count = max_idx + 1;
+    *rest = tok;
+}
+
 // declaration = declspec (declarator ("=" (expr | "{" initializer "}"))?)
 //               ("," declarator ("=" (expr | "{" initializer "}"))?)* ";"
 static Node *declaration(Token **rest, Token *tok, bool is_static, bool is_extern) {
@@ -1515,31 +1609,37 @@ static Node *declaration(Token **rest, Token *tok, bool is_static, bool is_exter
             continue;
         }
 
-        // Static/extern: constant initializer only
+        // Static/extern: constant initializer only. Integer arrays share the
+        // file-scope designated-initializer parser so block/static and global
+        // objects cannot drift in their [constant-expression] semantics.
         if (is_static || is_extern) {
             if (equal(tok, "{")) {
+                Token *brace = tok;
+
+                // The historical fallback serialized record members as packed
+                // 4-byte integers, ignoring real member offsets/padding. Refuse
+                // that miscompile until typed static-record serialization lands.
+                if (ty->kind == TY_STRUCT)
+                    error_at(brace->loc, "static record brace initializers are not yet supported");
+
+                if (ty->kind == TY_ARRAY) {
+                    parse_static_integer_array_initializer(var, &ty, &tok, tok);
+                    continue;
+                }
+
+                // Preserve scalar brace initialization as a single scalar
+                // constant with an optional trailing comma.
                 tok = tok->next;
-                int cap = 16, cnt = 0;
-                int64_t *vals = calloc(cap, sizeof(int64_t));
-                while (!equal(tok, "}")) {
-                    if (cnt > 0) tok = skip(tok, ",");
-                    if (equal(tok, "}")) break;
-                    if (ty->kind == TY_ARRAY && ty->array_len > 0 && cnt >= ty->array_len)
-                        error_at(tok->loc, "excess elements in array initializer");
-                    if (cnt >= cap) { cap *= 2; vals = realloc(vals, cap * sizeof(int64_t)); }
-                    Type *elem_ty = (ty->kind == TY_ARRAY) ? ty->base : NULL;
-                    vals[cnt++] = parse_static_integer_initializer(&tok, tok, elem_ty);
-                }
-                tok = skip(tok, "}");
-                if (ty->kind == TY_ARRAY && ty->array_len == 0) {
-                    ty = array_of(ty->base, cnt);
-                    var->ty = ty;
-                }
-                var->init_vals = vals;
-                var->init_vals_count = cnt;
-            } else {
+                if (equal(tok, "}"))
+                    error_at(brace->loc, "empty scalar initializer");
                 parse_static_scalar_initializer(var, &tok, tok, ty);
+                if (equal(tok, ","))
+                    tok = tok->next;
+                tok = skip(tok, "}");
+                continue;
             }
+
+            parse_static_scalar_initializer(var, &tok, tok, ty);
             continue;
         }
 
@@ -1590,17 +1690,14 @@ static Node *declaration(Token **rest, Token *tok, bool is_static, bool is_exter
                     continue;
                 }
 
-                // Designated initializer: [index] = expr
-                if (consume(&tok, tok, "[")) {
+                // Designated initializer: [integer-constant-expression] = expr
+                if (equal(tok, "[")) {
+                    Token *designator = tok;
                     if (ty->kind != TY_ARRAY)
                         error_at(tok->loc, "array designator requires an array initializer");
-                    if (tok->kind != TK_NUM || tok->is_float)
-                        error_at(tok->loc, "expected integer array index in designated initializer");
-                    int64_t raw_idx = tok->val;
-                    if (raw_idx < 0 || raw_idx > INT32_MAX)
-                        error_at(tok->loc, "array designator index is out of range");
-                    int idx = (int)raw_idx;
-                    tok = skip(tok->next, "]");
+                    tok = tok->next;
+                    int idx = parse_array_designator_index(&tok, tok, designator);
+                    tok = skip(tok, "]");
                     tok = skip(tok, "=");
                     if (ty->array_len > 0 && idx >= ty->array_len)
                         error_at(tok->loc, "array designator index exceeds array bounds");
@@ -3002,25 +3099,25 @@ Program *parse(Token *tok) {
                         var->init_data = build_string_array_image(ty, string_tok);
                         tok = after_string;
                     } else if (equal(tok, "{")) {
-                        tok = tok->next;
-                        int cap = 16, cnt = 0;
-                        int64_t *vals = calloc(cap, sizeof(int64_t));
-                        while (!equal(tok, "}")) {
-                            if (cnt > 0) tok = skip(tok, ",");
-                            if (equal(tok, "}")) break;
-                            if (cnt >= cap) { cap *= 2; vals = realloc(vals, cap * sizeof(int64_t)); }
-                            Type *elem_ty = (ty->kind == TY_ARRAY) ? ty->base : NULL;
-                    vals[cnt++] = parse_static_integer_initializer(&tok, tok, elem_ty);
-                        }
-                        tok = skip(tok, "}");
+                        Token *brace = tok;
 
-                        if (ty->kind == TY_ARRAY && ty->array_len == 0) {
-                            ty = array_of(ty->base, cnt);
-                            var->ty = ty;
-                        }
+                        // Do not silently serialize padded records as a dense
+                        // list of .long values. Typed static-record data is a
+                        // separate feature and should fail clearly for now.
+                        if (ty->kind == TY_STRUCT)
+                            error_at(brace->loc, "static record brace initializers are not yet supported");
 
-                        var->init_vals = vals;
-                        var->init_vals_count = cnt;
+                        if (ty->kind == TY_ARRAY) {
+                            parse_static_integer_array_initializer(var, &ty, &tok, tok);
+                        } else {
+                            tok = tok->next;
+                            if (equal(tok, "}"))
+                                error_at(brace->loc, "empty scalar initializer");
+                            parse_static_scalar_initializer(var, &tok, tok, ty);
+                            if (equal(tok, ","))
+                                tok = tok->next;
+                            tok = skip(tok, "}");
+                        }
                     } else {
                         parse_static_scalar_initializer(var, &tok, tok, ty);
                     }
