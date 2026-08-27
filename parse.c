@@ -263,6 +263,29 @@ static Node *new_long(int64_t val) {
     return node;
 }
 
+static Type *pointer_arithmetic_type(Type *ty) {
+    if (!ty)
+        return NULL;
+
+    // Array expressions decay to a pointer to their first element in value
+    // contexts.  Keep that decay explicit here so `array + n` has pointer
+    // result type instead of accidentally retaining TY_ARRAY.
+    if (ty->kind == TY_ARRAY)
+        ty = pointer_to(ty->base);
+
+    if (ty->kind != TY_PTR || !ty->base)
+        return NULL;
+
+    Type *base = ty->base;
+    // Standard C pointer arithmetic is defined only for pointers to complete
+    // object types.  In particular, void* and function pointers are not
+    // arithmetic pointers (even though some host compilers accept extensions).
+    if (base->kind == TY_VOID || base->kind == TY_FUNC ||
+        base->is_incomplete || base->size <= 0)
+        return NULL;
+    return ty;
+}
+
 static Node *new_add(Node *lhs, Node *rhs) {
     add_type(lhs);
     add_type(rhs);
@@ -270,13 +293,24 @@ static Node *new_add(Node *lhs, Node *rhs) {
     if (is_numeric(lhs->ty) && is_numeric(rhs->ty))
         return new_binary(ND_ADD, lhs, rhs);
 
-    if (lhs->ty->base && is_integer(rhs->ty))
-        return new_binary(ND_ADD, lhs, new_binary(ND_MUL, rhs, new_long(lhs->ty->base->size)));
+    Type *lp = pointer_arithmetic_type(lhs->ty);
+    Type *rp = pointer_arithmetic_type(rhs->ty);
 
-    if (is_integer(lhs->ty) && rhs->ty->base)
-        return new_binary(ND_ADD, rhs, new_binary(ND_MUL, lhs, new_long(rhs->ty->base->size)));
+    if (lp && is_integer(rhs->ty)) {
+        Node *node = new_binary(ND_ADD, lhs,
+                                new_binary(ND_MUL, rhs, new_long(lp->base->size)));
+        node->ty = lp;
+        return node;
+    }
 
-    error("invalid operands");
+    if (is_integer(lhs->ty) && rp) {
+        Node *node = new_binary(ND_ADD, rhs,
+                                new_binary(ND_MUL, lhs, new_long(rp->base->size)));
+        node->ty = rp;
+        return node;
+    }
+
+    error("invalid operands to pointer addition");
 }
 
 static Node *new_sub(Node *lhs, Node *rhs) {
@@ -286,16 +320,28 @@ static Node *new_sub(Node *lhs, Node *rhs) {
     if (is_numeric(lhs->ty) && is_numeric(rhs->ty))
         return new_binary(ND_SUB, lhs, rhs);
 
-    if (lhs->ty->base && is_integer(rhs->ty))
-        return new_binary(ND_SUB, lhs, new_binary(ND_MUL, rhs, new_long(lhs->ty->base->size)));
+    Type *lp = pointer_arithmetic_type(lhs->ty);
+    Type *rp = pointer_arithmetic_type(rhs->ty);
 
-    if (lhs->ty->base && rhs->ty->base) {
-        Node *node = new_binary(ND_SUB, lhs, rhs);
-        node->ty = ty_long;
-        return new_binary(ND_DIV, node, new_long(lhs->ty->base->size));
+    if (lp && is_integer(rhs->ty)) {
+        Node *node = new_binary(ND_SUB, lhs,
+                                new_binary(ND_MUL, rhs, new_long(lp->base->size)));
+        node->ty = lp;
+        return node;
     }
 
-    error("invalid operands");
+    if (lp && rp) {
+        if (!type_compatible(lp->base, rp->base))
+            error("incompatible pointer subtraction");
+
+        Node *diff = new_binary(ND_SUB, lhs, rhs);
+        diff->ty = ty_long;
+        Node *node = new_binary(ND_DIV, diff, new_long(lp->base->size));
+        node->ty = ty_long;
+        return node;
+    }
+
+    error("invalid operands to pointer subtraction");
 }
 
 static Node *new_compound_assign(NodeKind kind, Node *lhs, Node *rhs) {
@@ -306,12 +352,13 @@ static Node *new_compound_assign(NodeKind kind, Node *lhs, Node *rhs) {
         if (is_numeric(lhs->ty) && is_numeric(rhs->ty))
             return new_binary(kind, lhs, rhs);
 
-        if (lhs->ty->kind == TY_PTR && is_integer(rhs->ty)) {
-            rhs = new_binary(ND_MUL, rhs, new_long(lhs->ty->base->size));
+        Type *ptr = pointer_arithmetic_type(lhs->ty);
+        if (ptr && lhs->ty->kind == TY_PTR && is_integer(rhs->ty)) {
+            rhs = new_binary(ND_MUL, rhs, new_long(ptr->base->size));
             return new_binary(kind, lhs, rhs);
         }
 
-        error("invalid operands");
+        error("invalid operands to pointer compound assignment");
     }
 
     if ((kind == ND_MUL_EQ || kind == ND_DIV_EQ) &&
@@ -326,8 +373,8 @@ static Node *new_compound_assign(NodeKind kind, Node *lhs, Node *rhs) {
 
 static Node *new_inc_dec(NodeKind kind, Node *expr) {
     add_type(expr);
-    if (!is_numeric(expr->ty) && expr->ty->kind != TY_PTR)
-        error("invalid operand");
+    if (!is_numeric(expr->ty) && !pointer_arithmetic_type(expr->ty))
+        error("invalid increment/decrement operand");
     return new_unary(kind, expr);
 }
 

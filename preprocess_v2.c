@@ -196,8 +196,8 @@ static char *get_builtin_header(char *name) {
                "#define __bool_true_false_are_defined 1\n";
     }
     if (!strcmp(name, "stdarg.h")) {
-        return "typedef void *va_list;\n"
-               "#define va_start(ap, last) ((ap) = (void*)&(last) + 8)\n"
+        return "typedef char *va_list;\n"
+               "#define va_start(ap, last) ((ap) = (char*)&(last) + 8)\n"
                "#define va_arg(ap, type) (*(type*)((ap) += 8, (ap) - 8))\n"
                "#define va_end(ap) ((void)0)\n";
     }
