@@ -245,6 +245,9 @@ struct Obj {
     int64_t init_val;    // for initialized global scalars
     double finit_val;    // for initialized double/float global scalars
     bool has_init_val;
+    char *init_reloc_label;   // static address constant relocation target
+    int64_t init_reloc_addend; // byte addend applied to relocation target
+    bool has_init_reloc;
 
     // Global array/struct initializer (list of int64/double values, one per element)
     int64_t *init_vals;

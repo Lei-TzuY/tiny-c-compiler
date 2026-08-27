@@ -1224,6 +1224,19 @@ static void emit_data(Program *prog) {
             int emitted = var->init_vals_count * elem_size;
             if (emitted < var->ty->size)
                 printf("  .zero %d\n", var->ty->size - emitted);
+        } else if (var->has_init_reloc) {
+            printf("  .data\n");
+            if (!var->is_static)
+                printf("  .globl %s\n", var->name);
+            printf("%s:\n", var->name);
+            if (var->init_reloc_addend > 0)
+                printf("  .quad %s+%" PRId64 "\n", var->init_reloc_label,
+                       var->init_reloc_addend);
+            else if (var->init_reloc_addend < 0)
+                printf("  .quad %s%" PRId64 "\n", var->init_reloc_label,
+                       var->init_reloc_addend);
+            else
+                printf("  .quad %s\n", var->init_reloc_label);
         } else if (var->has_init_val) {
             printf("  .data\n");
             if (!var->is_static)

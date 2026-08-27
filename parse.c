@@ -1235,6 +1235,134 @@ static double parse_const_double(Token **rest, Token *tok) {
     return val;
 }
 
+
+typedef struct {
+    char *label;
+    int64_t addend;
+} StaticAddress;
+
+static StaticAddress eval_static_address(Node *node);
+
+static StaticAddress eval_static_lvalue_address(Node *node) {
+    add_type(node);
+
+    switch (node->kind) {
+    case ND_VAR:
+        if (node->var->is_local)
+            error("address of automatic object is not a static address constant");
+        return (StaticAddress){node->var->name, 0};
+    case ND_DEREF:
+        // &*p is the value of p, subject to static-address constraints.
+        return eval_static_address(node->lhs);
+    case ND_MEMBER: {
+        StaticAddress addr = eval_static_lvalue_address(node->lhs);
+        addr.addend += node->member->offset;
+        return addr;
+    }
+    default:
+        error("unsupported lvalue in static address initializer");
+    }
+}
+
+static StaticAddress eval_static_address(Node *node) {
+    add_type(node);
+
+    // Integer constant-expression zero is the null pointer constant case.
+    if (is_integer(node->ty)) {
+        int64_t val = eval_const_expr(node);
+        if (val != 0)
+            error("nonzero integer is not a valid static pointer initializer");
+        return (StaticAddress){0};
+    }
+
+    switch (node->kind) {
+    case ND_VAR:
+        // Array and function designators decay to their link-time addresses.
+        // Reading the value of an ordinary pointer object is not a constant.
+        if (node->var->is_local)
+            error("automatic object is not a static address constant");
+        if (node->ty->kind != TY_ARRAY && node->ty->kind != TY_FUNC)
+            error("object value is not a static address constant");
+        return (StaticAddress){node->var->name, 0};
+
+    case ND_ADDR:
+        return eval_static_lvalue_address(node->lhs);
+
+    case ND_ADD:
+    case ND_SUB: {
+        add_type(node->lhs);
+        add_type(node->rhs);
+        StaticAddress addr = eval_static_address(node->lhs);
+        int64_t delta = eval_const_expr(node->rhs);
+        addr.addend += node->kind == ND_ADD ? delta : -delta;
+        return addr;
+    }
+
+    case ND_CAST:
+        // Pointer-preserving casts are link-time no-ops. Casts of integer zero
+        // reach the integer branch above when recursively evaluated.
+        return eval_static_address(node->lhs);
+
+    case ND_TERNARY:
+        return eval_static_address(eval_const_expr(node->cond) ? node->then : node->els);
+
+    default:
+        error("not a static address constant");
+    }
+}
+
+static void parse_static_pointer_initializer(Obj *var, Token **rest, Token *tok,
+                                             Type *target) {
+    Token *start = tok;
+    Node *node = assign(&tok, tok);
+    add_type(node);
+
+    // Preserve the broader null-pointer-constant rule already supported by
+    // static integer initializers: any integer constant expression of value 0.
+    if (is_integer(node->ty)) {
+        int64_t val = eval_const_expr(node);
+        if (val != 0)
+            error_at(start->loc, "nonzero integer is not a valid static pointer initializer");
+        var->init_val = 0;
+        var->has_init_val = true;
+        *rest = tok;
+        return;
+    }
+
+    if (!assignment_compatible(target, node))
+        error_at(start->loc, "incompatible static pointer initializer");
+
+    StaticAddress addr = eval_static_address(node);
+    if (!addr.label) {
+        var->init_val = 0;
+        var->has_init_val = true;
+    } else {
+        var->init_reloc_label = addr.label;
+        var->init_reloc_addend = addr.addend;
+        var->has_init_reloc = true;
+    }
+    *rest = tok;
+}
+
+static void parse_static_scalar_initializer(Obj *var, Token **rest, Token *tok,
+                                            Type *ty) {
+    if (is_flonum(ty)) {
+        var->finit_val = parse_const_double(rest, tok);
+        var->has_init_val = true;
+        return;
+    }
+    if (is_integer(ty)) {
+        var->init_val = parse_static_integer_initializer(rest, tok, ty);
+        var->has_init_val = true;
+        return;
+    }
+    if (ty->kind == TY_PTR) {
+        parse_static_pointer_initializer(var, rest, tok, ty);
+        return;
+    }
+    error_at(tok->loc, "unsupported scalar static initializer type");
+}
+
 static Token *string_initializer_token(Token *tok, Token **after) {
     if (tok->kind == TK_STR) {
         *after = tok->next;
@@ -1344,10 +1472,6 @@ static Node *declaration(Token **rest, Token *tok, bool is_static, bool is_exter
             continue;
         }
 
-        if (string_tok && (is_static || is_extern))
-            error_at(string_tok->loc,
-                     "static string initializer is supported only for character arrays");
-
         // Static/extern: constant initializer only
         if (is_static || is_extern) {
             if (equal(tok, "{")) {
@@ -1369,14 +1493,7 @@ static Node *declaration(Token **rest, Token *tok, bool is_static, bool is_exter
                 var->init_vals = vals;
                 var->init_vals_count = cnt;
             } else {
-                if (is_flonum(ty)) {
-                    var->finit_val = parse_const_double(&tok, tok);
-                } else if (is_integer(ty) || ty->kind == TY_PTR) {
-                    var->init_val = parse_static_integer_initializer(&tok, tok, ty);
-                } else {
-                    error_at(tok->loc, "unsupported scalar static initializer type");
-                }
-                var->has_init_val = true;
+                parse_static_scalar_initializer(var, &tok, tok, ty);
             }
             continue;
         }
@@ -2569,7 +2686,8 @@ static Obj *find_global_symbol(const char *name) {
 }
 
 static bool object_has_initializer(Obj *var) {
-    return var->has_init_val || var->init_vals_count > 0 || var->init_data;
+    return var->has_init_val || var->has_init_reloc ||
+           var->init_vals_count > 0 || var->init_data;
 }
 
 static Obj *register_global_symbol(Token *ident, Type *ty, bool is_static,
@@ -2752,7 +2870,7 @@ Program *parse(Token *tok) {
                 if (consume(&tok, tok, "=")) {
                     Token *after_string = NULL;
                     Token *string_tok = string_initializer_token(tok, &after_string);
-                    if (string_tok) {
+                    if (string_tok && ty->kind == TY_ARRAY) {
                         if (!is_character_array(ty))
                             error_at(string_tok->loc,
                                      "global string initializer is supported only for character arrays");
@@ -2780,14 +2898,7 @@ Program *parse(Token *tok) {
                         var->init_vals = vals;
                         var->init_vals_count = cnt;
                     } else {
-                        if (is_flonum(ty)) {
-                            var->finit_val = parse_const_double(&tok, tok);
-                        } else if (is_integer(ty) || ty->kind == TY_PTR) {
-                            var->init_val = parse_static_integer_initializer(&tok, tok, ty);
-                        } else {
-                            error_at(tok->loc, "unsupported scalar static initializer type");
-                        }
-                        var->has_init_val = true;
+                        parse_static_scalar_initializer(var, &tok, tok, ty);
                     }
                 }
 

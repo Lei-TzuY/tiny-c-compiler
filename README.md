@@ -37,3 +37,5 @@ The compiler is designed as an educational systems-programming project rather th
 - SysV variadic callees use a GP/SSE register-save area and typed compiler-backed `va_start`/`va_arg`, including floating variadic arguments and stack overflow.
 
 - Static/global integer scalar and array initializers accept type-aware integer constant expressions, including enum constants, casts, shifts, short-circuit logic, and ternary expressions.
+
+- Static pointer initializers support linker-relocatable address constants such as global/object addresses, array offsets, function addresses, member addresses, and string literals.
