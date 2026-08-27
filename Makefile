@@ -37,6 +37,7 @@ test: minicc
 	bash ./test/nested_switch_labels.sh
 	bash ./test/arithmetic_conversions.sh
 	bash ./test/alignof.sh
+	bash ./test/static_assert.sh
 	bash ./test/gnu_stack.sh
 	bash ./test/static_object_alignment.sh
 	bash ./test/uint64_fp_conversions.sh
