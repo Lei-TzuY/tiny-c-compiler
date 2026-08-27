@@ -40,10 +40,10 @@ assert_run 0 'union U{long v[2];double d;};long sum(union U u){return u.v[0]+u.v
 # The same classification composes inside an enclosing INTEGER-class record.
 assert_run 0 'union U{long i;double d;};struct S{union U u;long z;};long sum(struct S s){return s.u.i+s.z;}int main(){struct S s;s.u.i=20;s.z=22;return sum(s)==42?0:1;}'
 
-# Pure SSE records, and mixed unions without a full-width INTEGER covering
-# member, remain deliberately outside the current conservative classifier.
-assert_fail 'union U{double d;};int f(union U u){return 0;}int main(){return 0;}'
-assert_fail 'union U{int i;double d;};int f(union U u){return u.i;}int main(){return 0;}'
+# The full classifier also handles pure SSE unions and exact INTEGER-over-SSE
+# merging when a narrower integer member overlaps a wider floating member.
+assert_run 0 'union U{double d;};double f(union U u){return u.d;}int main(){union U u;u.d=42.0;return f(u)==42.0?0:1;}'
+assert_run 0 'union U{int i;double d;};int f(union U u){return u.i;}int main(){union U u;u.i=42;return f(u)==42?0:1;}'
 
 # Minicc caller -> host GCC callee verifies the external ABI boundary.
 cat > tmp-mixed-union-host.c <<'EOF'

@@ -127,7 +127,14 @@ extern Type *ty_double;
 bool is_integer(Type *ty);
 bool is_flonum(Type *ty);
 bool is_numeric(Type *ty);
-int sysv_integer_record_slots(Type *ty);
+
+typedef enum {
+    SYSV_ABI_NONE,
+    SYSV_ABI_INTEGER,
+    SYSV_ABI_SSE,
+} SysVAbiClass;
+
+int sysv_classify_record(Type *ty, SysVAbiClass classes[2]);
 Type *pointer_to(Type *base);
 Type *array_of(Type *base, int size);
 Type *func_type(Type *return_ty);

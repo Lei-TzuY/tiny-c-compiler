@@ -501,12 +501,17 @@ static Obj *create_lvar(char *name) {
 }
 
 
-// Aggregate expressions are represented by an address in the backend. A small
-// record returned in RAX/RDX is therefore materialized into an anonymous local
-// immediately after the call, preserving ordinary record-expression behavior.
+static bool supported_record_abi(Type *ty) {
+    SysVAbiClass classes[2];
+    return ty && ty->kind == TY_STRUCT && sysv_classify_record(ty, classes) > 0;
+}
+
+// Aggregate expressions are represented by an address in the backend. Small
+// records returned in INTEGER/SSE registers are therefore materialized into an
+// anonymous local immediately after the call, preserving ordinary record
+// expression behavior such as make().field and return-to-argument chaining.
 static void prepare_record_call_result(Node *node) {
-    if (!current_return_ty || !node || !node->ty ||
-        !sysv_integer_record_slots(node->ty))
+    if (!current_return_ty || !node || !supported_record_abi(node->ty))
         return;
 
     Obj *buf = create_lvar(new_unique_name());
@@ -3218,22 +3223,22 @@ static Node *cast_call_argument(Node *arg, Type *ty) {
     return cast;
 }
 
-// Keep PR #49's ABI firewall, but open the INTEGER-only subset that the backend
-// can now lower exactly. Prototypes may still describe unsupported shapes when
-// unused; definitions/calls reject floating/SSE or >16-byte record boundaries.
+// Keep the record-ABI firewall shape-aware: all naturally laid-out records up
+// to 16 bytes whose eightbytes classify as INTEGER/SSE are now lowered exactly.
+// Prototypes may still describe larger MEMORY-class records when never crossed.
 static void check_supported_function_abi(Type *fty, Token *at) {
     if (!fty || fty->kind != TY_FUNC)
         return;
 
     if (fty->return_ty && fty->return_ty->kind == TY_STRUCT &&
-        !sysv_integer_record_slots(fty->return_ty))
+        !supported_record_abi(fty->return_ty))
         error_at(at->loc, "unsupported record return ABI for x86-64 backend");
 
     if (!fty->has_prototype)
         return;
     for (Obj *param = fty->params; param; param = param->param_next)
         if (param->ty && param->ty->kind == TY_STRUCT &&
-            !sysv_integer_record_slots(param->ty))
+            !supported_record_abi(param->ty))
             error_at(at->loc, "unsupported record parameter ABI for x86-64 backend");
 }
 
@@ -3259,10 +3264,9 @@ static Node *parse_call_arguments(Token **rest, Token *tok, Type *fty) {
         add_type(arg);
 
         // Unprototyped calls and variadic tails have no declared parameter to
-        // inspect, so classify an aggregate from its actual type. Supported
-        // INTEGER-class records use the same caller lowering as fixed params.
+        // inspect, so classify aggregate actuals directly before codegen.
         if (arg->ty && arg->ty->kind == TY_STRUCT &&
-            !sysv_integer_record_slots(arg->ty))
+            !supported_record_abi(arg->ty))
             error_at(arg_tok->loc, "unsupported record argument ABI for x86-64 backend");
 
         if (expected) {

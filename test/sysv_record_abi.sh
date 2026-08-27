@@ -115,12 +115,9 @@ cc -o tmp-record-host-main tmp-record-host-main.c tmp-record-mini-callee.s
 ./tmp-record-host-main
 printf '%s\n' 'OK(record ABI): host GCC caller interoperates with minicc callee'
 
-# Unsupported ABI classes now diagnose instead of silently treating a record
-# address as one integer argument/result.
-assert_fail 'struct F{double x;};int f(struct F x){return 0;}int main(){struct F x={1.0};return f(x);}'
-assert_fail 'struct M{double x;long y;};long f(struct M x){return x.y;}int main(){struct M x={1.0,2};return f(x);}'
+# Records larger than two eightbytes remain MEMORY-class and are diagnosed
+# instead of silently treating an aggregate address as one scalar value.
 assert_fail 'struct B{long a;long b;long c;};long f(struct B x){return x.a;}int main(){struct B x={1,2,3};return f(x);}'
-assert_fail 'struct F{double x;};struct F make(){struct F x={1.0};return x;}int main(){return 0;}'
 assert_fail 'struct B{long a;long b;long c;};struct B make(){struct B x={1,2,3};return x;}int main(){return 0;}'
 
-echo 'All SysV integer-record ABI tests passed!'
+echo 'All SysV base record ABI tests passed!'

@@ -32,46 +32,75 @@ bool is_numeric(Type *ty) {
 }
 
 
-// Conservative SysV AMD64 aggregate subset shared by semantic ABI checks and
-// code generation. A record is supported by value only when its complete
-// representation fits in one or two eightbytes and every resulting eightbyte
-// is INTEGER-class. Arrays/nested records recurse. For unions, the SysV merge
-// rule makes INTEGER dominate SSE in an overlapping eightbyte; conservatively
-// recognize that case only when one INTEGER-only member spans the full union
-// representation. Other SSE and >16-byte MEMORY shapes remain behind the ABI
-// firewall until the full classifier/lowering is implemented.
-static bool sysv_integer_record_component(Type *ty) {
-    if (!ty)
+// SysV AMD64 classifies records up to two eightbytes independently.  This
+// compiler's scalar type system needs only INTEGER and SSE classes: integers and
+// pointers contribute INTEGER, float/double contribute SSE, and overlapping
+// union/subobject contributions merge with INTEGER taking precedence over SSE.
+// Larger records remain MEMORY-class and stay behind the ABI firewall.
+static SysVAbiClass merge_sysv_class(SysVAbiClass a, SysVAbiClass b) {
+    if (a == SYSV_ABI_NONE)
+        return b;
+    if (b == SYSV_ABI_NONE)
+        return a;
+    if (a == SYSV_ABI_INTEGER || b == SYSV_ABI_INTEGER)
+        return SYSV_ABI_INTEGER;
+    return SYSV_ABI_SSE;
+}
+
+static bool classify_sysv_type(Type *ty, int offset, SysVAbiClass classes[2]) {
+    if (!ty || ty->size <= 0)
         return false;
-    if (is_integer(ty) || ty->kind == TY_PTR)
-        return true;
-    if (ty->kind == TY_ARRAY)
-        return ty->array_len > 0 && sysv_integer_record_component(ty->base);
-    if (ty->kind == TY_STRUCT) {
-        if (ty->is_incomplete || !ty->members)
-            return false;
 
-        if (ty->is_union) {
-            for (Member *m = ty->members; m; m = m->next)
-                if (m->ty->size == ty->size &&
-                    sysv_integer_record_component(m->ty))
-                    return true;
+    if (ty->kind == TY_ARRAY) {
+        if (ty->array_len <= 0 || !ty->base)
             return false;
-        }
-
-        for (Member *m = ty->members; m; m = m->next)
-            if (!sysv_integer_record_component(m->ty))
+        for (int i = 0; i < ty->array_len; i++)
+            if (!classify_sysv_type(ty->base, offset + i * ty->base->size, classes))
                 return false;
         return true;
     }
-    return false;
+
+    if (ty->kind == TY_STRUCT) {
+        if (ty->is_incomplete || !ty->members)
+            return false;
+        for (Member *m = ty->members; m; m = m->next)
+            if (!classify_sysv_type(m->ty, offset + m->offset, classes))
+                return false;
+        return true;
+    }
+
+    SysVAbiClass cls;
+    if (is_integer(ty) || ty->kind == TY_PTR)
+        cls = SYSV_ABI_INTEGER;
+    else if (is_flonum(ty))
+        cls = SYSV_ABI_SSE;
+    else
+        return false;
+
+    int first = offset / 8;
+    int last = (offset + ty->size - 1) / 8;
+    if (first < 0 || last >= 2)
+        return false;
+    for (int i = first; i <= last; i++)
+        classes[i] = merge_sysv_class(classes[i], cls);
+    return true;
 }
 
-int sysv_integer_record_slots(Type *ty) {
+int sysv_classify_record(Type *ty, SysVAbiClass classes[2]) {
+    classes[0] = SYSV_ABI_NONE;
+    classes[1] = SYSV_ABI_NONE;
+
     if (!ty || ty->kind != TY_STRUCT || ty->is_incomplete ||
-        ty->size <= 0 || ty->size > 16 || !sysv_integer_record_component(ty))
+        ty->size <= 0 || ty->size > 16)
         return 0;
-    return (ty->size + 7) / 8;
+    if (!classify_sysv_type(ty, 0, classes))
+        return 0;
+
+    int slots = (ty->size + 7) / 8;
+    for (int i = 0; i < slots; i++)
+        if (classes[i] == SYSV_ABI_NONE)
+            return 0;
+    return slots;
 }
 
 Type *qualify_type(Type *ty, bool is_const, bool is_volatile) {
