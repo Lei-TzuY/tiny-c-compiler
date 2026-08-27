@@ -16,12 +16,15 @@ jobs:
         with:
           ref: agent/static-address-relocations
       - name: Apply migration
-        run: python3 tools/apply_static_address_relocations.py
+        run: |
+          python3 tools/apply_static_address_relocations.py
+          python3 tools/adjust_string_pointer_tests.py
       - name: Test compiler
         run: make clean && make test
       - name: Commit verified implementation
         run: |
           rm tools/apply_static_address_relocations.py
+          rm tools/adjust_string_pointer_tests.py
           rm .github/workflows/apply-static-address-relocations.yml
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
