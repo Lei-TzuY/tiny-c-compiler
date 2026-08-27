@@ -263,6 +263,68 @@ static Node *new_long(int64_t val) {
     return node;
 }
 
+static bool is_lvalue(Node *node) {
+    add_type(node);
+
+    switch (node->kind) {
+    case ND_VAR:
+        return node->ty->kind != TY_FUNC;
+    case ND_DEREF:
+        return node->ty->kind != TY_FUNC && node->ty->kind != TY_VOID;
+    case ND_MEMBER:
+        return is_lvalue(node->lhs);
+    default:
+        return false;
+    }
+}
+
+static bool is_modifiable_lvalue(Node *node) {
+    if (!is_lvalue(node))
+        return false;
+
+    Type *ty = node->ty;
+    if (!ty || ty->kind == TY_ARRAY || ty->kind == TY_FUNC ||
+        ty->kind == TY_VOID || ty->is_incomplete)
+        return false;
+    return true;
+}
+
+static bool is_addressable_expr(Node *node) {
+    add_type(node);
+
+    // A function designator is not an lvalue in C, but unary & is explicitly
+    // permitted on one.  Both a named function and *function_pointer reach
+    // here with TY_FUNC.
+    if (node->ty->kind == TY_FUNC)
+        return node->kind == ND_VAR || node->kind == ND_DEREF;
+    return is_lvalue(node);
+}
+
+static Node *new_checked_addr(Node *operand, Token *op) {
+    if (!is_addressable_expr(operand))
+        error_at(op->loc, "address-of operand is not an lvalue or function designator");
+    return new_unary(ND_ADDR, operand);
+}
+
+static Node *new_checked_deref(Node *operand, Token *op) {
+    add_type(operand);
+
+    Type *target = NULL;
+    if (operand->ty->kind == TY_PTR || operand->ty->kind == TY_ARRAY)
+        target = operand->ty->base;
+    else if (operand->ty->kind == TY_FUNC)
+        // Function designators decay to function pointers in this context;
+        // dereferencing that pointer yields the same function designator.
+        target = operand->ty;
+
+    if (!target || target->kind == TY_VOID)
+        error_at(op->loc, "invalid pointer dereference");
+
+    Node *node = new_unary(ND_DEREF, operand);
+    node->ty = target;
+    return node;
+}
+
 static Type *pointer_arithmetic_type(Type *ty) {
     if (!ty)
         return NULL;
@@ -348,6 +410,9 @@ static Node *new_compound_assign(NodeKind kind, Node *lhs, Node *rhs) {
     add_type(lhs);
     add_type(rhs);
 
+    if (!is_modifiable_lvalue(lhs))
+        error("left operand of compound assignment is not a modifiable lvalue");
+
     if (kind == ND_ADD_EQ || kind == ND_SUB_EQ) {
         if (is_numeric(lhs->ty) && is_numeric(rhs->ty))
             return new_binary(kind, lhs, rhs);
@@ -373,6 +438,8 @@ static Node *new_compound_assign(NodeKind kind, Node *lhs, Node *rhs) {
 
 static Node *new_inc_dec(NodeKind kind, Node *expr) {
     add_type(expr);
+    if (!is_modifiable_lvalue(expr))
+        error("increment/decrement operand is not a modifiable lvalue");
     if (!is_numeric(expr->ty) && !pointer_arithmetic_type(expr->ty))
         error("invalid increment/decrement operand");
     return new_unary(kind, expr);
@@ -1396,6 +1463,8 @@ static bool assignment_compatible(Type *dst, Node *rhs) {
 
 static Node *new_checked_assign(Node *lhs, Node *rhs, Token *op) {
     add_type(lhs);
+    if (!is_modifiable_lvalue(lhs))
+        error_at(op->loc, "left operand is not a modifiable lvalue");
     if (!assignment_compatible(lhs->ty, rhs))
         error_at(op->loc, "incompatible types in assignment");
     return new_binary(ND_ASSIGN, lhs, rhs);
@@ -1688,8 +1757,14 @@ static Node *unary(Token **rest, Token *tok) {
 
     if (equal(tok, "+"))  return unary(rest, tok->next);
     if (equal(tok, "-"))  return new_binary(ND_SUB, new_num(0), unary(rest, tok->next));
-    if (equal(tok, "&"))  return new_unary(ND_ADDR, unary(rest, tok->next));
-    if (equal(tok, "*"))  return new_unary(ND_DEREF, unary(rest, tok->next));
+    if (equal(tok, "&")) {
+        Token *op = tok;
+        return new_checked_addr(unary(rest, tok->next), op);
+    }
+    if (equal(tok, "*")) {
+        Token *op = tok;
+        return new_checked_deref(unary(rest, tok->next), op);
+    }
     if (equal(tok, "!")) {
         Token *op = tok;
         Node *operand = unary(rest, tok->next);
