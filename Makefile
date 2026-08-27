@@ -18,6 +18,7 @@ test: minicc
 	bash ./test/enum_scope.sh
 	bash ./test/enum_constexpr_tags.sh
 	bash ./test/abi_stack_args.sh
+	bash ./test/prototype_params.sh
 
 clean:
 	rm -f minicc *.o *~ tmp*
