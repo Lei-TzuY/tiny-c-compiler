@@ -6,6 +6,7 @@ on:
       - agent/expression-conversions-v2
     paths:
       - migration_expression_conversions.py
+      - patch_legacy_record_pointer.py
       - .github/workflows/apply-expression-conversions-v2.yml
 
 permissions:
@@ -19,12 +20,15 @@ jobs:
         with:
           ref: agent/expression-conversions-v2
       - name: Apply migration
-        run: python3 migration_expression_conversions.py
+        run: |
+          python3 migration_expression_conversions.py
+          python3 patch_legacy_record_pointer.py
       - name: Test compiler
         run: make clean && make test
       - name: Commit verified implementation
         run: |
           rm migration_expression_conversions.py
+          rm patch_legacy_record_pointer.py
           rm .github/workflows/apply-expression-conversions-v2.yml
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
