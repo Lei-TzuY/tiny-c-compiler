@@ -36,7 +36,7 @@ bool is_numeric(Type *ty) {
 // compiler's scalar type system needs only INTEGER and SSE classes: integers and
 // pointers contribute INTEGER, float/double contribute SSE, and overlapping
 // union/subobject contributions merge with INTEGER taking precedence over SSE.
-// Larger records remain MEMORY-class and stay behind the ABI firewall.
+// Complete records larger than two eightbytes are MEMORY-class.
 static SysVAbiClass merge_sysv_class(SysVAbiClass a, SysVAbiClass b) {
     if (a == SYSV_ABI_NONE)
         return b;
@@ -101,6 +101,10 @@ int sysv_classify_record(Type *ty, SysVAbiClass classes[2]) {
         if (classes[i] == SYSV_ABI_NONE)
             return 0;
     return slots;
+}
+
+bool sysv_record_is_memory(Type *ty) {
+    return ty && ty->kind == TY_STRUCT && !ty->is_incomplete && ty->size > 16;
 }
 
 Type *qualify_type(Type *ty, bool is_const, bool is_volatile) {

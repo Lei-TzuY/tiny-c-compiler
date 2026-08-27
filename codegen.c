@@ -448,16 +448,24 @@ typedef struct {
     int slots;
     int gp;
     int fp;
+    bool memory;
     SysVAbiClass classes[2];
 } RecordAbi;
 
-// Parser and backend share sysv_classify_record(), so every accepted record
-// arrives here with the same per-eightbyte INTEGER/SSE shape used for lowering.
+// Parser and backend share the same ABI frontier. Small records use the shared
+// per-eightbyte classifier; complete records larger than 16 bytes are MEMORY
+// class and therefore occupy rounded stack slots instead of GP/SSE registers.
 static RecordAbi require_record_abi(Type *ty) {
     RecordAbi abi = {};
+    if (sysv_record_is_memory(ty)) {
+        abi.memory = true;
+        abi.slots = (ty->size + 7) / 8;
+        return abi;
+    }
+
     abi.slots = sysv_classify_record(ty, abi.classes);
     if (!abi.slots)
-        error("unsupported by-value record ABI: expected <=16-byte INTEGER/SSE record");
+        error("unsupported by-value record ABI");
     for (int i = 0; i < abi.slots; i++) {
         if (abi.classes[i] == SYSV_ABI_INTEGER)
             abi.gp++;
@@ -471,7 +479,7 @@ static RecordAbi require_record_abi(Type *ty) {
 
 // Spill an aggregate expression value from the address in RAX. Zeroing the
 // rounded eightbyte area keeps partial final slots deterministic and avoids
-// reading bytes beyond the C object merely to fill an ABI register.
+// reading bytes beyond the C object merely to fill an ABI stack slot/register.
 static void push_record_value(Type *ty) {
     RecordAbi abi = require_record_abi(ty);
     printf("  sub $%d, %%rsp\n", abi.slots * 8);
@@ -543,6 +551,13 @@ static void copy_stack_record_to_local(Type *ty, int src, int dst) {
 
 static void save_record_parameter(Obj *var, int *gp, int *fp, int *stack_arg) {
     RecordAbi abi = require_record_abi(var->ty);
+    if (abi.memory) {
+        int src = 16 + *stack_arg * 8;
+        copy_stack_record_to_local(var->ty, src, var->offset);
+        *stack_arg += abi.slots;
+        return;
+    }
+
     if (*gp + abi.gp <= 6 && *fp + abi.fp <= 8) {
         int g = *gp;
         int f = *fp;
@@ -560,8 +575,8 @@ static void save_record_parameter(Obj *var, int *gp, int *fp, int *stack_arg) {
         return;
     }
 
-    // SysV reverts the entire aggregate to memory if either register class is
-    // short; do not consume the still-available registers of the other class.
+    // A small aggregate also reverts entirely to memory if either required
+    // register class is short; do not consume the other class partially.
     int src = 16 + *stack_arg * 8;
     copy_stack_record_to_local(var->ty, src, var->offset);
     *stack_arg += abi.slots;
@@ -586,8 +601,47 @@ static void load_record_bytes_to_reg(int offset, int bytes,
     }
 }
 
+static void emit_memory_record_return(Type *ty) {
+    if (!current_fn_obj || !current_fn_obj->sret_offset)
+        error("missing hidden record return pointer");
+
+    // Source aggregate address arrives in RAX. The incoming hidden destination
+    // was saved in the frame because arbitrary expressions/calls may clobber RDI.
+    printf("  mov %%rax, %%r10\n");
+    printf("  mov %d(%%rbp), %%r11\n", current_fn_obj->sret_offset);
+
+    int i = 0;
+    for (; i + 8 <= ty->size; i += 8) {
+        printf("  mov %d(%%r10), %%rcx\n", i);
+        printf("  mov %%rcx, %d(%%r11)\n", i);
+    }
+    if (i + 4 <= ty->size) {
+        printf("  mov %d(%%r10), %%ecx\n", i);
+        printf("  mov %%ecx, %d(%%r11)\n", i);
+        i += 4;
+    }
+    if (i + 2 <= ty->size) {
+        printf("  mov %d(%%r10), %%cx\n", i);
+        printf("  mov %%cx, %d(%%r11)\n", i);
+        i += 2;
+    }
+    if (i < ty->size) {
+        printf("  mov %d(%%r10), %%cl\n", i);
+        printf("  mov %%cl, %d(%%r11)\n", i);
+    }
+
+    // SysV requires MEMORY-returning functions to also return the destination
+    // address in RAX.
+    printf("  mov %%r11, %%rax\n");
+}
+
 static void emit_record_return(Type *ty) {
     RecordAbi abi = require_record_abi(ty);
+    if (abi.memory) {
+        emit_memory_record_return(ty);
+        return;
+    }
+
     static const char *gp64[] = {"%rax", "%rdx"};
     static const char *gp32[] = {"%eax", "%edx"};
     int g = 0;
@@ -610,13 +664,18 @@ static void emit_record_return(Type *ty) {
 
 static void materialize_record_call(Node *node) {
     RecordAbi abi = require_record_abi(node->ty);
-    static const char *gp64[] = {"%rax", "%rdx"};
-    int g = 0;
-    int f = 0;
-
     if (!node->ret_buffer)
         error("missing record call return buffer");
 
+    if (abi.memory) {
+        // The callee wrote directly into this hidden destination.
+        printf("  lea %d(%%rbp), %%rax\n", node->ret_buffer->offset);
+        return;
+    }
+
+    static const char *gp64[] = {"%rax", "%rdx"};
+    int g = 0;
+    int f = 0;
     for (int i = 0; i < abi.slots; i++) {
         int bytes = node->ty->size - i * 8;
         if (bytes > 8)
@@ -629,11 +688,13 @@ static void materialize_record_call(Node *node) {
     printf("  lea %d(%%rbp), %%rax\n", node->ret_buffer->offset);
 }
 
-// Generate a function call (direct or indirect via function pointer). Scalar and
-// aggregate INTEGER/SSE classes draw independently from rdi..r9 and xmm0..xmm7.
-// If any class needed by a record is exhausted, the whole record is stack-passed.
+// Generate a function call (direct or indirect via function pointer). Small
+// records draw independently from GP/SSE pools; MEMORY records always use the
+// stack. A MEMORY return reserves RDI for the hidden caller-owned destination.
 static void gen_funcall(Node *node) {
     bool indirect = (node->funcname == NULL);
+    bool memory_return = node->ty && node->ty->kind == TY_STRUCT &&
+                         sysv_record_is_memory(node->ty);
 
     if (indirect) {
         gen_expr(node->lhs);
@@ -652,7 +713,7 @@ static void gen_funcall(Node *node) {
     int spill_before[32];
     int spill_slots[32];
     int nargs = 0;
-    int gp_count = 0;
+    int gp_count = memory_return ? 1 : 0;
     int fp_count = 0;
     int stack_count = 0;
     int total_spill_slots = 0;
@@ -670,18 +731,24 @@ static void gen_funcall(Node *node) {
         if (record_arg[nargs]) {
             RecordAbi abi = require_record_abi(arg->ty);
             spill_slots[nargs] = abi.slots;
-            for (int j = 0; j < abi.slots; j++)
-                record_classes[nargs][j] = abi.classes[j];
-
-            if (gp_count + abi.gp <= 6 && fp_count + abi.fp <= 8) {
-                record_gp_base[nargs] = gp_count;
-                record_fp_base[nargs] = fp_count;
-                gp_count += abi.gp;
-                fp_count += abi.fp;
-            } else {
+            if (abi.memory) {
                 stack_arg[nargs] = true;
                 stack_slot[nargs] = stack_count;
                 stack_count += abi.slots;
+            } else {
+                for (int j = 0; j < abi.slots; j++)
+                    record_classes[nargs][j] = abi.classes[j];
+
+                if (gp_count + abi.gp <= 6 && fp_count + abi.fp <= 8) {
+                    record_gp_base[nargs] = gp_count;
+                    record_fp_base[nargs] = fp_count;
+                    gp_count += abi.gp;
+                    fp_count += abi.fp;
+                } else {
+                    stack_arg[nargs] = true;
+                    stack_slot[nargs] = stack_count;
+                    stack_count += abi.slots;
+                }
             }
         } else if (fp_arg[nargs]) {
             spill_slots[nargs] = 1;
@@ -741,6 +808,8 @@ static void gen_funcall(Node *node) {
     if (indirect)
         printf("  mov %d(%%r11), %%r10\n", total_spill_slots * 8);
 
+    // Keep alignment padding above the stack argument area, preserving the
+    // first stack-passed argument at 0(%rsp) immediately before call.
     int pad = (depth + stack_count) & 1;
     if (pad) {
         printf("  sub $8, %%rsp\n");
@@ -763,8 +832,14 @@ static void gen_funcall(Node *node) {
         }
     }
 
-    // For variadic calls AL counts every XMM register used, including SSE
-    // eightbytes contributed by aggregate arguments.
+    if (memory_return) {
+        if (!node->ret_buffer)
+            error("missing MEMORY record return buffer");
+        printf("  lea %d(%%rbp), %%rdi\n", node->ret_buffer->offset);
+    }
+
+    // For variadic calls AL counts every XMM register used by named/unnamed
+    // scalar or small-record arguments. MEMORY records contribute no XMM regs.
     printf("  mov $%d, %%eax\n", fp_count);
     if (indirect)
         printf("  call *%%r10\n");
@@ -1397,6 +1472,12 @@ static void assign_lvar_offsets(Program *prog) {
             fn->va_offset = -offset;
         }
 
+        if (fn->return_ty && sysv_record_is_memory(fn->return_ty)) {
+            offset += 8;
+            offset = align_up_cg(offset, 8);
+            fn->sret_offset = -offset;
+        }
+
         for (Obj *var = fn->locals; var; var = var->next) {
             int align = var->ty->align > 0 ? var->ty->align : 1;
             offset += var->ty->size;
@@ -1405,13 +1486,15 @@ static void assign_lvar_offsets(Program *prog) {
         }
 
         if (fn->is_variadic) {
-            int gp = 0;
+            int gp = fn->return_ty && sysv_record_is_memory(fn->return_ty) ? 1 : 0;
             int fp = 0;
             int stack_arg = 0;
             for (Obj *p = fn->params; p; p = p->param_next) {
                 if (p->ty->kind == TY_STRUCT) {
                     RecordAbi abi = require_record_abi(p->ty);
-                    if (gp + abi.gp <= 6 && fp + abi.fp <= 8) {
+                    if (abi.memory) {
+                        stack_arg += abi.slots;
+                    } else if (gp + abi.gp <= 6 && fp + abi.fp <= 8) {
                         gp += abi.gp;
                         fp += abi.fp;
                     } else {
@@ -1572,6 +1655,9 @@ void codegen(Program *prog) {
         printf("  mov %%rsp, %%rbp\n");
         printf("  sub $%d, %%rsp\n", fn->stack_size);
 
+        if (fn->return_ty && sysv_record_is_memory(fn->return_ty))
+            printf("  mov %%rdi, %d(%%rbp)\n", fn->sret_offset);
+
         if (fn->is_variadic) {
             printf("  mov %%rdi, %d(%%rbp)\n", fn->va_offset + 0);
             printf("  mov %%rsi, %d(%%rbp)\n", fn->va_offset + 8);
@@ -1585,7 +1671,7 @@ void codegen(Program *prog) {
 
         // Save named parameters to ordinary local slots. GP and SSE register
         // numbers advance independently, with a shared source-order stack area.
-        int gp = 0;
+        int gp = fn->return_ty && sysv_record_is_memory(fn->return_ty) ? 1 : 0;
         int fp = 0;
         int stack_arg = 0;
         for (Obj *var = fn->params; var; var = var->param_next) {

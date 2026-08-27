@@ -115,9 +115,9 @@ cc -o tmp-record-host-main tmp-record-host-main.c tmp-record-mini-callee.s
 ./tmp-record-host-main
 printf '%s\n' 'OK(record ABI): host GCC caller interoperates with minicc callee'
 
-# Records larger than two eightbytes remain MEMORY-class and are diagnosed
-# instead of silently treating an aggregate address as one scalar value.
-assert_fail 'struct B{long a;long b;long c;};long f(struct B x){return x.a;}int main(){struct B x={1,2,3};return f(x);}'
-assert_fail 'struct B{long a;long b;long c;};struct B make(){struct B x={1,2,3};return x;}int main(){return 0;}'
+# Larger records use the SysV MEMORY class; the dedicated suite exercises the
+# full sret/stack protocol while these cases guard the former rejection frontier.
+assert_run 0 'struct B{long a;long b;long c;};long f(struct B x){return x.a+x.b+x.c;}int main(){struct B x={10,12,20};return f(x)==42?0:1;}'
+assert_run 0 'struct B{long a;long b;long c;};struct B make(){struct B x={10,12,20};return x;}int main(){struct B x=make();return x.a+x.b+x.c==42?0:1;}'
 
 echo 'All SysV base record ABI tests passed!'
