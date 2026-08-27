@@ -1,4 +1,6 @@
 #include "minicc.h"
+#include <errno.h>
+#include <limits.h>
 
 // Input string
 static char *current_input;
@@ -166,6 +168,50 @@ static void concat_adjacent_strings(Token *tok) {
     }
 }
 
+static Type *integer_literal_type(uint64_t val, int base, bool has_u,
+                                  int long_count, char *loc) {
+    bool decimal = base == 10;
+
+    if (long_count == 0 && !has_u) {
+        if (val <= INT_MAX)
+            return ty_int;
+        if (!decimal && val <= UINT_MAX)
+            return ty_uint;
+        if (val <= INT64_MAX)
+            return ty_long;
+        if (!decimal)
+            return ty_ulong;
+        error_at(loc, "decimal integer constant is too large for signed long long");
+    }
+
+    if (long_count == 0 && has_u)
+        return val <= UINT_MAX ? ty_uint : ty_ulong;
+
+    if (long_count == 1 && !has_u) {
+        if (val <= INT64_MAX)
+            return ty_long;
+        if (!decimal)
+            return ty_ulong;
+        error_at(loc, "decimal long constant is too large");
+    }
+
+    if (long_count == 1 && has_u)
+        return ty_ulong;
+
+    if (long_count == 2 && !has_u) {
+        if (val <= INT64_MAX)
+            return ty_llong;
+        if (!decimal)
+            return ty_ullong;
+        error_at(loc, "decimal long long constant is too large");
+    }
+
+    if (long_count == 2 && has_u)
+        return ty_ullong;
+
+    error_at(loc, "invalid integer suffix");
+}
+
 // Tokenize a given string and returns new tokens.
 Token *tokenize(char *p) {
     current_input = p;
@@ -204,25 +250,31 @@ Token *tokenize(char *p) {
         // Numeric literal (integer or floating-point)
         if (isdigit(*p) || (*p == '.' && isdigit(p[1]))) {
             char *q = p;
-            char *end;
-            double fval = strtod(p, &end);
-            // Check if floating-point constant (contains '.', 'e', 'E', or 'f'/'F' suffix)
-            bool is_flonum = false;
-            for (char *c = p; c < end; c++) {
-                if (*c == '.' || *c == 'e' || *c == 'E') {
+            bool hex = p[0] == '0' && (p[1] == 'x' || p[1] == 'X');
+
+            // Let strtod identify decimal/hex floating syntax.  In a hex
+            // integer, e/E are ordinary digits, so only p/P denotes an exponent.
+            char *fend;
+            double fval = strtod(p, &fend);
+            bool is_flonum = *p == '.';
+            for (char *c = p; c < fend; c++) {
+                if (*c == '.' || (!hex && (*c == 'e' || *c == 'E')) ||
+                    (hex && (*c == 'p' || *c == 'P'))) {
                     is_flonum = true;
                     break;
                 }
             }
             bool is_float_suffix = false;
-            if (*end == 'f' || *end == 'F') {
+            if (*fend == 'f' || *fend == 'F') {
                 is_flonum = true;
                 is_float_suffix = true;
-                end++;
+                fend++;
             }
 
             if (is_flonum) {
-                p = end;
+                if (is_ident2(*fend))
+                    error_at(q, "invalid floating suffix");
+                p = fend;
                 cur = cur->next = new_token(TK_NUM, q, p);
                 cur->line_no = line;
                 cur->is_float = true;
@@ -231,11 +283,48 @@ Token *tokenize(char *p) {
                 continue;
             }
 
-            // Integer literal
-            cur = cur->next = new_token(TK_NUM, p, p);
+            int base = 10;
+            if (q[0] == '0' && (q[1] == 'x' || q[1] == 'X'))
+                base = 16;
+            else if (q[0] == '0')
+                base = 8;
+
+            errno = 0;
+            char *end;
+            uint64_t val = strtoull(p, &end, 0);
+            if (errno == ERANGE)
+                error_at(q, "integer constant is too large");
+            if (end == p)
+                error_at(q, "invalid integer constant");
+
+            bool has_u = false;
+            int long_count = 0;
+            for (;;) {
+                if ((*end == 'u' || *end == 'U') && !has_u) {
+                    has_u = true;
+                    end++;
+                    continue;
+                }
+                if ((*end == 'l' || *end == 'L') && long_count == 0) {
+                    char first = *end++;
+                    long_count = 1;
+                    if (*end == first) {
+                        long_count = 2;
+                        end++;
+                    }
+                    continue;
+                }
+                break;
+            }
+
+            if (is_ident2(*end))
+                error_at(q, "invalid integer suffix or digit");
+
+            cur = cur->next = new_token(TK_NUM, q, end);
             cur->line_no = line;
-            cur->val = strtoul(p, &p, 0);
-            cur->len = p - q;
+            cur->val = (int64_t)val;
+            cur->ty = integer_literal_type(val, base, has_u, long_count, q);
+            p = end;
             continue;
         }
 

@@ -177,7 +177,7 @@ static void cast_value(Type *from, Type *to) {
         // preserving the dropped low bit, convert the now-signed-positive
         // integer, then double the floating result.  This is the standard
         // exact-rounding reduction used for the full uint64_t domain.
-        if (from->kind == TY_LONG && from->is_unsigned) {
+        if (from->size == 8 && from->is_unsigned) {
             int c = count();
             printf("  test %%rax, %%rax\n");
             printf("  js .L.u64_to_fp.%d\n", c);
@@ -215,7 +215,7 @@ static void cast_value(Type *from, Type *to) {
         // the high bit is restored in the integer result.  C leaves negative,
         // NaN, and out-of-range floating conversions undefined, so only the
         // representable unsigned range needs a defined lowering here.
-        if (to->kind == TY_LONG && to->is_unsigned) {
+        if (to->size == 8 && to->is_unsigned) {
             int c = count();
             if (from->kind == TY_FLOAT) {
                 printf("  mov $0x5f000000, %%edx\n");

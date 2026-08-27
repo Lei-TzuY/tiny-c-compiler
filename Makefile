@@ -36,6 +36,7 @@ test: minicc
 	bash ./test/arithmetic_conversions.sh
 	bash ./test/gnu_stack.sh
 	bash ./test/uint64_fp_conversions.sh
+	bash ./test/integer_literals.sh
 
 clean:
 	rm -f minicc *.o *~ tmp*

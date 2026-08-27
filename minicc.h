@@ -65,6 +65,7 @@ Token *tokenize(char *input);
 typedef enum {
     TY_INT,
     TY_LONG,
+    TY_LLONG,
     TY_CHAR,
     TY_SHORT,
     TY_PTR,
@@ -109,12 +110,14 @@ struct Member {
 
 extern Type *ty_int;
 extern Type *ty_long;
+extern Type *ty_llong;
 extern Type *ty_char;
 extern Type *ty_short;
 extern Type *ty_void;
 extern Type *ty_bool;
 extern Type *ty_uint;
 extern Type *ty_ulong;
+extern Type *ty_ullong;
 extern Type *ty_uchar;
 extern Type *ty_ushort;
 extern Type *ty_float;

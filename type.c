@@ -2,6 +2,7 @@
 
 Type *ty_int    = &(Type){TY_INT,    4, 4, false};
 Type *ty_long   = &(Type){TY_LONG,   8, 8, false};
+Type *ty_llong  = &(Type){TY_LLONG,  8, 8, false};
 Type *ty_char   = &(Type){TY_CHAR,   1, 1, false};
 Type *ty_short  = &(Type){TY_SHORT,  2, 2, false};
 Type *ty_void   = &(Type){TY_VOID,   1, 1, false};
@@ -9,6 +10,7 @@ Type *ty_bool   = &(Type){TY_BOOL,   1, 1, false};
 
 Type *ty_uint   = &(Type){TY_INT,    4, 4, true};
 Type *ty_ulong  = &(Type){TY_LONG,   8, 8, true};
+Type *ty_ullong = &(Type){TY_LLONG,  8, 8, true};
 Type *ty_uchar  = &(Type){TY_CHAR,   1, 1, true};
 Type *ty_ushort = &(Type){TY_SHORT,  2, 2, true};
 
@@ -17,8 +19,8 @@ Type *ty_double = &(Type){TY_DOUBLE, 8, 8, false};
 
 bool is_integer(Type *ty) {
     return ty->kind == TY_INT || ty->kind == TY_LONG ||
-           ty->kind == TY_CHAR || ty->kind == TY_SHORT ||
-           ty->kind == TY_BOOL;
+           ty->kind == TY_LLONG || ty->kind == TY_CHAR ||
+           ty->kind == TY_SHORT || ty->kind == TY_BOOL;
 }
 
 bool is_flonum(Type *ty) {
@@ -104,10 +106,32 @@ static Type *integer_promotion(Type *ty) {
     return ty;
 }
 
-// Usual arithmetic conversions for the LP64 subset supported by minicc.
-// After integer promotion, rank follows size for the integer types we expose:
-// int < long.  If signedness differs, a wider signed type can represent every
-// value of the narrower unsigned type; otherwise the unsigned type wins.
+static int integer_rank(Type *ty) {
+    switch (ty->kind) {
+    case TY_BOOL:  return 1;
+    case TY_CHAR:  return 2;
+    case TY_SHORT: return 3;
+    case TY_INT:   return 4;
+    case TY_LONG:  return 5;
+    case TY_LLONG: return 6;
+    default:       return 0;
+    }
+}
+
+static Type *unsigned_integer_type(Type *ty) {
+    switch (ty->kind) {
+    case TY_CHAR:  return ty_uchar;
+    case TY_SHORT: return ty_ushort;
+    case TY_INT:   return ty_uint;
+    case TY_LONG:  return ty_ulong;
+    case TY_LLONG: return ty_ullong;
+    default:       return ty;
+    }
+}
+
+// Usual arithmetic conversions for the x86-64 LP64 target.  `long` and
+// `long long` are both 64-bit here but retain distinct C ranks, so size alone
+// is insufficient (notably unsigned long + long long -> unsigned long long).
 Type *get_common_type(Type *ty1, Type *ty2) {
     if (ty1->base)
         return pointer_to(ty1->base);
@@ -120,18 +144,25 @@ Type *get_common_type(Type *ty1, Type *ty2) {
     ty1 = integer_promotion(ty1);
     ty2 = integer_promotion(ty2);
 
+    int r1 = integer_rank(ty1);
+    int r2 = integer_rank(ty2);
     if (ty1->is_unsigned == ty2->is_unsigned)
-        return ty1->size >= ty2->size ? ty1 : ty2;
+        return r1 >= r2 ? ty1 : ty2;
 
     Type *u = ty1->is_unsigned ? ty1 : ty2;
     Type *s = ty1->is_unsigned ? ty2 : ty1;
+    int urank = integer_rank(u);
+    int srank = integer_rank(s);
 
-    if (u->size >= s->size)
+    if (urank >= srank)
         return u;
 
-    // On x86-64 LP64, a wider signed integer type represents the complete
-    // range of every narrower unsigned integer type supported here.
-    return s;
+    // The higher-rank signed type wins only when it can represent every value
+    // of the lower-rank unsigned type. On this target that requires more bits.
+    if (s->size > u->size)
+        return s;
+
+    return unsigned_integer_type(s);
 }
 
 void add_type(Node *node) {

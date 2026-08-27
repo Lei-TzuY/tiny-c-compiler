@@ -848,9 +848,16 @@ static Type *declspec(Token **rest, Token *tok) {
         if (consume(&tok, tok, "short"))  { ty = (ty && ty->is_unsigned) ? ty_ushort : ty_short; continue; }
 
         if (consume(&tok, tok, "long")) {
-            if (consume(&tok, tok, "long")) {}
+            bool already_long = ty == ty_long || ty == ty_ulong;
+            bool already_llong = ty == ty_llong || ty == ty_ullong;
+            bool adjacent_long = consume(&tok, tok, "long");
+            if (already_llong)
+                error_at(tok->loc, "too many 'long' specifiers");
             consume(&tok, tok, "int");
-            ty = (ty && ty->is_unsigned) ? ty_ulong : ty_long;
+            bool is_unsigned = ty && ty->is_unsigned;
+            bool is_llong = already_long || adjacent_long;
+            ty = is_llong ? (is_unsigned ? ty_ullong : ty_llong)
+                          : (is_unsigned ? ty_ulong : ty_long);
             continue;
         }
 
@@ -858,6 +865,7 @@ static Type *declspec(Token **rest, Token *tok) {
             if (ty == ty_char) ty = ty_uchar;
             else if (ty == ty_short) ty = ty_ushort;
             else if (ty == ty_long) ty = ty_ulong;
+            else if (ty == ty_llong) ty = ty_ullong;
             else ty = ty_uint;
             continue;
         }
@@ -1087,7 +1095,9 @@ static double parse_const_double(Token **rest, Token *tok) {
     (void)pos;
     if (tok->kind != TK_NUM)
         error_at(tok->loc, "expected numeric constant");
-    double val = tok->is_float ? tok->fval : (double)tok->val;
+    double val = tok->is_float ? tok->fval
+        : (tok->ty && tok->ty->is_unsigned ? (double)(uint64_t)tok->val
+                                            : (double)tok->val);
     if (neg) val = -val;
     *rest = tok->next;
     return val;
@@ -2265,10 +2275,10 @@ static Node *primary(Token **rest, Token *tok) {
 
     if (tok->kind == TK_NUM) {
         Node *node = new_num(tok->val);
-        if (tok->is_float) {
+        if (tok->is_float)
             node->fval = tok->fval;
+        if (tok->ty)
             node->ty = tok->ty;
-        }
         *rest = tok->next;
         return node;
     }
@@ -2328,6 +2338,7 @@ static bool type_compatible_impl(Type *a, Type *b, bool ignore_top_qual) {
     case TY_SHORT:
     case TY_INT:
     case TY_LONG:
+    case TY_LLONG:
         return a->is_unsigned == b->is_unsigned;
     case TY_PTR:
         return type_compatible_impl(a->base, b->base, false);
