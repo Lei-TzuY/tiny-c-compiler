@@ -172,6 +172,36 @@ static void cast_value(Type *from, Type *to) {
     }
 
     if (is_integer(from) && is_flonum(to)) {
+        // SSE2 only provides signed 64-bit integer-to-float conversion.  For
+        // unsigned long values with the high bit set, halve the value while
+        // preserving the dropped low bit, convert the now-signed-positive
+        // integer, then double the floating result.  This is the standard
+        // exact-rounding reduction used for the full uint64_t domain.
+        if (from->kind == TY_LONG && from->is_unsigned) {
+            int c = count();
+            printf("  test %%rax, %%rax\n");
+            printf("  js .L.u64_to_fp.%d\n", c);
+            if (to->kind == TY_FLOAT)
+                printf("  cvtsi2ss %%rax, %%xmm0\n");
+            else
+                printf("  cvtsi2sd %%rax, %%xmm0\n");
+            printf("  jmp .L.u64_to_fp_end.%d\n", c);
+            printf(".L.u64_to_fp.%d:\n", c);
+            printf("  mov %%rax, %%rdx\n");
+            printf("  and $1, %%eax\n");
+            printf("  shr $1, %%rdx\n");
+            printf("  or %%rax, %%rdx\n");
+            if (to->kind == TY_FLOAT) {
+                printf("  cvtsi2ss %%rdx, %%xmm0\n");
+                printf("  addss %%xmm0, %%xmm0\n");
+            } else {
+                printf("  cvtsi2sd %%rdx, %%xmm0\n");
+                printf("  addsd %%xmm0, %%xmm0\n");
+            }
+            printf(".L.u64_to_fp_end.%d:\n", c);
+            return;
+        }
+
         if (to->kind == TY_FLOAT)
             printf("  cvtsi2ss %%rax, %%xmm0\n");
         else
@@ -180,6 +210,40 @@ static void cast_value(Type *from, Type *to) {
     }
 
     if (is_flonum(from) && is_integer(to)) {
+        // cvtt{s,d}2si also targets signed 64-bit integers.  Values in the
+        // upper half of uint64_t are converted after subtracting 2^63, then
+        // the high bit is restored in the integer result.  C leaves negative,
+        // NaN, and out-of-range floating conversions undefined, so only the
+        // representable unsigned range needs a defined lowering here.
+        if (to->kind == TY_LONG && to->is_unsigned) {
+            int c = count();
+            if (from->kind == TY_FLOAT) {
+                printf("  mov $0x5f000000, %%edx\n");
+                printf("  movd %%edx, %%xmm1\n");
+                printf("  ucomiss %%xmm1, %%xmm0\n");
+                printf("  jb .L.fp_to_u64_low.%d\n", c);
+                printf("  subss %%xmm1, %%xmm0\n");
+                printf("  cvttss2si %%xmm0, %%rax\n");
+            } else {
+                printf("  movabs $0x43e0000000000000, %%rdx\n");
+                printf("  movq %%rdx, %%xmm1\n");
+                printf("  ucomisd %%xmm1, %%xmm0\n");
+                printf("  jb .L.fp_to_u64_low.%d\n", c);
+                printf("  subsd %%xmm1, %%xmm0\n");
+                printf("  cvttsd2si %%xmm0, %%rax\n");
+            }
+            printf("  movabs $0x8000000000000000, %%rdx\n");
+            printf("  or %%rdx, %%rax\n");
+            printf("  jmp .L.fp_to_u64_end.%d\n", c);
+            printf(".L.fp_to_u64_low.%d:\n", c);
+            if (from->kind == TY_FLOAT)
+                printf("  cvttss2si %%xmm0, %%rax\n");
+            else
+                printf("  cvttsd2si %%xmm0, %%rax\n");
+            printf(".L.fp_to_u64_end.%d:\n", c);
+            return;
+        }
+
         if (from->kind == TY_FLOAT)
             printf("  cvttss2si %%xmm0, %%rax\n");
         else
