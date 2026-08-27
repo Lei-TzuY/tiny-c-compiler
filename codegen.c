@@ -284,7 +284,10 @@ static void gen_addr(Node *node) {
         return;
     }
     if (node->kind == ND_MEMBER) {
-        gen_addr(node->lhs);
+        // Aggregate values are represented by address throughout this backend.
+        // gen_expr therefore works for both ordinary record lvalues and
+        // materialized record-returning calls such as make().field.
+        gen_expr(node->lhs);
         printf("  add $%d, %%rax\n", node->member->offset);
         return;
     }
@@ -441,6 +444,170 @@ static void gen_compound_assign(Node *node) {
     normalize(node->ty);
 }
 
+// This focused SysV subset supports by-value records whose complete object
+// representation fits in one or two INTEGER-class eightbytes.  Integer and
+// pointer leaves (including nested arrays/records) are sufficient for that
+// classification.  Floating/SSE and >16-byte MEMORY-class records are rejected
+// rather than silently passing their address as the old scalar path did.
+static bool integer_record_component(Type *ty) {
+    if (!ty)
+        return false;
+    if (is_integer(ty) || ty->kind == TY_PTR)
+        return true;
+    if (ty->kind == TY_ARRAY)
+        return ty->array_len > 0 && integer_record_component(ty->base);
+    if (ty->kind == TY_STRUCT) {
+        if (ty->is_incomplete || !ty->members)
+            return false;
+        for (Member *m = ty->members; m; m = m->next)
+            if (!integer_record_component(m->ty))
+                return false;
+        return true;
+    }
+    return false;
+}
+
+static int integer_record_abi_slots(Type *ty) {
+    if (!ty || ty->kind != TY_STRUCT || ty->is_incomplete ||
+        ty->size <= 0 || ty->size > 16 || !integer_record_component(ty))
+        return 0;
+    return (ty->size + 7) / 8;
+}
+
+static int require_integer_record_abi(Type *ty) {
+    int slots = integer_record_abi_slots(ty);
+    if (!slots)
+        error("unsupported by-value record ABI: expected <=16-byte INTEGER-class record");
+    return slots;
+}
+
+// Spill an aggregate expression value from the address in RAX.  Zeroing the
+// rounded eightbyte area keeps partial final slots deterministic and avoids
+// reading bytes beyond the C object merely to fill an ABI register.
+static void push_record_value(Type *ty) {
+    int slots = require_integer_record_abi(ty);
+    printf("  sub $%d, %%rsp\n", slots * 8);
+    depth += slots;
+    for (int i = 0; i < slots; i++)
+        printf("  movq $0, %d(%%rsp)\n", i * 8);
+
+    int i = 0;
+    for (; i + 8 <= ty->size; i += 8) {
+        printf("  mov %d(%%rax), %%r10\n", i);
+        printf("  mov %%r10, %d(%%rsp)\n", i);
+    }
+    if (i + 4 <= ty->size) {
+        printf("  mov %d(%%rax), %%r10d\n", i);
+        printf("  mov %%r10d, %d(%%rsp)\n", i);
+        i += 4;
+    }
+    if (i + 2 <= ty->size) {
+        printf("  mov %d(%%rax), %%r10w\n", i);
+        printf("  mov %%r10w, %d(%%rsp)\n", i);
+        i += 2;
+    }
+    if (i < ty->size) {
+        printf("  mov %d(%%rax), %%r10b\n", i);
+        printf("  mov %%r10b, %d(%%rsp)\n", i);
+    }
+}
+
+static void store_register_bytes_to_local(const char *reg64, int dst, int bytes) {
+    if (bytes == 8) {
+        printf("  mov %s, %d(%%rbp)\n", reg64, dst);
+        return;
+    }
+
+    printf("  mov %s, %%r10\n", reg64);
+    for (int i = 0; i < bytes; i++) {
+        printf("  mov %%r10b, %d(%%rbp)\n", dst + i);
+        if (i + 1 < bytes)
+            printf("  shr $8, %%r10\n");
+    }
+}
+
+static void copy_stack_record_to_local(Type *ty, int src, int dst) {
+    int i = 0;
+    for (; i + 8 <= ty->size; i += 8) {
+        printf("  mov %d(%%rbp), %%r10\n", src + i);
+        printf("  mov %%r10, %d(%%rbp)\n", dst + i);
+    }
+    if (i + 4 <= ty->size) {
+        printf("  mov %d(%%rbp), %%r10d\n", src + i);
+        printf("  mov %%r10d, %d(%%rbp)\n", dst + i);
+        i += 4;
+    }
+    if (i + 2 <= ty->size) {
+        printf("  mov %d(%%rbp), %%r10w\n", src + i);
+        printf("  mov %%r10w, %d(%%rbp)\n", dst + i);
+        i += 2;
+    }
+    if (i < ty->size) {
+        printf("  mov %d(%%rbp), %%r10b\n", src + i);
+        printf("  mov %%r10b, %d(%%rbp)\n", dst + i);
+    }
+}
+
+static void save_integer_record_parameter(Obj *var, int *gp, int *stack_arg) {
+    int slots = require_integer_record_abi(var->ty);
+    if (*gp + slots <= 6) {
+        int remaining = var->ty->size;
+        for (int i = 0; i < slots; i++) {
+            int bytes = remaining > 8 ? 8 : remaining;
+            store_register_bytes_to_local(argreg64[*gp + i],
+                                          var->offset + i * 8, bytes);
+            remaining -= bytes;
+        }
+        *gp += slots;
+        return;
+    }
+
+    int src = 16 + *stack_arg * 8;
+    copy_stack_record_to_local(var->ty, src, var->offset);
+    *stack_arg += slots;
+}
+
+// Load exactly `bytes` little-endian bytes from the record address in R10 into
+// one SysV result register.  Partial eightbytes are built bytewise so no read
+// crosses the source object's bounds.
+static void load_record_bytes_to_reg(int offset, int bytes,
+                                     const char *dst64, const char *dst32) {
+    if (bytes == 8) {
+        printf("  mov %d(%%r10), %s\n", offset, dst64);
+        return;
+    }
+
+    printf("  xor %s, %s\n", dst32, dst32);
+    for (int i = bytes - 1; i >= 0; i--) {
+        if (i != bytes - 1)
+            printf("  shl $8, %s\n", dst64);
+        printf("  movzbq %d(%%r10), %%rcx\n", offset + i);
+        printf("  or %%rcx, %s\n", dst64);
+    }
+}
+
+static void emit_integer_record_return(Type *ty) {
+    int slots = require_integer_record_abi(ty);
+    printf("  mov %%rax, %%r10\n");
+    int first = ty->size > 8 ? 8 : ty->size;
+    load_record_bytes_to_reg(0, first, "%rax", "%eax");
+    if (slots == 2)
+        load_record_bytes_to_reg(8, ty->size - 8, "%rdx", "%edx");
+}
+
+static void materialize_integer_record_call(Node *node) {
+    int slots = require_integer_record_abi(node->ty);
+    if (!node->ret_buffer)
+        error("missing record call return buffer");
+
+    int first = node->ty->size > 8 ? 8 : node->ty->size;
+    store_register_bytes_to_local("%rax", node->ret_buffer->offset, first);
+    if (slots == 2)
+        store_register_bytes_to_local("%rdx", node->ret_buffer->offset + 8,
+                                      node->ty->size - 8);
+    printf("  lea %d(%%rbp), %%rax\n", node->ret_buffer->offset);
+}
+
 // Generate a function call (direct or indirect via function pointer).
 // Integer/pointer arguments use rdi..r9 and float/double arguments independently
 // use xmm0..xmm7. Once a register class is exhausted, later arguments of that
@@ -455,33 +622,51 @@ static void gen_funcall(Node *node) {
 
     Node *args[32];
     bool fp_arg[32];
+    bool record_arg[32];
     bool stack_arg[32];
     int abi_slot[32];
     int stack_slot[32];
+    int spill_before[32];
+    int spill_slots[32];
     int nargs = 0;
     int gp_count = 0;
     int fp_count = 0;
     int stack_count = 0;
+    int total_spill_slots = 0;
 
-    // Preserve the compiler's existing left-to-right argument evaluation by
-    // spilling every computed value first. Each spill occupies one 8-byte slot.
+    // Preserve left-to-right evaluation while spilling each complete argument
+    // value. Records occupy one or two eightbyte spill slots instead of the old
+    // accidental single pointer-sized slot.
     for (Node *arg = node->args; arg; arg = arg->next) {
         if (nargs >= 32)
             error("too many arguments");
         add_type(arg);
         args[nargs] = arg;
-        fp_arg[nargs] = is_flonum(arg->ty);
+        record_arg[nargs] = arg->ty && arg->ty->kind == TY_STRUCT;
+        fp_arg[nargs] = !record_arg[nargs] && is_flonum(arg->ty);
         stack_arg[nargs] = false;
+        spill_before[nargs] = total_spill_slots;
+        spill_slots[nargs] = record_arg[nargs]
+                                 ? require_integer_record_abi(arg->ty)
+                                 : 1;
 
-        gen_expr(arg);
-        if (fp_arg[nargs]) {
+        if (record_arg[nargs]) {
+            int slots = spill_slots[nargs];
+            if (gp_count + slots <= 6) {
+                abi_slot[nargs] = gp_count;
+                gp_count += slots;
+            } else {
+                stack_arg[nargs] = true;
+                stack_slot[nargs] = stack_count;
+                stack_count += slots;
+            }
+        } else if (fp_arg[nargs]) {
             if (fp_count < 8)
                 abi_slot[nargs] = fp_count++;
             else {
                 stack_arg[nargs] = true;
                 stack_slot[nargs] = stack_count++;
             }
-            pushf(arg->ty);
         } else {
             if (gp_count < 6)
                 abi_slot[nargs] = gp_count++;
@@ -489,20 +674,33 @@ static void gen_funcall(Node *node) {
                 stack_arg[nargs] = true;
                 stack_slot[nargs] = stack_count++;
             }
-            push();
         }
+
+        gen_expr(arg);
+        if (record_arg[nargs])
+            push_record_value(arg->ty);
+        else if (fp_arg[nargs])
+            pushf(arg->ty);
+        else
+            push();
+
+        total_spill_slots += spill_slots[nargs];
         nargs++;
     }
 
-    // r11 points at the last argument spill. Argument i lives at
-    // (nargs-1-i)*8(r11), independent of whether it will use a register or stack.
+    // R11 points at the lowest-address argument spill. Variable-width record
+    // spills use the cumulative slot counts to recover each source address.
     printf("  mov %%rsp, %%r11\n");
 
     for (int i = 0; i < nargs; i++) {
         if (stack_arg[i])
             continue;
-        int src = (nargs - 1 - i) * 8;
-        if (fp_arg[i]) {
+        int src = (total_spill_slots - spill_before[i] - spill_slots[i]) * 8;
+        if (record_arg[i]) {
+            for (int j = 0; j < spill_slots[i]; j++)
+                printf("  mov %d(%%r11), %s\n", src + j * 8,
+                       argreg64[abi_slot[i] + j]);
+        } else if (fp_arg[i]) {
             if (args[i]->ty->kind == TY_FLOAT)
                 printf("  movss %d(%%r11), %%xmm%d\n", src, abi_slot[i]);
             else
@@ -513,7 +711,7 @@ static void gen_funcall(Node *node) {
     }
 
     if (indirect)
-        printf("  mov %d(%%r11), %%r10\n", nargs * 8);
+        printf("  mov %d(%%r11), %%r10\n", total_spill_slots * 8);
 
     // Keep alignment padding above the final stack arguments so the first
     // stack-passed argument remains at 0(%rsp) immediately before `call`.
@@ -530,12 +728,12 @@ static void gen_funcall(Node *node) {
         for (int i = 0; i < nargs; i++) {
             if (!stack_arg[i])
                 continue;
-            int src = (nargs - 1 - i) * 8;
+            int src = (total_spill_slots - spill_before[i] - spill_slots[i]) * 8;
             int dst = stack_slot[i] * 8;
-            // Raw 8-byte copy preserves both integer and SSE-class spill bits;
-            // float callees consume only the low 4 bytes from their stack slot.
-            printf("  mov %d(%%r11), %%rax\n", src);
-            printf("  mov %%rax, %d(%%rsp)\n", dst);
+            for (int j = 0; j < spill_slots[i]; j++) {
+                printf("  mov %d(%%r11), %%rax\n", src + j * 8);
+                printf("  mov %%rax, %d(%%rsp)\n", dst + j * 8);
+            }
         }
     }
 
@@ -555,11 +753,14 @@ static void gen_funcall(Node *node) {
         depth--;
     }
 
-    int spill_slots = nargs + (indirect ? 1 : 0);
-    if (spill_slots) {
-        printf("  add $%d, %%rsp\n", spill_slots * 8);
-        depth -= spill_slots;
+    int spill_count = total_spill_slots + (indirect ? 1 : 0);
+    if (spill_count) {
+        printf("  add $%d, %%rsp\n", spill_count * 8);
+        depth -= spill_count;
     }
+
+    if (node->ty && node->ty->kind == TY_STRUCT)
+        materialize_integer_record_call(node);
 }
 
 static void gen_expr(Node *node) {
@@ -987,7 +1188,10 @@ static void gen_stmt(Node *node) {
     if (node->kind == ND_RETURN) {
         if (node->lhs) {
             gen_expr(node->lhs);
-            cast_value(node->lhs->ty, current_return_ty);
+            if (current_return_ty && current_return_ty->kind == TY_STRUCT)
+                emit_integer_record_return(current_return_ty);
+            else
+                cast_value(node->lhs->ty, current_return_ty);
         }
         printf("  jmp .L.return.%s\n", current_fn);
         return;
@@ -1178,7 +1382,13 @@ static void assign_lvar_offsets(Program *prog) {
             int fp = 0;
             int stack_arg = 0;
             for (Obj *p = fn->params; p; p = p->param_next) {
-                if (is_flonum(p->ty)) {
+                if (p->ty->kind == TY_STRUCT) {
+                    int slots = require_integer_record_abi(p->ty);
+                    if (gp + slots <= 6)
+                        gp += slots;
+                    else
+                        stack_arg += slots;
+                } else if (is_flonum(p->ty)) {
                     if (fp < 8)
                         fp++;
                     else
@@ -1325,6 +1535,8 @@ void codegen(Program *prog) {
         current_fn = fn->name;
         current_fn_obj = fn;
         current_return_ty = fn->return_ty;
+        if (fn->return_ty && fn->return_ty->kind == TY_STRUCT)
+            require_integer_record_abi(fn->return_ty);
 
         // Prologue
         printf("  push %%rbp\n");
@@ -1348,6 +1560,10 @@ void codegen(Program *prog) {
         int fp = 0;
         int stack_arg = 0;
         for (Obj *var = fn->params; var; var = var->param_next) {
+            if (var->ty->kind == TY_STRUCT) {
+                save_integer_record_parameter(var, &gp, &stack_arg);
+                continue;
+            }
             if (is_flonum(var->ty)) {
                 if (fp < 8) {
                     if (var->ty->kind == TY_FLOAT)

@@ -219,6 +219,7 @@ struct Node {
     Obj *var;      // Variable reference
     Type *ty;      // Type of this node
     Member *member; // Used if kind == ND_MEMBER
+    Obj *ret_buffer; // Hidden local materialization for by-value record calls
 
     int64_t val;   // Used if kind == ND_NUM (integer)
     double fval;   // Used if kind == ND_NUM (float)

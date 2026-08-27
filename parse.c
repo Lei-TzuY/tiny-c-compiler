@@ -500,6 +500,19 @@ static Obj *create_lvar(char *name) {
     return var;
 }
 
+// A SysV register-returned record still needs addressable storage because the
+// rest of this compiler represents aggregate expression values by address.
+// Allocate an anonymous ordinary local while parsing a function body so the
+// backend can materialize RAX/RDX there immediately after the call.
+static void prepare_record_call_result(Node *node) {
+    if (!current_return_ty || !node || !node->ty || node->ty->kind != TY_STRUCT)
+        return;
+
+    Obj *buf = create_lvar(new_unique_name());
+    buf->ty = node->ty;
+    node->ret_buffer = buf;
+}
+
 // Create a static local variable (allocated as a global with unique name,
 // but scoped locally).
 static Obj *create_static_lvar(char *name) {
@@ -3108,6 +3121,7 @@ static Node *indirect_funcall(Token **rest, Token *tok, Node *callee) {
 
     tok = skip(tok, "(");
     node->args = parse_call_arguments(&tok, tok, fty);
+    prepare_record_call_result(node);
     *rest = tok;
     return node;
 }
@@ -3282,6 +3296,7 @@ static Node *primary(Token **rest, Token *tok) {
 
                 tok = skip(tok->next, "(");
                 node->args = parse_call_arguments(&tok, tok, fty);
+                prepare_record_call_result(node);
                 *rest = tok;
                 return node;
             }

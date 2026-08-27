@@ -13,6 +13,7 @@ test: minicc
 	bash ./test/preprocessor_advanced.sh
 	bash ./test/float.sh
 	bash ./test/float_abi.sh
+	bash ./test/sysv_record_abi.sh
 	bash ./test/incomplete_tags.sh
 	bash ./test/typedef_scope.sh
 	bash ./test/enum_scope.sh
