@@ -8,6 +8,7 @@ static char *argreg32[] = {"%edi", "%esi", "%edx", "%ecx", "%r8d", "%r9d"};
 static char *argreg16[] = {"%di",  "%si",  "%dx",  "%cx",  "%r8w", "%r9w"};
 static char *argreg8[]  = {"%dil", "%sil", "%dl",  "%cl",  "%r8b", "%r9b"};
 static char *current_fn;
+static Function *current_fn_obj;
 static Type *current_return_ty;
 static char *brk_label;
 static char *cnt_label;
@@ -607,6 +608,62 @@ static void gen_expr(Node *node) {
         return;
     }
 
+    if (node->kind == ND_VA_START) {
+        if (!current_fn_obj || !current_fn_obj->is_variadic)
+            error("va_start outside variadic function");
+        gen_expr(node->lhs); // RAX = &va_list
+        printf("  movl $%d, 0(%%rax)\n", current_fn_obj->va_gp_offset);
+        printf("  movl $%d, 4(%%rax)\n", current_fn_obj->va_fp_offset);
+        printf("  lea %d(%%rbp), %%rdx\n", current_fn_obj->va_stack_offset);
+        printf("  mov %%rdx, 8(%%rax)\n");
+        printf("  lea %d(%%rbp), %%rdx\n", current_fn_obj->va_offset);
+        printf("  mov %%rdx, 16(%%rax)\n");
+        return;
+    }
+
+    if (node->kind == ND_VA_ARG) {
+        gen_expr(node->lhs); // RAX = &va_list
+        printf("  mov %%rax, %%rdi\n");
+        int c = count();
+
+        if (node->ty->kind == TY_DOUBLE) {
+            printf("  mov 4(%%rdi), %%eax\n");
+            printf("  cmp $176, %%eax\n");
+            printf("  jae .L.va_fp_stack.%d\n", c);
+            printf("  mov 16(%%rdi), %%rdx\n");
+            printf("  movsd (%%rdx,%%rax), %%xmm0\n");
+            printf("  add $16, %%eax\n");
+            printf("  mov %%eax, 4(%%rdi)\n");
+            printf("  jmp .L.va_end.%d\n", c);
+            printf(".L.va_fp_stack.%d:\n", c);
+            printf("  mov 8(%%rdi), %%rdx\n");
+            printf("  movsd (%%rdx), %%xmm0\n");
+            printf("  add $8, %%rdx\n");
+            printf("  mov %%rdx, 8(%%rdi)\n");
+            printf(".L.va_end.%d:\n", c);
+            return;
+        }
+
+        printf("  mov 0(%%rdi), %%eax\n");
+        printf("  cmp $48, %%eax\n");
+        printf("  jae .L.va_gp_stack.%d\n", c);
+        printf("  mov 16(%%rdi), %%rdx\n");
+        printf("  mov %%eax, %%ecx\n");
+        printf("  add $8, %%ecx\n");
+        printf("  mov %%ecx, 0(%%rdi)\n");
+        printf("  mov (%%rdx,%%rax), %%rax\n");
+        printf("  jmp .L.va_gp_end.%d\n", c);
+        printf(".L.va_gp_stack.%d:\n", c);
+        printf("  mov 8(%%rdi), %%rdx\n");
+        printf("  mov (%%rdx), %%rax\n");
+        printf("  add $8, %%rdx\n");
+        printf("  mov %%rdx, 8(%%rdi)\n");
+        printf(".L.va_gp_end.%d:\n", c);
+        if (is_integer(node->ty))
+            normalize(node->ty);
+        return;
+    }
+
     if (node->kind == ND_FUNCALL) {
         gen_funcall(node);
         return;
@@ -1091,29 +1148,43 @@ static int align_up_cg(int n, int a) { return (n + a - 1) / a * a; }
 static void assign_lvar_offsets(Program *prog) {
     for (Function *fn = prog->fns; fn; fn = fn->next) {
         int offset = 0;
-        if (fn->is_variadic) {
-            offset += 48;
-            fn->va_offset = -offset;
 
-            int p_idx = 0;
-            for (Obj *p = fn->params; p; p = p->param_next) {
-                p->offset = fn->va_offset + p_idx * 8;
-                p_idx++;
-            }
+        if (fn->is_variadic) {
+            // SysV AMD64 register_save_area: 6 GP slots followed by 8 16-byte
+            // SSE slots. RBP is 16-byte aligned here, so -176 is aligned too.
+            offset = 176;
+            fn->va_offset = -offset;
         }
+
         for (Obj *var = fn->locals; var; var = var->next) {
-            if (fn->is_variadic) {
-                bool is_param = false;
-                for (Obj *p = fn->params; p; p = p->param_next) {
-                    if (p == var) { is_param = true; break; }
-                }
-                if (is_param) continue;
-            }
             int align = var->ty->align > 0 ? var->ty->align : 1;
             offset += var->ty->size;
             offset = align_up_cg(offset, align);
             var->offset = -offset;
         }
+
+        if (fn->is_variadic) {
+            int gp = 0;
+            int fp = 0;
+            int stack_arg = 0;
+            for (Obj *p = fn->params; p; p = p->param_next) {
+                if (is_flonum(p->ty)) {
+                    if (fp < 8)
+                        fp++;
+                    else
+                        stack_arg++;
+                } else {
+                    if (gp < 6)
+                        gp++;
+                    else
+                        stack_arg++;
+                }
+            }
+            fn->va_gp_offset = gp * 8;
+            fn->va_fp_offset = 48 + fp * 16;
+            fn->va_stack_offset = 16 + stack_arg * 8;
+        }
+
         fn->stack_size = align_up_cg(offset, 16);
     }
 }
@@ -1186,6 +1257,7 @@ void codegen(Program *prog) {
             printf("  .globl %s\n", fn->name);
         printf("%s:\n", fn->name);
         current_fn = fn->name;
+        current_fn_obj = fn;
         current_return_ty = fn->return_ty;
 
         // Prologue
@@ -1200,60 +1272,61 @@ void codegen(Program *prog) {
             printf("  mov %%rcx, %d(%%rbp)\n", fn->va_offset + 24);
             printf("  mov %%r8,  %d(%%rbp)\n", fn->va_offset + 32);
             printf("  mov %%r9,  %d(%%rbp)\n", fn->va_offset + 40);
-        } else {
-            // Save register arguments to locals and copy overflow arguments from
-            // the caller stack. GPR/SSE register numbers advance independently,
-            // while stack-passed arguments share one source-order slot sequence.
-            int gp = 0;
-            int fp = 0;
-            int stack_arg = 0;
-            for (Obj *var = fn->params; var; var = var->param_next) {
-                if (is_flonum(var->ty)) {
-                    if (fp < 8) {
-                        if (var->ty->kind == TY_FLOAT)
-                            printf("  movss %%xmm%d, %d(%%rbp)\n", fp, var->offset);
-                        else
-                            printf("  movsd %%xmm%d, %d(%%rbp)\n", fp, var->offset);
-                        fp++;
-                    } else {
-                        int src = 16 + stack_arg++ * 8;
-                        if (var->ty->kind == TY_FLOAT) {
-                            printf("  movss %d(%%rbp), %%xmm15\n", src);
-                            printf("  movss %%xmm15, %d(%%rbp)\n", var->offset);
-                        } else {
-                            printf("  movsd %d(%%rbp), %%xmm15\n", src);
-                            printf("  movsd %%xmm15, %d(%%rbp)\n", var->offset);
-                        }
-                    }
-                    continue;
-                }
+            for (int i = 0; i < 8; i++)
+                printf("  movaps %%xmm%d, %d(%%rbp)\n", i, fn->va_offset + 48 + i * 16);
+        }
 
-                if (gp < 6) {
-                    if (var->ty->kind == TY_BOOL || var->ty->kind == TY_CHAR)
-                        printf("  mov %s, %d(%%rbp)\n", argreg8[gp++], var->offset);
-                    else if (var->ty->kind == TY_SHORT)
-                        printf("  mov %s, %d(%%rbp)\n", argreg16[gp++], var->offset);
-                    else if (var->ty->kind == TY_INT)
-                        printf("  mov %s, %d(%%rbp)\n", argreg32[gp++], var->offset);
+        // Save named parameters to ordinary local slots. GP and SSE register
+        // numbers advance independently, with a shared source-order stack area.
+        int gp = 0;
+        int fp = 0;
+        int stack_arg = 0;
+        for (Obj *var = fn->params; var; var = var->param_next) {
+            if (is_flonum(var->ty)) {
+                if (fp < 8) {
+                    if (var->ty->kind == TY_FLOAT)
+                        printf("  movss %%xmm%d, %d(%%rbp)\n", fp, var->offset);
                     else
-                        printf("  mov %s, %d(%%rbp)\n", argreg64[gp++], var->offset);
-                    continue;
-                }
-
-                int src = 16 + stack_arg++ * 8;
-                if (var->ty->kind == TY_BOOL || var->ty->kind == TY_CHAR) {
-                    printf("  mov %d(%%rbp), %%al\n", src);
-                    printf("  mov %%al, %d(%%rbp)\n", var->offset);
-                } else if (var->ty->kind == TY_SHORT) {
-                    printf("  mov %d(%%rbp), %%ax\n", src);
-                    printf("  mov %%ax, %d(%%rbp)\n", var->offset);
-                } else if (var->ty->kind == TY_INT) {
-                    printf("  mov %d(%%rbp), %%eax\n", src);
-                    printf("  mov %%eax, %d(%%rbp)\n", var->offset);
+                        printf("  movsd %%xmm%d, %d(%%rbp)\n", fp, var->offset);
+                    fp++;
                 } else {
-                    printf("  mov %d(%%rbp), %%rax\n", src);
-                    printf("  mov %%rax, %d(%%rbp)\n", var->offset);
+                    int src = 16 + stack_arg++ * 8;
+                    if (var->ty->kind == TY_FLOAT) {
+                        printf("  movss %d(%%rbp), %%xmm15\n", src);
+                        printf("  movss %%xmm15, %d(%%rbp)\n", var->offset);
+                    } else {
+                        printf("  movsd %d(%%rbp), %%xmm15\n", src);
+                        printf("  movsd %%xmm15, %d(%%rbp)\n", var->offset);
+                    }
                 }
+                continue;
+            }
+
+            if (gp < 6) {
+                if (var->ty->kind == TY_BOOL || var->ty->kind == TY_CHAR)
+                    printf("  mov %s, %d(%%rbp)\n", argreg8[gp++], var->offset);
+                else if (var->ty->kind == TY_SHORT)
+                    printf("  mov %s, %d(%%rbp)\n", argreg16[gp++], var->offset);
+                else if (var->ty->kind == TY_INT)
+                    printf("  mov %s, %d(%%rbp)\n", argreg32[gp++], var->offset);
+                else
+                    printf("  mov %s, %d(%%rbp)\n", argreg64[gp++], var->offset);
+                continue;
+            }
+
+            int src = 16 + stack_arg++ * 8;
+            if (var->ty->kind == TY_BOOL || var->ty->kind == TY_CHAR) {
+                printf("  mov %d(%%rbp), %%al\n", src);
+                printf("  mov %%al, %d(%%rbp)\n", var->offset);
+            } else if (var->ty->kind == TY_SHORT) {
+                printf("  mov %d(%%rbp), %%ax\n", src);
+                printf("  mov %%ax, %d(%%rbp)\n", var->offset);
+            } else if (var->ty->kind == TY_INT) {
+                printf("  mov %d(%%rbp), %%eax\n", src);
+                printf("  mov %%eax, %d(%%rbp)\n", var->offset);
+            } else {
+                printf("  mov %d(%%rbp), %%rax\n", src);
+                printf("  mov %%rax, %d(%%rbp)\n", var->offset);
             }
         }
 

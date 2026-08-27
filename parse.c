@@ -191,6 +191,7 @@ static Node *new_initializer_assign(Node *lhs, Node *rhs, Token *at);
 static Node *new_checked_assign(Node *lhs, Node *rhs, Token *op);
 
 static Type *current_return_ty;
+static bool current_function_variadic;
 
 typedef struct CaseValue CaseValue;
 struct CaseValue {
@@ -2218,6 +2219,51 @@ static Node *postfix(Token **rest, Token *tok) {
 }
 
 static Node *primary(Token **rest, Token *tok) {
+    if (equal(tok, "__builtin_va_start")) {
+        Token *builtin = tok;
+        if (!current_function_variadic)
+            error_at(builtin->loc, "va_start is only valid in a variadic function");
+        tok = skip(tok->next, "(");
+        Node *ap = assign(&tok, tok);
+        add_type(ap);
+        if (!ap->ty || ap->ty->kind != TY_PTR || !ap->ty->base ||
+            ap->ty->base->kind != TY_STRUCT)
+            error_at(builtin->loc, "va_start requires a va_list object");
+        tok = skip(tok, ")");
+        Node *node = new_unary(ND_VA_START, ap);
+        node->ty = ty_void;
+        *rest = tok;
+        return node;
+    }
+
+    if (equal(tok, "__builtin_va_arg")) {
+        Token *builtin = tok;
+        if (!current_function_variadic)
+            error_at(builtin->loc, "va_arg is only valid in a variadic function");
+        tok = skip(tok->next, "(");
+        Node *ap = assign(&tok, tok);
+        add_type(ap);
+        if (!ap->ty || ap->ty->kind != TY_PTR || !ap->ty->base ||
+            ap->ty->base->kind != TY_STRUCT)
+            error_at(builtin->loc, "va_arg requires a va_list object");
+        tok = skip(tok, ",");
+        Type *ty = type_name(&tok, tok);
+        tok = skip(tok, ")");
+
+        // This scalar SysV subset supports the promoted variadic types that
+        // occupy one GP slot or one SSE double slot. Asking for float or a
+        // narrow integer after default argument promotions is a C misuse.
+        bool gp = ty->kind == TY_PTR || (is_integer(ty) && ty->size >= 4);
+        bool fp = ty->kind == TY_DOUBLE;
+        if (!gp && !fp)
+            error_at(builtin->loc, "unsupported or unpromoted type in va_arg");
+
+        Node *node = new_unary(ND_VA_ARG, ap);
+        node->ty = ty;
+        *rest = tok;
+        return node;
+    }
+
     if (equal(tok, "(")) {
         Node *node = expr(&tok, tok->next);
         *rest = skip(tok, ")");
@@ -2573,9 +2619,12 @@ Program *parse(Token *tok) {
             fn->is_variadic = ty->is_variadic;
 
             Type *saved_return_ty = current_return_ty;
+            bool saved_variadic = current_function_variadic;
             current_return_ty = ty->return_ty;
+            current_function_variadic = ty->is_variadic;
             Node *block = compound_stmt(&tok, tok);
             current_return_ty = saved_return_ty;
+            current_function_variadic = saved_variadic;
             fn->body = block->body;
             fn->locals = locals;
 

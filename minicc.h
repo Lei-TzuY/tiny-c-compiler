@@ -161,6 +161,8 @@ typedef enum {
     ND_FOR,       // "for"
     ND_BLOCK,     // { ... }
     ND_FUNCALL,   // Function call
+    ND_VA_START,  // compiler-backed va_start
+    ND_VA_ARG,    // compiler-backed typed va_arg
     ND_ADDR,      // & (address-of)
     ND_DEREF,     // * (dereference)
     ND_EXPR_STMT, // Expression statement
@@ -266,7 +268,10 @@ struct Function {
     int stack_size;
     bool is_static;
     bool is_variadic;
-    int va_offset;
+    int va_offset;       // SysV register-save area base, relative to RBP
+    int va_gp_offset;    // initial gp_offset for va_start
+    int va_fp_offset;    // initial fp_offset for va_start
+    int va_stack_offset; // first unnamed stack arg, relative to RBP
     Node *gotos;   // linked list of goto nodes
     Node *labels;  // linked list of label nodes
 };

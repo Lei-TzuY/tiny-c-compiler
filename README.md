@@ -33,3 +33,5 @@ The test target builds `minicc`, compiles small C programs with it, links them w
 The compiler is designed as an educational systems-programming project rather than a packaged commercial product.
 
 - Function calls share prototype-aware argument coercion and C default argument promotions for variadic and unprototyped calls.
+
+- SysV variadic callees use a GP/SSE register-save area and typed compiler-backed `va_start`/`va_arg`, including floating variadic arguments and stack overflow.
