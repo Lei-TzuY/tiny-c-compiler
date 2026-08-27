@@ -31,6 +31,37 @@ bool is_numeric(Type *ty) {
     return is_integer(ty) || is_flonum(ty);
 }
 
+
+// Conservative SysV AMD64 aggregate subset shared by semantic ABI checks and
+// code generation. A record is supported by value only when its complete
+// representation fits in one or two eightbytes and every leaf is INTEGER-class.
+// Arrays/nested records recurse; floating/SSE and >16-byte MEMORY shapes stay
+// behind the ABI firewall until their full classifier/lowering is implemented.
+static bool sysv_integer_record_component(Type *ty) {
+    if (!ty)
+        return false;
+    if (is_integer(ty) || ty->kind == TY_PTR)
+        return true;
+    if (ty->kind == TY_ARRAY)
+        return ty->array_len > 0 && sysv_integer_record_component(ty->base);
+    if (ty->kind == TY_STRUCT) {
+        if (ty->is_incomplete || !ty->members)
+            return false;
+        for (Member *m = ty->members; m; m = m->next)
+            if (!sysv_integer_record_component(m->ty))
+                return false;
+        return true;
+    }
+    return false;
+}
+
+int sysv_integer_record_slots(Type *ty) {
+    if (!ty || ty->kind != TY_STRUCT || ty->is_incomplete ||
+        ty->size <= 0 || ty->size > 16 || !sysv_integer_record_component(ty))
+        return 0;
+    return (ty->size + 7) / 8;
+}
+
 Type *qualify_type(Type *ty, bool is_const, bool is_volatile) {
     if (!ty || (!is_const && !is_volatile))
         return ty;

@@ -500,6 +500,20 @@ static Obj *create_lvar(char *name) {
     return var;
 }
 
+
+// Aggregate expressions are represented by an address in the backend. A small
+// record returned in RAX/RDX is therefore materialized into an anonymous local
+// immediately after the call, preserving ordinary record-expression behavior.
+static void prepare_record_call_result(Node *node) {
+    if (!current_return_ty || !node || !node->ty ||
+        !sysv_integer_record_slots(node->ty))
+        return;
+
+    Obj *buf = create_lvar(new_unique_name());
+    buf->ty = node->ty;
+    node->ret_buffer = buf;
+}
+
 // Create a static local variable (allocated as a global with unique name,
 // but scoped locally).
 static Obj *create_static_lvar(char *name) {
@@ -3044,25 +3058,23 @@ static Node *cast_call_argument(Node *arg, Type *ty) {
     return cast;
 }
 
-// Record object operations are supported inside a function, but the backend has
-// not yet implemented the SysV AMD64 aggregate argument/return classification.
-// Reject only actual ABI boundaries so harmless prototypes/typedefs remain
-// representable while code generation can never silently pass an object address
-// where the ABI requires record bytes/register classes or a hidden sret pointer.
+// Keep PR #49's ABI firewall, but open the INTEGER-only subset that the backend
+// can now lower exactly. Prototypes may still describe unsupported shapes when
+// unused; definitions/calls reject floating/SSE or >16-byte record boundaries.
 static void check_supported_function_abi(Type *fty, Token *at) {
     if (!fty || fty->kind != TY_FUNC)
         return;
 
-    if (fty->return_ty && fty->return_ty->kind == TY_STRUCT)
-        error_at(at->loc,
-                 "record return by value is not supported by the x86-64 backend");
+    if (fty->return_ty && fty->return_ty->kind == TY_STRUCT &&
+        !sysv_integer_record_slots(fty->return_ty))
+        error_at(at->loc, "unsupported record return ABI for x86-64 backend");
 
     if (!fty->has_prototype)
         return;
     for (Obj *param = fty->params; param; param = param->param_next)
-        if (param->ty && param->ty->kind == TY_STRUCT)
-            error_at(at->loc,
-                     "record parameter by value is not supported by the x86-64 backend");
+        if (param->ty && param->ty->kind == TY_STRUCT &&
+            !sysv_integer_record_slots(param->ty))
+            error_at(at->loc, "unsupported record parameter ABI for x86-64 backend");
 }
 
 // Parse a call's comma-separated argument list after the opening parenthesis.
@@ -3086,12 +3098,12 @@ static Node *parse_call_arguments(Token **rest, Token *tok, Type *fty) {
         Node *arg = assign(&tok, tok);
         add_type(arg);
 
-        // An unprototyped call or variadic tail has no declared parameter to
-        // inspect ahead of time. Catch aggregate values from their actual type
-        // so these paths cannot bypass the same backend ABI limitation.
-        if (arg->ty && arg->ty->kind == TY_STRUCT)
-            error_at(arg_tok->loc,
-                     "record argument by value is not supported by the x86-64 backend");
+        // Unprototyped calls and variadic tails have no declared parameter to
+        // inspect, so classify an aggregate from its actual type. Supported
+        // INTEGER-class records use the same caller lowering as fixed params.
+        if (arg->ty && arg->ty->kind == TY_STRUCT &&
+            !sysv_integer_record_slots(arg->ty))
+            error_at(arg_tok->loc, "unsupported record argument ABI for x86-64 backend");
 
         if (expected) {
             if (!assignment_compatible(expected->ty, arg))
@@ -3138,6 +3150,7 @@ static Node *indirect_funcall(Token **rest, Token *tok, Node *callee) {
 
     tok = skip(tok, "(");
     node->args = parse_call_arguments(&tok, tok, fty);
+    prepare_record_call_result(node);
     *rest = tok;
     return node;
 }
@@ -3313,6 +3326,7 @@ static Node *primary(Token **rest, Token *tok) {
 
                 tok = skip(tok->next, "(");
                 node->args = parse_call_arguments(&tok, tok, fty);
+                prepare_record_call_result(node);
                 *rest = tok;
                 return node;
             }
