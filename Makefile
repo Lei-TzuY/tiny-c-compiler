@@ -37,6 +37,7 @@ test: minicc
 	bash ./test/gnu_stack.sh
 	bash ./test/uint64_fp_conversions.sh
 	bash ./test/integer_literals.sh
+	bash ./test/escape_sequences.sh
 
 clean:
 	rm -f minicc *.o *~ tmp*

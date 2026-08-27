@@ -81,7 +81,50 @@ static bool startswith(char *p, char *q) {
     return strncmp(p, q, strlen(q)) == 0;
 }
 
-static int read_escaped_char(char c) {
+static int hex_digit_value(char c) {
+    if ('0' <= c && c <= '9') return c - '0';
+    if ('a' <= c && c <= 'f') return c - 'a' + 10;
+    if ('A' <= c && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+// Read one escape sequence after the leading backslash.  Ordinary character
+// and string literals use the execution character set represented by a byte in
+// this compiler, so numeric escape values must fit in unsigned char.
+static int read_escaped_char(char **rest, char *p, char *start) {
+    if ('0' <= *p && *p <= '7') {
+        unsigned val = 0;
+        int digits = 0;
+        while (digits < 3 && '0' <= *p && *p <= '7') {
+            val = (val << 3) + (*p - '0');
+            p++;
+            digits++;
+        }
+        if (val > UCHAR_MAX)
+            error_at(start, "octal escape sequence is out of range");
+        *rest = p;
+        return (int)val;
+    }
+
+    if (*p == 'x') {
+        p++;
+        int digit = hex_digit_value(*p);
+        if (digit < 0)
+            error_at(start, "hex escape sequence requires a hexadecimal digit");
+
+        unsigned val = 0;
+        while ((digit = hex_digit_value(*p)) >= 0) {
+            if (val > UCHAR_MAX / 16 || val * 16u + (unsigned)digit > UCHAR_MAX)
+                error_at(start, "hex escape sequence is out of range");
+            val = val * 16u + (unsigned)digit;
+            p++;
+        }
+        *rest = p;
+        return (int)val;
+    }
+
+    char c = *p++;
+    *rest = p;
     switch (c) {
     case 'n': return '\n';
     case 't': return '\t';
@@ -89,12 +132,12 @@ static int read_escaped_char(char c) {
     case '\\': return '\\';
     case '"': return '"';
     case '\'': return '\'';
-    case '0': return '\0';
     case 'a': return '\a';
     case 'b': return '\b';
     case 'f': return '\f';
     case 'v': return '\v';
-    default: return c;
+    case '?': return '?';
+    default: return (unsigned char)c;
     }
 }
 
@@ -346,8 +389,15 @@ Token *tokenize(char *p) {
             int len = 0;
             while (*p != '"') {
                 if (!*p) error_at(start, "unclosed string literal");
-                if (*p == '\\') { p++; buf[len++] = read_escaped_char(*p++); }
-                else             buf[len++] = *p++;
+                if (*p == '\n') error_at(start, "newline in string literal");
+                if (*p == '\\') {
+                    p++;
+                    if (!*p || *p == '\n')
+                        error_at(start, "unclosed escape sequence in string literal");
+                    buf[len++] = read_escaped_char(&p, p, start);
+                } else {
+                    buf[len++] = *p++;
+                }
             }
             buf[len] = '\0';
             cur = cur->next = new_token(TK_STR, start, p + 1);
@@ -362,9 +412,18 @@ Token *tokenize(char *p) {
         if (*p == '\'') {
             char *start = p++;
             int val;
-            if (*p == '\\') { p++; val = read_escaped_char(*p++); }
-            else if (*p == '\'') error_at(start, "empty char literal");
-            else val = (unsigned char)*p++;
+            if (*p == '\\') {
+                p++;
+                if (!*p || *p == '\n')
+                    error_at(start, "unclosed escape sequence in char literal");
+                val = read_escaped_char(&p, p, start);
+            } else if (*p == '\'') {
+                error_at(start, "empty char literal");
+            } else if (!*p || *p == '\n') {
+                error_at(start, "unclosed char literal");
+            } else {
+                val = (unsigned char)*p++;
+            }
             if (*p != '\'') error_at(start, "unclosed char literal");
             p++;
             cur = cur->next = new_token(TK_NUM, start, p);
