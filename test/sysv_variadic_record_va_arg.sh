@@ -63,6 +63,20 @@ int probe(double a,double b,double c,double d,double e,double f,double g,int tag
 int main(void){struct D p={7.0,8.0};return !probe(1,2,3,4,5,6,7,0,p,-1.0);}
 EOF
 
+# A mixed GP/SSE record also falls back as one unit. Exhausting GP registers must
+# not advance the still-available FP cursor; the following double remains xmm0.
+compile_and_run <<'EOF'
+#include <stdarg.h>
+struct M { long a; double b; };
+int probe(long a,long b,long c,long d,long e,long f,...) {
+  va_list ap; va_start(ap,f);
+  struct M m=va_arg(ap,struct M);
+  double z=va_arg(ap,double);
+  return a+b+c+d+e+f+m.a+m.b+z==42.0;
+}
+int main(void){struct M m={7,8.0};return !probe(1,2,3,4,5,6,m,6.0);}
+EOF
+
 # MEMORY records advance overflow_arg_area only. Later GP/SSE varargs retain
 # their register-save cursor positions.
 compile_and_run <<'EOF'
