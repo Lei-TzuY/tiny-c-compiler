@@ -1806,46 +1806,144 @@ static void resolve_gotos(void) {
     }
 }
 
-// Register a function symbol as a global Obj so it can be used as a value
-// (e.g. function pointer assignment: fp = add;)
-static void register_function_symbol(char *name, Type *return_ty, bool is_static,
-                                     Obj *params, bool is_variadic, bool has_prototype) {
-    // A later definition refreshes metadata from an earlier prototype.
-    for (Obj *var = globals; var; var = var->next) {
-        if (!strcmp(var->name, name) && var->is_function) {
-            Type *old_ty = var->ty;
-            Type *fty = func_type(return_ty);
-            if (!has_prototype && old_ty && old_ty->kind == TY_FUNC &&
-                old_ty->has_prototype) {
-                // An old-style `f()` redeclaration must not erase a previously
-                // known prototype.
-                fty->params = old_ty->params;
-                fty->is_variadic = old_ty->is_variadic;
-                fty->has_prototype = true;
-            } else {
-                fty->params = params;
-                fty->is_variadic = is_variadic;
-                fty->has_prototype = has_prototype;
-            }
-            var->ty = fty;
-            var->func_params = fty->params;
-            var->func_variadic = fty->is_variadic;
-            var->is_static = is_static;
-            return;
+static bool type_compatible(Type *a, Type *b) {
+    if (a == b)
+        return true;
+    if (!a || !b || a->kind != b->kind)
+        return false;
+
+    switch (a->kind) {
+    case TY_CHAR:
+    case TY_SHORT:
+    case TY_INT:
+    case TY_LONG:
+        return a->is_unsigned == b->is_unsigned;
+    case TY_PTR:
+        return type_compatible(a->base, b->base);
+    case TY_ARRAY:
+        return type_compatible(a->base, b->base) &&
+               (!a->array_len || !b->array_len || a->array_len == b->array_len);
+    case TY_STRUCT:
+        // Tagged records are completed in place, so pointer identity captures
+        // C record-type identity. Distinct anonymous records are incompatible.
+        return false;
+    case TY_FUNC: {
+        if (!type_compatible(a->return_ty, b->return_ty))
+            return false;
+
+        // An old-style f() declaration carries no parameter information. Keep
+        // it compatible with a real prototype so the stronger declaration can
+        // be retained, matching the compiler's existing C11-era behavior.
+        if (!a->has_prototype || !b->has_prototype)
+            return true;
+        if (a->is_variadic != b->is_variadic)
+            return false;
+
+        Obj *pa = a->params;
+        Obj *pb = b->params;
+        while (pa && pb) {
+            if (!type_compatible(pa->ty, pb->ty))
+                return false;
+            pa = pa->param_next;
+            pb = pb->param_next;
         }
+        return !pa && !pb;
+    }
+    default:
+        return true;
+    }
+}
+
+static Type *composite_redecl_type(Type *old_ty, Type *new_ty) {
+    if (old_ty->kind == TY_ARRAY && old_ty->array_len == 0 && new_ty->array_len)
+        return new_ty;
+    if (old_ty->kind == TY_FUNC && !old_ty->has_prototype && new_ty->has_prototype)
+        return new_ty;
+    return old_ty;
+}
+
+static Obj *find_global_symbol(const char *name) {
+    for (Obj *var = globals; var; var = var->next)
+        if (!strcmp(var->name, name))
+            return var;
+    return NULL;
+}
+
+static bool object_has_initializer(Obj *var) {
+    return var->has_init_val || var->init_vals_count > 0 || var->init_data;
+}
+
+static Obj *register_global_symbol(Token *ident, Type *ty, bool is_static,
+                                   bool is_extern) {
+    char *name = strndup(ident->loc, ident->len);
+    Obj *var = find_global_symbol(name);
+    if (var) {
+        if (var->is_function)
+            error_at(ident->loc, "'%s' redeclared as different kind of symbol", name);
+        if (!type_compatible(var->ty, ty))
+            error_at(ident->loc, "conflicting types for '%s'", name);
+        if (is_static && !var->is_static)
+            error_at(ident->loc, "static declaration of '%s' follows non-static declaration", name);
+
+        var->ty = composite_redecl_type(var->ty, ty);
+        if (var->is_static)
+            is_static = true;
+        var->is_static = is_static;
+        if (!is_extern)
+            var->is_extern = false;
+        return var;
+    }
+
+    var = calloc(1, sizeof(Obj));
+    var->name = name;
+    var->ty = ty;
+    var->is_local = false;
+    var->is_static = is_static;
+    var->is_extern = is_extern;
+    var->next = globals;
+    globals = var;
+    return var;
+}
+
+// Register a function symbol as a global Obj so it can be used as a value
+// (e.g. function pointer assignment: fp = add;). Redeclarations are checked
+// against the complete recursive function type before metadata is refreshed.
+static void register_function_symbol(char *name, Type *return_ty, bool is_static,
+                                     Obj *params, bool is_variadic,
+                                     bool has_prototype, bool is_definition) {
+    Type *fty = func_type(return_ty);
+    fty->params = params;
+    fty->is_variadic = is_variadic;
+    fty->has_prototype = has_prototype;
+
+    Obj *var = find_global_symbol(name);
+    if (var) {
+        if (!var->is_function)
+            error("'%s' redeclared as different kind of symbol", name);
+        if (!type_compatible(var->ty, fty))
+            error("conflicting types for function '%s'", name);
+        if (is_static && !var->is_static)
+            error("static declaration of '%s' follows non-static declaration", name);
+        if (is_definition && var->is_defined)
+            error("redefinition of function '%s'", name);
+
+        var->ty = composite_redecl_type(var->ty, fty);
+        var->func_params = var->ty->params;
+        var->func_variadic = var->ty->is_variadic;
+        var->is_static = var->is_static || is_static;
+        var->is_defined = var->is_defined || is_definition;
+        return;
     }
 
     Obj *fn_obj = calloc(1, sizeof(Obj));
-    fn_obj->name = name;
-    fn_obj->ty = func_type(return_ty);
-    fn_obj->ty->params = params;
-    fn_obj->ty->is_variadic = is_variadic;
-    fn_obj->ty->has_prototype = has_prototype;
-    fn_obj->func_params = params;
-    fn_obj->func_variadic = is_variadic;
+    fn_obj->name = strdup(name);
+    fn_obj->ty = fty;
+    fn_obj->func_params = fty->params;
+    fn_obj->func_variadic = fty->is_variadic;
     fn_obj->is_local = false;
     fn_obj->is_function = true;
     fn_obj->is_static = is_static;
+    fn_obj->is_defined = is_definition;
     fn_obj->next = globals;
     globals = fn_obj;
 }
@@ -1896,7 +1994,8 @@ Program *parse(Token *tok) {
             // Register the declaration before parsing a body so recursion and
             // function-address expressions inside the definition see it.
             register_function_symbol(name, ty->return_ty, is_static,
-                                     ty->params, ty->is_variadic, ty->has_prototype);
+                                     ty->params, ty->is_variadic, ty->has_prototype,
+                                     !equal(tok, ";"));
 
             // Prototype only: the recursive declarator has already consumed
             // the complete parameter list.
@@ -1943,14 +2042,11 @@ Program *parse(Token *tok) {
                 if (!is_extern && is_incomplete_object_type(ty))
                     error_at(ident->loc, "variable has incomplete type");
 
-                Obj *var = calloc(1, sizeof(Obj));
-                var->name = strndup(ident->loc, ident->len);
-                var->ty = ty;
-                var->is_local = false;
-                var->is_static = is_static;
-                var->is_extern = is_extern;
-                var->next = globals;
-                globals = var;
+                Obj *var = register_global_symbol(ident, ty, is_static, is_extern);
+                ty = var->ty;
+
+                if (equal(tok, "=") && object_has_initializer(var))
+                    error_at(ident->loc, "redefinition of global '%s'", var->name);
 
                 if (consume(&tok, tok, "=")) {
                     if (equal(tok, "{")) {

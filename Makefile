@@ -24,6 +24,7 @@ test: minicc
 	bash ./test/prototype_arity.sh
 	bash ./test/recursive_declarators.sh
 	bash ./test/type_names.sh
+	bash ./test/type_compatibility.sh
 
 clean:
 	rm -f minicc *.o *~ tmp*
