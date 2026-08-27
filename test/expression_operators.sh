@@ -64,6 +64,12 @@ assert_fail 'struct S{int x;}; int main(){struct S s;return s&&1;}'
 assert_fail 'struct S{int x;}; int main(){struct S s;return !s;}'
 assert_fail 'struct S{int x;}; int main(){struct S s;return s?1:2;}'
 
+# Unary minus requires an arithmetic operand.  The parser represents unary
+# minus as `0 - operand`, so pointer/array operands must not be mistaken for
+# the valid pointer-minus-integer form.
+assert_fail 'int main(){int x;int *p=&x;return -p!=0;}'
+assert_fail 'int main(){int a[2];return -a!=0;}'
+
 # Conditional alternatives must have a valid common type.
 assert_fail 'int main(){int x;double y;int *p=&x;double *q=&y;return (p?q:p)!=0;}'
 assert_fail 'struct A{int x;};struct B{int x;};int main(){struct A a;struct B b;return (1?a:b).x;}'
