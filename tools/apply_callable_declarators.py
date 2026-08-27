@@ -238,8 +238,8 @@ new = "- **Declarations**: local/global variables with initializers, `{ }` brace
 if old not in rs:
     raise SystemExit("missing README declarations anchor")
 rs = rs.replace(old, new, 1)
-old2 = "Direct calls use declared parameter types for scalar coercion; external variadic calls receive the required vector-register count and default float promotion."
-new2 = "Direct and indirect calls use declared parameter types for scalar coercion; indirect calls accept arbitrary function-valued postfix expressions such as `(fp)(x)` and `(*fp)(x)`. External variadic calls receive the required vector-register count and default float promotion."
+old2 = "Direct calls and prototype-bearing function-pointer calls use declared parameter types for scalar coercion; external variadic calls, including indirect calls, receive the required vector-register count and default float promotion."
+new2 = "Direct and indirect calls use declared parameter types for scalar coercion; indirect calls accept arbitrary function-valued postfix expressions such as `(fp)(x)` and `(*fp)(x)`. External variadic calls, including indirect calls, receive the required vector-register count and default float promotion."
 if old2 not in rs:
     raise SystemExit("missing README ABI anchor")
 rs = rs.replace(old2, new2, 1)
