@@ -1194,7 +1194,38 @@ static void emit_data(Program *prog) {
         if (var->is_function) continue; // function symbols don't need storage
         if (var->is_extern) continue;   // extern declarations don't allocate
 
-        if (var->init_data) {
+        if (var->init_image) {
+            printf("  .data\n");
+            if (!var->is_static)
+                printf("  .globl %s\n", var->name);
+            printf("%s:\n", var->name);
+
+            for (int off = 0; off < var->init_image_size;) {
+                Relocation *found = NULL;
+                for (Relocation *rel = var->init_relocs; rel; rel = rel->next) {
+                    if (rel->offset == off) {
+                        found = rel;
+                        break;
+                    }
+                }
+
+                if (found) {
+                    if (found->addend > 0)
+                        printf("  .quad %s+%" PRId64 "\n", found->label, found->addend);
+                    else if (found->addend < 0)
+                        printf("  .quad %s%" PRId64 "\n", found->label, found->addend);
+                    else
+                        printf("  .quad %s\n", found->label);
+                    off += 8;
+                    continue;
+                }
+
+                printf("  .byte %u\n", (unsigned char)var->init_image[off]);
+                off++;
+            }
+            if (var->init_image_size < var->ty->size)
+                printf("  .zero %d\n", var->ty->size - var->init_image_size);
+        } else if (var->init_data) {
             if (var->is_string_literal)
                 printf("  .section .rodata\n");
             else {

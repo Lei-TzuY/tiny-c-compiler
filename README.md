@@ -39,3 +39,5 @@ The compiler is designed as an educational systems-programming project rather th
 - Static/global integer scalar and array initializers accept type-aware integer constant expressions, including enum constants, casts, shifts, short-circuit logic, and ternary expressions.
 
 - Static pointer initializers support linker-relocatable address constants such as global/object addresses, array offsets, function addresses, member addresses, and string literals.
+
+- Static aggregate initializers use zero-filled byte images plus per-offset linker relocations, supporting pointer/function/string addresses inside arrays and records, nested aggregates, designators, and record padding.

@@ -60,6 +60,6 @@ assert_fail 'int a[]={[2147483648ULL]=1};int main(){return 0;}'
 
 # Until typed static-record serialization exists, reject the historical packed
 # integer fallback rather than silently placing members at incorrect offsets.
-assert_fail 'struct S{char c;long x;};struct S s={1,2};int main(){return 0;}'
+assert_run 1 'struct S{char c;long x;};struct S s={1,2};int main(){return sizeof(s)==16&&s.c==1&&s.x==2;}'
 
 echo 'All array-designator tests passed!'
