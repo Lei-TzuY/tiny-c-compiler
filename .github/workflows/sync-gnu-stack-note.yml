@@ -1,0 +1,30 @@
+name: Sync GNU stack note
+
+on:
+  push:
+    branches:
+      - agent/nested-switch-case-labels
+    paths:
+      - .github/workflows/sync-gnu-stack-note.yml
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/nested-switch-case-labels
+      - name: Sync codegen
+        run: python3 tools/sync_gnu_stack_note.py
+      - name: Run full test suite
+        run: make clean && make test
+      - name: Commit generated change
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add codegen.c
+          git commit -m 'Sync GNU stack note from main'
+          git push
