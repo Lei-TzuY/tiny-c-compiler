@@ -312,17 +312,35 @@ static void gen_compound_assign(Node *node) {
     printf("  mov %%rax, %%rsi\n");
     pop("%rax");
 
+    Type *operation_ty = NULL;
+    if (node->kind == ND_DIV_EQ || node->kind == ND_MOD_EQ)
+        operation_ty = get_common_type(node->lhs->ty, node->rhs->ty);
+    else if (node->kind == ND_SHR_EQ)
+        // Integer promotion of the left operand.  Using int as the second
+        // operand is a compact way to request exactly that promotion here.
+        operation_ty = get_common_type(node->lhs->ty, ty_int);
+
     switch (node->kind) {
     case ND_ADD_EQ: printf("  add %%rsi, %%rax\n"); break;
     case ND_SUB_EQ: printf("  sub %%rsi, %%rax\n"); break;
     case ND_MUL_EQ: printf("  imul %%rsi, %%rax\n"); break;
     case ND_DIV_EQ:
-        printf("  cqo\n");
-        printf("  idiv %%rsi\n");
+        if (operation_ty && operation_ty->is_unsigned) {
+            printf("  mov $0, %%rdx\n");
+            printf("  div %%rsi\n");
+        } else {
+            printf("  cqo\n");
+            printf("  idiv %%rsi\n");
+        }
         break;
     case ND_MOD_EQ:
-        printf("  cqo\n");
-        printf("  idiv %%rsi\n");
+        if (operation_ty && operation_ty->is_unsigned) {
+            printf("  mov $0, %%rdx\n");
+            printf("  div %%rsi\n");
+        } else {
+            printf("  cqo\n");
+            printf("  idiv %%rsi\n");
+        }
         printf("  mov %%rdx, %%rax\n");
         break;
     case ND_AND_EQ: printf("  and %%rsi, %%rax\n"); break;
@@ -334,7 +352,10 @@ static void gen_compound_assign(Node *node) {
         break;
     case ND_SHR_EQ:
         printf("  mov %%rsi, %%rcx\n");
-        printf("  sar %%cl, %%rax\n");
+        if (operation_ty && operation_ty->is_unsigned)
+            printf("  shr %%cl, %%rax\n");
+        else
+            printf("  sar %%cl, %%rax\n");
         break;
     default: error("invalid compound assignment");
     }
@@ -626,7 +647,8 @@ static void gen_expr(Node *node) {
     }
 
     bool arithmetic = node->kind == ND_ADD || node->kind == ND_SUB ||
-                      node->kind == ND_MUL || node->kind == ND_DIV;
+                      node->kind == ND_MUL || node->kind == ND_DIV ||
+                      node->kind == ND_MOD;
     bool comparison = node->kind == ND_EQ || node->kind == ND_NE ||
                       node->kind == ND_LT || node->kind == ND_LE;
     Type *common = NULL;
@@ -699,7 +721,7 @@ static void gen_expr(Node *node) {
     case ND_SUB: printf("  sub %%rdi, %%rax\n"); return;
     case ND_MUL: printf("  imul %%rdi, %%rax\n"); return;
     case ND_DIV:
-        if (node->lhs->ty && node->lhs->ty->is_unsigned) {
+        if (common && common->is_unsigned) {
             printf("  mov $0, %%rdx\n");
             printf("  div %%rdi\n");
         } else {
@@ -708,7 +730,7 @@ static void gen_expr(Node *node) {
         }
         return;
     case ND_MOD:
-        if (node->lhs->ty && node->lhs->ty->is_unsigned) {
+        if (common && common->is_unsigned) {
             printf("  mov $0, %%rdx\n");
             printf("  div %%rdi\n");
             printf("  mov %%rdx, %%rax\n");
@@ -727,7 +749,7 @@ static void gen_expr(Node *node) {
         return;
     case ND_SHR:
         printf("  mov %%rdi, %%rcx\n");
-        if (node->lhs->ty && node->lhs->ty->is_unsigned)
+        if (node->ty && node->ty->is_unsigned)
             printf("  shr %%cl, %%rax\n");
         else
             printf("  sar %%cl, %%rax\n");
@@ -736,7 +758,8 @@ static void gen_expr(Node *node) {
         printf("  cmp %%rdi, %%rax\n");
         if (node->kind == ND_EQ) printf("  sete %%al\n");
         else if (node->kind == ND_NE) printf("  setne %%al\n");
-        else if (node->lhs->ty && node->lhs->ty->is_unsigned) {
+        else if ((common && common->is_unsigned) ||
+                 (!common && node->lhs->ty && node->lhs->ty->kind == TY_PTR)) {
             if (node->kind == ND_LT) printf("  setb %%al\n");
             else if (node->kind == ND_LE) printf("  setbe %%al\n");
         } else {

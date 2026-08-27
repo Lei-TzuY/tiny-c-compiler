@@ -28,6 +28,7 @@ test: minicc
 	bash ./test/semantic_assignments.sh
 	bash ./test/expression_operators.sh
 	bash ./test/pointer_arithmetic.sh
+	bash ./test/arithmetic_conversions.sh
 
 clean:
 	rm -f minicc *.o *~ tmp*

@@ -57,7 +57,20 @@ Type *func_type(Type *return_ty) {
     return ty;
 }
 
-// Usual arithmetic conversions for the subset supported by minicc.
+// Integer promotions for the LP64 target used by minicc.  All supported
+// char/short/_Bool values fit in int, including their unsigned variants.
+static Type *integer_promotion(Type *ty) {
+    if (!is_integer(ty))
+        return ty;
+    if (ty->kind == TY_BOOL || ty->kind == TY_CHAR || ty->kind == TY_SHORT)
+        return ty_int;
+    return ty;
+}
+
+// Usual arithmetic conversions for the LP64 subset supported by minicc.
+// After integer promotion, rank follows size for the integer types we expose:
+// int < long.  If signedness differs, a wider signed type can represent every
+// value of the narrower unsigned type; otherwise the unsigned type wins.
 Type *get_common_type(Type *ty1, Type *ty2) {
     if (ty1->base)
         return pointer_to(ty1->base);
@@ -67,15 +80,21 @@ Type *get_common_type(Type *ty1, Type *ty2) {
     if (ty1->kind == TY_FLOAT || ty2->kind == TY_FLOAT)
         return ty_float;
 
-    if (ty1->size == 8 || ty2->size == 8) {
-        if (ty1->is_unsigned || ty2->is_unsigned)
-            return ty_ulong;
-        return ty_long;
-    }
+    ty1 = integer_promotion(ty1);
+    ty2 = integer_promotion(ty2);
 
-    if (ty1->is_unsigned || ty2->is_unsigned)
-        return ty_uint;
-    return ty_int;
+    if (ty1->is_unsigned == ty2->is_unsigned)
+        return ty1->size >= ty2->size ? ty1 : ty2;
+
+    Type *u = ty1->is_unsigned ? ty1 : ty2;
+    Type *s = ty1->is_unsigned ? ty2 : ty1;
+
+    if (u->size >= s->size)
+        return u;
+
+    // On x86-64 LP64, a wider signed integer type represents the complete
+    // range of every narrower unsigned integer type supported here.
+    return s;
 }
 
 void add_type(Node *node) {
@@ -123,11 +142,19 @@ void add_type(Node *node) {
     case ND_BITAND:
     case ND_BITOR:
     case ND_BITXOR:
+        if (!is_integer(node->lhs->ty) || !is_integer(node->rhs->ty))
+            error("integer operands required");
+        node->ty = get_common_type(node->lhs->ty, node->rhs->ty);
+        return;
+
     case ND_SHL:
     case ND_SHR:
         if (!is_integer(node->lhs->ty) || !is_integer(node->rhs->ty))
             error("integer operands required");
-        node->ty = get_common_type(node->lhs->ty, node->rhs->ty);
+        // Each operand is integer-promoted independently; unlike ordinary
+        // arithmetic there is no common type, and the result has the promoted
+        // type of the left operand.
+        node->ty = integer_promotion(node->lhs->ty);
         return;
 
     case ND_NEG:
