@@ -1418,6 +1418,32 @@ static char *build_string_array_image(Type *ty, Token *str) {
     return data;
 }
 
+static void validate_nested_string_array_type(Type *ty, Token *str) {
+    if (!is_character_array(ty))
+        error_at(str->loc, "string literal can initialize only a character array here");
+    if (ty->array_len == 0)
+        error_at(str->loc, "nested incomplete character-array initializer is not supported");
+
+    int payload_len = str->ty->array_len - 1;
+    if (ty->array_len < payload_len)
+        error_at(str->loc, "initializer string is too long for character array");
+}
+
+static Node *append_auto_string_array_initializer(Node *tail, Node *lhs,
+                                                   Type *ty, Token *str) {
+    validate_nested_string_array_type(ty, str);
+
+    for (int i = 0; i < ty->array_len; i++) {
+        int value = 0;
+        if (i < str->ty->array_len)
+            value = (unsigned char)str->str[i];
+        Node *elem = new_unary(ND_DEREF, new_add(lhs, new_num(i)));
+        Node *a = new_initializer_assign(elem, new_num(value), str);
+        tail = tail->next = new_unary(ND_EXPR_STMT, a);
+    }
+    return tail;
+}
+
 
 // Append zero-initialization statements for an automatic aggregate subobject.
 // C requires omitted array elements and record members to be initialized as if
@@ -1654,6 +1680,18 @@ static Member *find_static_initializer_member(Type *ty, Token *tok) {
 
 static Type *parse_static_image_initializer(Obj *var, Token **rest, Token *tok,
                                             Type *ty, int offset) {
+    Token *after_string = NULL;
+    Token *string_tok = string_initializer_token(tok, &after_string);
+    if (string_tok && ty->kind == TY_ARRAY) {
+        validate_nested_string_array_type(ty, string_tok);
+        reset_static_subobject(var, offset, ty->size);
+        char *image = build_string_array_image(ty, string_tok);
+        memcpy(var->init_image + offset, image, ty->size);
+        free(image);
+        *rest = after_string;
+        return ty;
+    }
+
     if (ty->kind != TY_ARRAY && ty->kind != TY_STRUCT) {
         if (equal(tok, "{")) {
             Token *brace = tok;
@@ -1874,28 +1912,41 @@ static Node *declaration(Token **rest, Token *tok, bool is_static, bool is_exter
                 if (ty->kind == TY_STRUCT && ty->is_union && initialized_union_members)
                     error_at(tok->loc, "excess elements in union initializer");
 
-                // Designated initializer: .member = expr
+                // Designated initializer: .member = initializer
                 if (consume(&tok, tok, ".")) {
                     if (ty->kind != TY_STRUCT)
                         error_at(tok->loc, "member designator requires a record initializer");
-                    if (tok->kind != TK_IDENT) error_at(tok->loc, "expected member name in designated initializer");
+                    if (tok->kind != TK_IDENT)
+                        error_at(tok->loc, "expected member name in designated initializer");
                     char *mname = strndup(tok->loc, tok->len);
-                    tok = skip(tok->next, "=");
-                    Node *e = assign(&tok, tok);
 
                     Member *m = ty->members;
                     for (; m; m = m->next)
                         if (!strcmp(m->name, mname)) break;
-                    if (!m) error_at(tok->loc, "unknown member in designated initializer");
+                    if (!m)
+                        error_at(tok->loc, "unknown member in designated initializer");
+                    tok = skip(tok->next, "=");
 
                     int mi = record_member_index(ty, m);
                     if (mi >= 0) member_init[mi] = true;
-                    Node *var_node = new_var_node(var);
                     Node *member_node = new_node(ND_MEMBER);
-                    member_node->lhs = var_node;
+                    member_node->lhs = new_var_node(var);
                     member_node->member = m;
-                    Node *a = new_initializer_assign(member_node, e, tok);
-                    block_cur = block_cur->next = new_unary(ND_EXPR_STMT, a);
+
+                    Token *after_nested_string = NULL;
+                    Token *nested_string = string_initializer_token(tok, &after_nested_string);
+                    if (nested_string && m->ty->kind == TY_ARRAY) {
+                        block_cur = append_auto_string_array_initializer(block_cur,
+                                                                         member_node,
+                                                                         m->ty,
+                                                                         nested_string);
+                        tok = after_nested_string;
+                    } else {
+                        Node *e = assign(&tok, tok);
+                        Node *a = new_initializer_assign(member_node, e, tok);
+                        block_cur = block_cur->next = new_unary(ND_EXPR_STMT, a);
+                    }
+
                     if (ty->is_union)
                         initialized_union_members++;
                     cur_mem = m->next;
@@ -1919,19 +1970,27 @@ static Node *declaration(Token **rest, Token *tok, bool is_static, bool is_exter
                         elem_init = realloc(elem_init, elem_cap * sizeof(bool));
                         memset(elem_init + old_cap, 0, (elem_cap - old_cap) * sizeof(bool));
                     }
-                    Node *e = assign(&tok, tok);
 
                     elem_init[idx] = true;
                     if (idx > max_idx) max_idx = idx;
                     Node *lhs = new_unary(ND_DEREF, new_add(new_var_node(var), new_num(idx)));
-                    Node *a = new_initializer_assign(lhs, e, tok);
-                    block_cur = block_cur->next = new_unary(ND_EXPR_STMT, a);
+                    Token *after_nested_string = NULL;
+                    Token *nested_string = string_initializer_token(tok, &after_nested_string);
+                    if (nested_string && ty->base->kind == TY_ARRAY) {
+                        block_cur = append_auto_string_array_initializer(block_cur, lhs,
+                                                                         ty->base,
+                                                                         nested_string);
+                        tok = after_nested_string;
+                    } else {
+                        Node *e = assign(&tok, tok);
+                        Node *a = new_initializer_assign(lhs, e, tok);
+                        block_cur = block_cur->next = new_unary(ND_EXPR_STMT, a);
+                    }
                     cur_idx = idx + 1;
                     continue;
                 }
 
                 // Positional initializer
-                Node *e = assign(&tok, tok);
                 if (ty->kind == TY_ARRAY) {
                     if (ty->array_len > 0 && cur_idx >= ty->array_len)
                         error_at(tok->loc, "excess elements in array initializer");
@@ -1941,22 +2000,45 @@ static Node *declaration(Token **rest, Token *tok, bool is_static, bool is_exter
                         elem_init = realloc(elem_init, elem_cap * sizeof(bool));
                         memset(elem_init + old_cap, 0, (elem_cap - old_cap) * sizeof(bool));
                     }
-                    elem_init[cur_idx] = true;
-                    if (cur_idx > max_idx) max_idx = cur_idx;
-                    Node *lhs = new_unary(ND_DEREF, new_add(new_var_node(var), new_num(cur_idx++)));
-                    Node *a = new_initializer_assign(lhs, e, tok);
-                    block_cur = block_cur->next = new_unary(ND_EXPR_STMT, a);
+
+                    int idx = cur_idx++;
+                    elem_init[idx] = true;
+                    if (idx > max_idx) max_idx = idx;
+                    Node *lhs = new_unary(ND_DEREF, new_add(new_var_node(var), new_num(idx)));
+                    Token *after_nested_string = NULL;
+                    Token *nested_string = string_initializer_token(tok, &after_nested_string);
+                    if (nested_string && ty->base->kind == TY_ARRAY) {
+                        block_cur = append_auto_string_array_initializer(block_cur, lhs,
+                                                                         ty->base,
+                                                                         nested_string);
+                        tok = after_nested_string;
+                    } else {
+                        Node *e = assign(&tok, tok);
+                        Node *a = new_initializer_assign(lhs, e, tok);
+                        block_cur = block_cur->next = new_unary(ND_EXPR_STMT, a);
+                    }
                 } else {
                     if (!cur_mem)
                         error_at(tok->loc, "excess elements in record initializer");
                     int mi = record_member_index(ty, cur_mem);
                     if (mi >= 0) member_init[mi] = true;
-                    Node *var_node = new_var_node(var);
                     Node *member_node = new_node(ND_MEMBER);
-                    member_node->lhs = var_node;
+                    member_node->lhs = new_var_node(var);
                     member_node->member = cur_mem;
-                    Node *a = new_initializer_assign(member_node, e, tok);
-                    block_cur = block_cur->next = new_unary(ND_EXPR_STMT, a);
+
+                    Token *after_nested_string = NULL;
+                    Token *nested_string = string_initializer_token(tok, &after_nested_string);
+                    if (nested_string && cur_mem->ty->kind == TY_ARRAY) {
+                        block_cur = append_auto_string_array_initializer(block_cur,
+                                                                         member_node,
+                                                                         cur_mem->ty,
+                                                                         nested_string);
+                        tok = after_nested_string;
+                    } else {
+                        Node *e = assign(&tok, tok);
+                        Node *a = new_initializer_assign(member_node, e, tok);
+                        block_cur = block_cur->next = new_unary(ND_EXPR_STMT, a);
+                    }
                     if (ty->is_union)
                         initialized_union_members++;
                     cur_mem = cur_mem->next;
