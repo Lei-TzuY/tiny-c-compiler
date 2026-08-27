@@ -66,12 +66,12 @@ if s.count(old) != 1:
     raise SystemExit(f'Makefile test anchor count={s.count(old)}')
 p.write_text(s.replace(old, new, 1))
 
-# README: document the ELF stack hygiene guarantee near the test-suite summary.
+# README: document the ELF stack hygiene guarantee in the build/test section.
 p = Path('README.md')
 s = p.read_text()
-needle = '## Testing\n'
+needle = '## Build and test\n\n'
 if needle not in s:
-    raise SystemExit('README testing heading not found')
+    raise SystemExit('README build/test heading not found')
 insert = '''The x86-64 ELF backend emits a `.note.GNU-stack` marker so generated objects do not request an executable process stack.\n\n'''
-s = s.replace(needle, needle + '\n' + insert, 1)
+s = s.replace(needle, needle + insert, 1)
 p.write_text(s)
