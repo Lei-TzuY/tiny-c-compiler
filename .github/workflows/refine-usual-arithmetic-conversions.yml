@@ -1,0 +1,28 @@
+name: Refine usual arithmetic conversions
+
+on:
+  push:
+    branches:
+      - agent/usual-arithmetic-conversions
+
+permissions:
+  contents: write
+
+jobs:
+  refine:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/usual-arithmetic-conversions
+      - name: Apply refinement
+        run: python3 tools/refine_usual_arithmetic_conversions.py
+      - name: Run full test suite
+        run: make clean && make test
+      - name: Commit generated changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add codegen.c test/arithmetic_conversions.sh
+          git commit -m "Normalize converted integer operations"
+          git push origin HEAD:agent/usual-arithmetic-conversions
