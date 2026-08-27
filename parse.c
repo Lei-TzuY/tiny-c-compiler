@@ -3744,16 +3744,22 @@ static Node *primary(Token **rest, Token *tok) {
         Type *ty = type_name(&tok, tok);
         tok = skip(tok, ")");
 
-        // This scalar SysV subset supports the promoted variadic types that
-        // occupy one GP slot or one SSE double slot. Asking for float or a
-        // narrow integer after default argument promotions is a C misuse.
+        // Default-promoted scalar types continue to use one GP/SSE slot.
+        // Records use the same INTEGER/SSE/MEMORY classifier as ordinary calls
+        // and are materialized into an anonymous local result object.
         bool gp = ty->kind == TY_PTR || (is_integer(ty) && ty->size >= 4);
         bool fp = ty->kind == TY_DOUBLE;
-        if (!gp && !fp)
+        bool record = ty->kind == TY_STRUCT && supported_record_abi(ty);
+        if (!gp && !fp && !record)
             error_at(builtin->loc, "unsupported or unpromoted type in va_arg");
 
         Node *node = new_unary(ND_VA_ARG, ap);
         node->ty = ty;
+        if (record) {
+            Obj *buf = create_lvar(new_unique_name());
+            buf->ty = ty;
+            node->ret_buffer = buf;
+        }
         *rest = tok;
         return node;
     }

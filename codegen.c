@@ -865,6 +865,88 @@ static void gen_funcall(Node *node) {
         materialize_record_call(node);
 }
 
+// Copy one low eightbyte from the variadic register-save area into a
+// record result local. Only bytes belonging to the C object are stored.
+static void copy_va_register_slot_to_local(const char *index_reg,
+                                           int dst, int bytes) {
+    printf("  mov (%%rdx,%s), %%r10\n", index_reg);
+    store_register_bytes_to_local("%r10", dst, bytes);
+}
+
+static void copy_va_stack_record_to_local(Type *ty, int dst) {
+    int slots = (ty->size + 7) / 8;
+    for (int i = 0; i < slots; i++) {
+        int bytes = ty->size - i * 8;
+        if (bytes > 8)
+            bytes = 8;
+        printf("  mov %d(%%rdx), %%r10\n", i * 8);
+        store_register_bytes_to_local("%r10", dst + i * 8, bytes);
+    }
+}
+
+// Aggregate va_arg mirrors the ordinary SysV classifier. Small records consume
+// independent GP/SSE save slots only when every required class is available;
+// otherwise the whole value comes from overflow_arg_area. MEMORY records always
+// come from overflow_arg_area and do not consume either register cursor.
+static void gen_record_va_arg(Node *node) {
+    RecordAbi abi = require_record_abi(node->ty);
+    if (!node->ret_buffer)
+        error("missing record va_arg materialization buffer");
+
+    gen_expr(node->lhs);
+    printf("  mov %%rax, %%rdi\n");
+    int c = count();
+
+    if (!abi.memory) {
+        if (abi.gp) {
+            printf("  mov 0(%%rdi), %%eax\n");
+            printf("  cmp $%d, %%eax\n", 48 - abi.gp * 8);
+            printf("  ja .L.va_record_stack.%d\n", c);
+        }
+        if (abi.fp) {
+            printf("  mov 4(%%rdi), %%eax\n");
+            printf("  cmp $%d, %%eax\n", 176 - abi.fp * 16);
+            printf("  ja .L.va_record_stack.%d\n", c);
+        }
+
+        printf("  mov 0(%%rdi), %%esi\n");
+        printf("  mov 4(%%rdi), %%ecx\n");
+        printf("  mov 16(%%rdi), %%rdx\n");
+        for (int i = 0; i < abi.slots; i++) {
+            int bytes = node->ty->size - i * 8;
+            if (bytes > 8)
+                bytes = 8;
+            if (abi.classes[i] == SYSV_ABI_INTEGER) {
+                copy_va_register_slot_to_local("%rsi", node->ret_buffer->offset + i * 8, bytes);
+                printf("  add $8, %%esi\n");
+            } else if (abi.classes[i] == SYSV_ABI_SSE) {
+                copy_va_register_slot_to_local("%rcx", node->ret_buffer->offset + i * 8, bytes);
+                printf("  add $16, %%ecx\n");
+            } else {
+                error("invalid SysV record class in va_arg");
+            }
+        }
+        if (abi.gp)
+            printf("  mov %%esi, 0(%%rdi)\n");
+        if (abi.fp)
+            printf("  mov %%ecx, 4(%%rdi)\n");
+        printf("  lea %d(%%rbp), %%rax\n", node->ret_buffer->offset);
+        printf("  jmp .L.va_record_end.%d\n", c);
+    }
+
+    printf(".L.va_record_stack.%d:\n", c);
+    printf("  mov 8(%%rdi), %%rdx\n");
+    if (node->ty->align > 8) {
+        printf("  add $%d, %%rdx\n", node->ty->align - 1);
+        printf("  and $-%d, %%rdx\n", node->ty->align);
+    }
+    copy_va_stack_record_to_local(node->ty, node->ret_buffer->offset);
+    printf("  add $%d, %%rdx\n", abi.slots * 8);
+    printf("  mov %%rdx, 8(%%rdi)\n");
+    printf("  lea %d(%%rbp), %%rax\n", node->ret_buffer->offset);
+    printf(".L.va_record_end.%d:\n", c);
+}
+
 static void gen_expr(Node *node) {
     if (node->kind == ND_NUM) {
         if (node->ty && node->ty->kind == TY_FLOAT) {
@@ -925,6 +1007,11 @@ static void gen_expr(Node *node) {
     }
 
     if (node->kind == ND_VA_ARG) {
+        if (node->ty->kind == TY_STRUCT) {
+            gen_record_va_arg(node);
+            return;
+        }
+
         gen_expr(node->lhs); // RAX = &va_list
         printf("  mov %%rax, %%rdi\n");
         int c = count();
