@@ -15,6 +15,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: agent/type-qualifiers
+      - name: Patch migration helper declaration
+        run: python3 tools/patch_type_qualifiers_forward.py
       - name: Apply migration
         run: python3 tools/apply_type_qualifiers.py
       - name: Test compiler
@@ -24,9 +26,10 @@ jobs:
       - name: Commit verified implementation
         run: |
           rm tools/apply_type_qualifiers.py
+          rm tools/patch_type_qualifiers_forward.py
           rm .github/workflows/apply-type-qualifiers.yml
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add minicc.h type.c parse.c Makefile README.md test/type_qualifiers.sh tools/apply_type_qualifiers.py .github/workflows/apply-type-qualifiers.yml
+          git add minicc.h type.c parse.c Makefile README.md test/type_qualifiers.sh tools/apply_type_qualifiers.py tools/patch_type_qualifiers_forward.py .github/workflows/apply-type-qualifiers.yml
           git commit -m 'Implement const and volatile type qualifiers'
           git push origin HEAD:agent/type-qualifiers
