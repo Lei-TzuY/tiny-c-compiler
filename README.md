@@ -53,3 +53,5 @@ The compiler is designed as an educational systems-programming project rather th
 Static-storage floating scalars and aggregate floating subobjects accept arithmetic constant-expression initializers, including casts, conditionals, and mixed integer/floating arithmetic.
 
 Designated aggregate initializers support nested designator lists such as `[1][2]`, `[1].field`, `.inner.x`, and `.rows[1]` for both static storage and automatic objects.
+
+Nested braced aggregate initializer-lists accept member/array designators at every level, including positional continuation after a designator for automatic objects.
