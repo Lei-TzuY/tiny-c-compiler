@@ -49,19 +49,19 @@ assert_run 0 'struct F{double x;};double f(struct F x){return x.x;}int main(){st
 assert_run 0 'struct M{double x;long y;};double f(struct M x){return x.x+x.y;}int main(){struct M x={20.0,22};return f(x)==42.0?0:1;}'
 assert_run 0 'struct F{double x;};struct F f(void){struct F x={42.0};return x;}int main(){return f().x==42.0?0:1;}'
 
-# Only true MEMORY-class record boundaries remain rejected in this scalar subset.
-assert_fail 'struct Big{long a;long b;long c;};long f(struct Big x){return x.a;}int main(){return 0;}'
-assert_fail 'struct Big{double a;double b;double c;};struct Big f(void){struct Big x={1.0,2.0,3.0};return x;}int main(){return 0;}'
+# MEMORY-class records now cross real ABI boundaries too.
+assert_run 7 'struct Big{long a;long b;long c;};long f(struct Big x){return x.a;}int main(){struct Big x={7,8,9};return f(x);}'
+assert_run 0 'struct Big{double a;double b;double c;};struct Big f(void){struct Big x={1.0,2.0,3.0};return x;}int main(){struct Big x=f();return x.a+x.b+x.c==6.0?0:1;}'
 
-# Unsupported prototypes remain representable if never crossed.
+# Large-record prototypes remain representable whether or not crossed.
 assert_run 0 'struct Big{double a;double b;double c;};struct Big ext(struct Big);int main(){return 0;}'
 
 # Supported aggregate actuals work through unprototyped/variadic paths too.
 assert_run 0 'struct F{double x;};int f(){return 0;}int main(){struct F x={1.0};return f(x);}'
 assert_run 0 'struct F{double x;};int f(int n,...){return n;}int main(){struct F x={1.0};return f(0,x);}'
 
-# Actual aggregate type still protects MEMORY-class unprototyped/variadic paths.
-assert_fail 'struct Big{double a;double b;double c;};int f();int main(){struct Big x={1.0,2.0,3.0};return f(x);}'
-assert_fail 'struct Big{double a;double b;double c;};int f(int,...);int main(){struct Big x={1.0,2.0,3.0};return f(1,x);}'
+# MEMORY-class actuals also work through unprototyped/variadic calls.
+assert_run 0 'struct Big{double a;double b;double c;};int f(){return 0;}int main(){struct Big x={1.0,2.0,3.0};return f(x);}'
+assert_run 0 'struct Big{double a;double b;double c;};int f(int n,...){return n;}int main(){struct Big x={1.0,2.0,3.0};return f(0,x);}'
 
 echo 'All record-ABI frontier tests passed!'

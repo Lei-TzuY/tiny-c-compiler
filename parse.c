@@ -503,13 +503,14 @@ static Obj *create_lvar(char *name) {
 
 static bool supported_record_abi(Type *ty) {
     SysVAbiClass classes[2];
-    return ty && ty->kind == TY_STRUCT && sysv_classify_record(ty, classes) > 0;
+    return ty && ty->kind == TY_STRUCT &&
+           (sysv_record_is_memory(ty) || sysv_classify_record(ty, classes) > 0);
 }
 
-// Aggregate expressions are represented by an address in the backend. Small
-// records returned in INTEGER/SSE registers are therefore materialized into an
-// anonymous local immediately after the call, preserving ordinary record
-// expression behavior such as make().field and return-to-argument chaining.
+// Aggregate expressions are represented by an address in the backend. Every
+// by-value record call therefore owns an anonymous local result object: small
+// records are materialized from return registers, while MEMORY-class callees
+// receive that object's address directly as their hidden sret destination.
 static void prepare_record_call_result(Node *node) {
     if (!current_return_ty || !node || !supported_record_abi(node->ty))
         return;
@@ -3409,9 +3410,9 @@ static Node *cast_call_argument(Node *arg, Type *ty) {
     return cast;
 }
 
-// Keep the record-ABI firewall shape-aware: all naturally laid-out records up
-// to 16 bytes whose eightbytes classify as INTEGER/SSE are now lowered exactly.
-// Prototypes may still describe larger MEMORY-class records when never crossed.
+// Keep the record-ABI gate shape-aware: <=16-byte records use per-eightbyte
+// INTEGER/SSE lowering and larger complete records use the SysV MEMORY class.
+// Prototypes remain representable even before an ABI boundary is crossed.
 static void check_supported_function_abi(Type *fty, Token *at) {
     if (!fty || fty->kind != TY_FUNC)
         return;

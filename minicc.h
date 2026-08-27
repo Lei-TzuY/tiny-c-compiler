@@ -135,6 +135,7 @@ typedef enum {
 } SysVAbiClass;
 
 int sysv_classify_record(Type *ty, SysVAbiClass classes[2]);
+bool sysv_record_is_memory(Type *ty);
 Type *pointer_to(Type *base);
 Type *array_of(Type *base, int size);
 Type *func_type(Type *return_ty);
@@ -295,6 +296,7 @@ struct Function {
     Node *body;
     Obj *locals;   // Local variables
     int stack_size;
+    int sret_offset;    // saved hidden SysV MEMORY-return pointer, relative to RBP
     bool is_static;
     bool is_variadic;
     int va_offset;       // SysV register-save area base, relative to RBP
