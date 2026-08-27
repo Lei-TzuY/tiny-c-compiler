@@ -1,0 +1,32 @@
+name: Apply GNU stack note migration
+
+on:
+  push:
+    branches:
+      - agent/gnu-stack-note
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/gnu-stack-note
+      - name: Apply migration
+        run: python3 tools/apply_gnu_stack_note.py
+      - name: Test compiler
+        run: |
+          make clean
+          make test
+      - name: Commit verified implementation
+        run: |
+          rm tools/apply_gnu_stack_note.py
+          rm .github/workflows/apply-gnu-stack-note.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add codegen.c Makefile README.md test/gnu_stack.sh tools/apply_gnu_stack_note.py .github/workflows/apply-gnu-stack-note.yml
+          git commit -m 'Emit non-executable GNU stack note'
+          git push origin HEAD:agent/gnu-stack-note
