@@ -25,6 +25,10 @@ jobs:
           import re
           p = Path('parse.c')
           s = p.read_text()
+          anchor = 'static bool assignment_compatible(Type *dst, Node *rhs);\n'
+          if anchor not in s:
+              raise SystemExit('missing assignment_compatible forward declaration')
+          s = s.replace(anchor, anchor + 'static Node *new_checked_assign(Node *lhs, Node *rhs, Token *op);\n', 1)
           pattern = re.compile(r'(?m)^(?P<i>\s*)if \(expected\) \{\n(?P=i)    if \(is_numeric\(arg->ty\) && is_numeric\(expected->ty\) &&\n(?P=i)        arg->ty != expected->ty\) \{')
           def repl(m):
               i = m.group('i')
