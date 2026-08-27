@@ -178,6 +178,9 @@ static Node *unary(Token **rest, Token *tok);
 static Node *postfix(Token **rest, Token *tok);
 static Node *primary(Token **rest, Token *tok);
 static Type *declspec(Token **rest, Token *tok);
+static Type *declarator_impl(Token **rest, Token *tok, Type *ty, Token **ident,
+                             bool allow_abstract);
+static Type *type_suffix(Token **rest, Token *tok, Type *ty);
 static Type *declarator(Token **rest, Token *tok, Type *ty, Token **ident);
 static Type *abstract_declarator(Token **rest, Token *tok, Type *ty, Token **ident);
 
@@ -734,120 +737,116 @@ static Type *declspec(Token **rest, Token *tok) {
     return ty ? ty : ty_int;
 }
 
+static Type *adjust_param_type(Type *ty) {
+    // C adjusts array and function parameter declarations to pointers.
+    if (ty->kind == TY_ARRAY)
+        return pointer_to(ty->base);
+    if (ty->kind == TY_FUNC)
+        return pointer_to(ty);
+    return ty;
+}
+
+static Type *func_params(Token **rest, Token *tok, Type *return_ty) {
+    Type *fty = func_type(return_ty);
+    fty->has_prototype = !equal(tok, ")");
+
+    Obj head = {};
+    Obj *cur = &head;
+
+    // `(void)` is the strict zero-parameter prototype, unlike old-style `()`.
+    if (equal(tok, "void") && equal(tok->next, ")")) {
+        tok = tok->next;
+        fty->has_prototype = true;
+        *rest = skip(tok, ")");
+        return fty;
+    }
+
+    while (!equal(tok, ")")) {
+        if (cur != &head)
+            tok = skip(tok, ",");
+
+        if (equal(tok, "...")) {
+            tok = tok->next;
+            fty->is_variadic = true;
+            break;
+        }
+
+        Type *basety = declspec(&tok, tok);
+        Token *name = NULL;
+        Type *param_ty = declarator_impl(&tok, tok, basety, &name, true);
+        param_ty = adjust_param_type(param_ty);
+
+        if (is_incomplete_object_type(param_ty))
+            error_at(name ? name->loc : tok->loc, "parameter has incomplete type");
+
+        Obj *param = calloc(1, sizeof(Obj));
+        param->ty = param_ty;
+        if (name)
+            param->name = strndup(name->loc, name->len);
+        cur = cur->param_next = param;
+    }
+
+    fty->params = head.param_next;
+    *rest = skip(tok, ")");
+    return fty;
+}
+
+// Parse postfix type constructors. Arrays associate from the inside out, so
+// `int a[2][3]` becomes array(2, array(3, int)); function suffixes retain the
+// complete prototype on TY_FUNC.
+static Type *type_suffix(Token **rest, Token *tok, Type *ty) {
+    if (equal(tok, "("))
+        return func_params(rest, tok->next, ty);
+
+    if (equal(tok, "[")) {
+        tok = tok->next;
+        int len = 0;
+        if (tok->kind == TK_NUM) {
+            len = tok->val;
+            tok = tok->next;
+        }
+        tok = skip(tok, "]");
+        ty = type_suffix(rest, tok, ty);
+        if (ty->kind == TY_FUNC)
+            error_at(tok->loc, "array element type cannot be a function");
+        return array_of(ty, len);
+    }
+
+    *rest = tok;
+    return ty;
+}
+
+// C declarators are recursive: parentheses can change which pointer/array/
+// function constructor binds first. Parse the parenthesized shape once with a
+// dummy base to locate its end, attach the outer suffix to the real base, then
+// replay the inner declarator with that completed base type. This supports
+// arrays of function pointers, functions returning function pointers, and
+// arbitrarily nested pointer/array/function groupings without syntax-specific
+// special cases.
 static Type *declarator_impl(Token **rest, Token *tok, Type *ty, Token **ident,
                              bool allow_abstract) {
     while (consume(&tok, tok, "*"))
         ty = pointer_to(ty);
 
-    // Function pointer: "(" "*"+ ident ")" "(" params ")"
-    if (equal(tok, "(") && equal(tok->next, "*")) {
-        tok = tok->next->next; // skip "(" and "*"
-        // Additional pointer levels inside: int (**fp)(...)
-        int extra_ptrs = 0;
-        while (consume(&tok, tok, "*"))
-            extra_ptrs++;
-
-        if (tok->kind == TK_IDENT) {
-            *ident = tok;
-            tok = tok->next;
-        } else if (allow_abstract) {
-            *ident = NULL;
-        } else {
-            error_at(tok->loc, "expected identifier in function pointer declarator");
-        }
+    if (equal(tok, "(")) {
+        Token *start = tok;
+        Type dummy = {};
+        declarator_impl(&tok, start->next, &dummy, ident, allow_abstract);
         tok = skip(tok, ")");
-        tok = skip(tok, "(");
-
-        // Retain the complete scalar/pointer prototype on TY_FUNC so calls
-        // through function pointers can perform the same coercions as direct calls.
-        Obj param_head = {};
-        Obj *pcur = &param_head;
-        bool is_variadic = false;
-        bool has_prototype = !equal(tok, ")");
-
-        if (equal(tok, "void") && equal(tok->next, ")")) {
-            tok = tok->next; // void parameter list = no parameters
-        } else {
-            while (!equal(tok, ")")) {
-                if (pcur != &param_head)
-                    tok = skip(tok, ",");
-                if (equal(tok, "...")) {
-                    tok = tok->next;
-                    is_variadic = true;
-                    break;
-                }
-
-                consume(&tok, tok, "const");
-                consume(&tok, tok, "volatile");
-                consume(&tok, tok, "register");
-
-                Type *param_ty = declspec(&tok, tok);
-                while (consume(&tok, tok, "*"))
-                    param_ty = pointer_to(param_ty);
-
-                // Parameter names inside a function-pointer prototype are optional.
-                // If present, consume the full declarator (including nested callbacks).
-                Token *pident = NULL;
-                if (tok->kind == TK_IDENT ||
-                    (equal(tok, "(") && equal(tok->next, "*"))) {
-                    param_ty = declarator_impl(&tok, tok, param_ty, &pident, true);
-                } else if (!equal(tok, ",") && !equal(tok, ")")) {
-                    error_at(tok->loc, "expected function pointer parameter declarator");
-                }
-
-                if (is_incomplete_object_type(param_ty))
-                    error_at(pident ? pident->loc : tok->loc,
-                             "parameter has incomplete type");
-
-                Obj *param = calloc(1, sizeof(Obj));
-                param->ty = param_ty;
-                pcur = pcur->param_next = param;
-            }
-        }
-        tok = skip(tok, ")");
-
-        // Build type: pointer_to(func_type(return_ty)) and attach prototype metadata.
-        Type *fty = func_type(ty); // ty is the return type (the base)
-        fty->params = param_head.param_next;
-        fty->is_variadic = is_variadic;
-        fty->has_prototype = has_prototype;
-        ty = pointer_to(fty);
-        for (int i = 0; i < extra_ptrs; i++)
-            ty = pointer_to(ty);
-
-        *rest = tok;
-        return ty;
+        ty = type_suffix(rest, tok, ty);
+        return declarator_impl(&tok, start->next, ty, ident, allow_abstract);
     }
 
-    if (tok->kind != TK_IDENT) {
-        if (!allow_abstract)
-            error_at(tok->loc, "expected a variable name");
+    if (tok->kind == TK_IDENT) {
+        *ident = tok;
+        tok = tok->next;
+    } else if (allow_abstract) {
         *ident = NULL;
-        *rest = tok;
-        return ty;
+    } else {
+        error_at(tok->loc, "expected a variable name");
     }
 
-    *ident = tok;
-    tok = tok->next;
-
-    // Multi-dimensional arrays: ident "[" num? "]" ("[" num? "]")*
-    int sizes[16];
-    int ndim = 0;
-    while (consume(&tok, tok, "[")) {
-        if (tok->kind == TK_NUM) {
-            sizes[ndim++] = tok->val;
-            tok = tok->next;
-        } else {
-            sizes[ndim++] = 0; // infer from initializer
-        }
-        tok = skip(tok, "]");
-    }
-    // Apply in reverse to build nested array types
-    for (int i = ndim - 1; i >= 0; i--)
-        ty = array_of(ty, sizes[i]);
-
-    *rest = tok;
-    return ty;
+    return type_suffix(rest, tok, ty);
 }
 
 static Type *declarator(Token **rest, Token *tok, Type *ty, Token **ident) {
@@ -1861,11 +1860,18 @@ Program *parse(Token *tok) {
         Token *ident;
         Type *ty = declarator(&tok, tok, basety, &ident);
 
-        if (consume(&tok, tok, "(")) {
-            // Function definition or prototype. In C11, an empty `()` does
-            // not provide a parameter prototype; `(void)` does.
-            bool has_prototype = !equal(tok, ")");
+        if (ty->kind == TY_FUNC) {
             char *name = strndup(ident->loc, ident->len);
+
+            // Register the declaration before parsing a body so recursion and
+            // function-address expressions inside the definition see it.
+            register_function_symbol(name, ty->return_ty, is_static,
+                                     ty->params, ty->is_variadic, ty->has_prototype);
+
+            // Prototype only: the recursive declarator has already consumed
+            // the complete parameter list.
+            if (consume(&tok, tok, ";"))
+                continue;
 
             locals = NULL;
             current_gotos = NULL;
@@ -1874,88 +1880,22 @@ Program *parse(Token *tok) {
 
             Obj param_head = {};
             Obj *pcur = &param_head;
-
-            bool is_variadic = false;
-            bool has_unnamed_params = false;
-            // Parse void parameter list
-            if (equal(tok, "void") && equal(tok->next, ")")) {
-                tok = tok->next;
-            } else {
-                while (!equal(tok, ")")) {
-                    if (pcur != &param_head)
-                        tok = skip(tok, ",");
-                    if (equal(tok, "...")) {
-                        tok = tok->next;
-                        is_variadic = true;
-                        break;
-                    }
-                    // Skip qualifiers
-                    consume(&tok, tok, "const");
-                    consume(&tok, tok, "volatile");
-                    consume(&tok, tok, "register");
-
-                    Type *param_ty = declspec(&tok, tok);
-                    while (consume(&tok, tok, "*"))
-                        param_ty = pointer_to(param_ty);
-
-                    Token *pident = NULL;
-                    Obj *var = NULL;
-                    if (tok->kind == TK_IDENT ||
-                        (equal(tok, "(") && equal(tok->next, "*"))) {
-                        // Function prototypes may use abstract callback declarators,
-                        // e.g. `int apply(int (*)(int), int);`. Definitions still
-                        // require names and are rejected below when pident is NULL.
-                        param_ty = abstract_declarator(&tok, tok, param_ty, &pident);
-                        if (pident) {
-                            char *pname = strndup(pident->loc, pident->len);
-                            var = create_lvar(pname);
-                        } else {
-                            has_unnamed_params = true;
-                            var = calloc(1, sizeof(Obj));
-                            var->is_local = true;
-                        }
-                    } else {
-                        // Prototype parameter names are optional in C. Keep an
-                        // anonymous metadata Obj so direct-call coercion still
-                        // sees the declared parameter type.
-                        if (!equal(tok, ",") && !equal(tok, ")"))
-                            error_at(tok->loc, "expected parameter name or delimiter");
-                        has_unnamed_params = true;
-                        var = calloc(1, sizeof(Obj));
-                        var->is_local = true;
-                    }
-
-                    if (is_incomplete_object_type(param_ty))
-                        error_at(pident ? pident->loc : tok->loc,
-                                 "parameter has incomplete type");
-
-                    var->ty = param_ty;
-                    pcur = pcur->param_next = var;
-                }
+            for (Obj *meta = ty->params; meta; meta = meta->param_next) {
+                if (!meta->name)
+                    error_at(ident->loc, "parameter name omitted in function definition");
+                Obj *var = create_lvar(meta->name);
+                var->ty = meta->ty;
+                pcur = pcur->param_next = var;
             }
-            tok = skip(tok, ")");
-
-            // Register function symbol for calls and function-pointer usage.
-            register_function_symbol(name, basety, is_static,
-                                     param_head.param_next, is_variadic, has_prototype);
-
-            // Function prototype
-            if (consume(&tok, tok, ";")) {
-                leave_scope();
-                continue;
-            }
-
-            if (has_unnamed_params)
-                error_at(ident->loc, "parameter name omitted in function definition");
 
             tok = skip(tok, "{");
 
             Function *fn = calloc(1, sizeof(Function));
             fn->name = name;
             fn->params = param_head.param_next;
-            fn->return_ty = basety;
+            fn->return_ty = ty->return_ty;
             fn->is_static = is_static;
-            fn->is_variadic = is_variadic;
+            fn->is_variadic = ty->is_variadic;
 
             Node *block = compound_stmt(&tok, tok);
             fn->body = block->body;

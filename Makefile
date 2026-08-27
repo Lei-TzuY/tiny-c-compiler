@@ -22,6 +22,7 @@ test: minicc
 	bash ./test/function_pointer_prototype.sh
 	bash ./test/callable_declarators.sh
 	bash ./test/prototype_arity.sh
+	bash ./test/recursive_declarators.sh
 
 clean:
 	rm -f minicc *.o *~ tmp*
