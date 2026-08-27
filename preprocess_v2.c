@@ -204,6 +204,8 @@ static char *get_builtin_header(char *name) {
                "} va_list;\n"
                "#define va_start(ap, last) __builtin_va_start(&(ap))\n"
                "#define va_arg(ap, type) __builtin_va_arg(&(ap), type)\n"
+               "#define va_copy(dest, src) ((dest) = (src))\n"
+               "#define __va_copy(dest, src) va_copy(dest, src)\n"
                "#define va_end(ap) ((void)0)\n";
     }
     return NULL;
