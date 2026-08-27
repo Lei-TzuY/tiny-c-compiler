@@ -817,6 +817,51 @@ static int count(void) {
     return i++;
 }
 
+static void emit_switch_dispatch(Node *node, Node **default_case) {
+    if (!node)
+        return;
+
+    // A nested switch owns its own case/default labels.
+    if (node->kind == ND_SWITCH)
+        return;
+
+    if (node->kind == ND_CASE) {
+        printf("  movabs $%" PRId64 ", %%rdi\n", node->val);
+        printf("  cmp %%rdi, %%rax\n");
+        printf("  je %s\n", node->unique_label);
+        emit_switch_dispatch(node->lhs, default_case);
+        return;
+    }
+
+    if (node->kind == ND_DEFAULT) {
+        *default_case = node;
+        emit_switch_dispatch(node->lhs, default_case);
+        return;
+    }
+
+    if (node->kind == ND_BLOCK) {
+        for (Node *n = node->body; n; n = n->next)
+            emit_switch_dispatch(n, default_case);
+        return;
+    }
+
+    if (node->kind == ND_IF) {
+        emit_switch_dispatch(node->then, default_case);
+        emit_switch_dispatch(node->els, default_case);
+        return;
+    }
+
+    if (node->kind == ND_WHILE || node->kind == ND_DO || node->kind == ND_FOR) {
+        emit_switch_dispatch(node->then, default_case);
+        return;
+    }
+
+    if (node->kind == ND_LABEL) {
+        emit_switch_dispatch(node->lhs, default_case);
+        return;
+    }
+}
+
 static void gen_stmt(Node *node) {
     if (node->kind == ND_RETURN) {
         if (node->lhs) {
@@ -847,6 +892,13 @@ static void gen_stmt(Node *node) {
     if (node->kind == ND_LABEL) {
         printf("%s:\n", node->unique_label);
         gen_stmt(node->lhs);
+        return;
+    }
+
+    if (node->kind == ND_CASE || node->kind == ND_DEFAULT) {
+        printf("%s:\n", node->unique_label);
+        if (node->lhs)
+            gen_stmt(node->lhs);
         return;
     }
 
@@ -948,22 +1000,10 @@ static void gen_stmt(Node *node) {
         gen_expr(node->cond);
         cast_value(node->cond->ty, node->ty);
 
-        bool has_default = false;
-        int case_idx = 0;
-        for (Node *n = node->then->body; n; n = n->next) {
-            if (n->kind == ND_CASE) {
-                // Materialize the normalized case value in a full register.
-                // This avoids x86-64 cmp-immediate sign-extension changing the
-                // meaning of values such as UINT_MAX.
-                printf("  movabs $%" PRId64 ", %%rdi\n", n->val);
-                printf("  cmp %%rdi, %%rax\n");
-                printf("  je .L.case.%d.%d\n", c, case_idx++);
-            } else if (n->kind == ND_DEFAULT) {
-                has_default = true;
-            }
-        }
-        if (has_default)
-            printf("  jmp .L.default.%d\n", c);
+        Node *default_case = NULL;
+        emit_switch_dispatch(node->then, &default_case);
+        if (default_case)
+            printf("  jmp %s\n", default_case->unique_label);
         else
             printf("  jmp .L.end.%d\n", c);
 
@@ -972,15 +1012,7 @@ static void gen_stmt(Node *node) {
         char *old_brk = brk_label;
         brk_label = brk_buf;
 
-        case_idx = 0;
-        for (Node *n = node->then->body; n; n = n->next) {
-            if (n->kind == ND_CASE)
-                printf(".L.case.%d.%d:\n", c, case_idx++);
-            else if (n->kind == ND_DEFAULT)
-                printf(".L.default.%d:\n", c);
-            else
-                gen_stmt(n);
-        }
+        gen_stmt(node->then);
 
         printf(".L.end.%d:\n", c);
         brk_label = old_brk;
