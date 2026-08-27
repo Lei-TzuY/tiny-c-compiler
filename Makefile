@@ -33,6 +33,7 @@ test: minicc
 	bash ./test/cast_constraints.sh
 	bash ./test/switch_constraints.sh
 	bash ./test/arithmetic_conversions.sh
+	bash ./test/gnu_stack.sh
 
 clean:
 	rm -f minicc *.o *~ tmp*
