@@ -1,0 +1,28 @@
+name: Apply SysV MEMORY record ABI
+on:
+  push:
+    branches:
+      - agent/sysv-memory-record-abi
+permissions:
+  contents: write
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/sysv-memory-record-abi
+      - name: Apply migration
+        run: python3 tools/apply_sysv_memory_record_abi.py
+      - name: Run full test suite
+        run: make clean && make test
+      - name: Commit generated changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add minicc.h type.c parse.c codegen.c Makefile README.md \
+                  test/record_abi_firewall.sh test/sysv_record_abi.sh \
+                  test/sysv_memory_record_abi.sh
+          git diff --cached --quiet && exit 0
+          git commit -m "Support SysV MEMORY record ABI"
+          git push origin HEAD:agent/sysv-memory-record-abi
