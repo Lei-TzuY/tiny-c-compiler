@@ -34,6 +34,7 @@ test: minicc
 	bash ./test/switch_constraints.sh
 	bash ./test/nested_switch_labels.sh
 	bash ./test/arithmetic_conversions.sh
+	bash ./test/gnu_stack.sh
 
 clean:
 	rm -f minicc *.o *~ tmp*
