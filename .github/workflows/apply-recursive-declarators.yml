@@ -18,7 +18,17 @@ jobs:
         with:
           ref: agent/recursive-declarators
       - name: Apply migration
-        run: python3 tools/apply_recursive_declarators.py
+        run: |
+          python3 tools/apply_recursive_declarators.py
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('test/recursive_declarators.sh')
+          s = p.read_text()
+          s = s.replace('  ./minicc "$input" > tmp.s\n  cc -o tmp tmp.s\n', '  printf "%s\\n" "$input" > tmp-recursive.c\n  "${MINICC:-./minicc}" tmp-recursive.c > tmp-recursive.s\n  gcc -o tmp-recursive tmp-recursive.s\n')
+          s = s.replace('  ./tmp\n  actual="$?"\n', '  ./tmp-recursive\n  actual="$?"\n')
+          s = s.replace('  if ./minicc "$input" > tmp.s 2>/dev/null; then\n', '  printf "%s\\n" "$input" > tmp-recursive-bad.c\n  if "${MINICC:-./minicc}" tmp-recursive-bad.c > tmp-recursive-bad.s 2>/dev/null; then\n')
+          p.write_text(s)
+          PY
       - name: Test compiler
         run: make clean && make test
       - name: Commit verified implementation
