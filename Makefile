@@ -15,6 +15,7 @@ test: minicc
 	bash ./test/float_abi.sh
 	bash ./test/incomplete_tags.sh
 	bash ./test/typedef_scope.sh
+	bash ./test/enum_scope.sh
 
 clean:
 	rm -f minicc *.o *~ tmp*

@@ -37,6 +37,7 @@ struct Scope {
     VarScope *vars;
     StructTag *tags;
     TypeDef *typedefs;
+    EnumConst *enum_consts;
 };
 
 static Scope *current_scope;
@@ -106,11 +107,36 @@ static void push_typedef(Token *ident, Type *ty) {
     current_scope->typedefs = td;
 }
 
+// Enumeration constants share C's ordinary identifier namespace with
+// variables and typedef names. A nearer variable/typedef therefore hides an
+// outer enumerator, while an enumerator in the current scope hides outer names.
+static EnumConst *find_enum_const(Token *tok) {
+    for (Scope *scope = current_scope; scope; scope = scope->parent) {
+        for (VarScope *vs = scope->vars; vs; vs = vs->next)
+            if (token_matches_name(tok, vs->name))
+                return NULL;
+        for (TypeDef *td = scope->typedefs; td; td = td->next)
+            if (token_matches_name(tok, td->name))
+                return NULL;
+        for (EnumConst *ec = scope->enum_consts; ec; ec = ec->next)
+            if (token_matches_name(tok, ec->name))
+                return ec;
+    }
+    return NULL;
+}
+
+static void push_enum_const(char *name, int64_t val) {
+    EnumConst *ec = calloc(1, sizeof(EnumConst));
+    ec->name = name;
+    ec->val = val;
+    ec->next = current_scope->enum_consts;
+    current_scope->enum_consts = ec;
+}
+
 // ---- End Block Scope ----
 
 static Obj *locals;
 static Obj *globals;
-static EnumConst *enum_consts;
 
 // goto / label tracking for current function
 static Node *current_gotos;
@@ -525,11 +551,7 @@ static Type *declspec(Token **rest, Token *tok) {
                         val = tok->val;
                         tok = tok->next;
                     }
-                    EnumConst *ec = calloc(1, sizeof(EnumConst));
-                    ec->name = name;
-                    ec->val = val++;
-                    ec->next = enum_consts;
-                    enum_consts = ec;
+                    push_enum_const(name, val++);
                     consume(&tok, tok, ",");
                 }
                 tok = skip(tok, "}");
@@ -1286,13 +1308,11 @@ static Node *primary(Token **rest, Token *tok) {
     }
 
     if (tok->kind == TK_IDENT) {
-        // Check for enum constant
-        for (EnumConst *ec = enum_consts; ec; ec = ec->next) {
-            if (strlen(ec->name) == (size_t)tok->len &&
-                !strncmp(tok->loc, ec->name, tok->len)) {
-                *rest = tok->next;
-                return new_num(ec->val);
-            }
+        // Check for an enumeration constant visible in lexical scope.
+        EnumConst *ec = find_enum_const(tok);
+        if (ec) {
+            *rest = tok->next;
+            return new_num(ec->val);
         }
 
         // Function call
