@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 
 p = Path("parse.c")
 s = p.read_text()
@@ -124,17 +125,20 @@ repls.append((
 ''',
 "declspec scoped typedef lookup"))
 
-old_td = '''                TypeDef *td = calloc(1, sizeof(TypeDef));
-                td->name = strndup(ident->loc, ident->len);
-                td->ty = ty;
-                td->next = typedefs;
-                typedefs = td;
-'''
-new_td = '''                push_typedef(ident, ty);
-'''
-if s.count(old_td) != 2:
-    raise SystemExit(f"expected two typedef insertion blocks, found {s.count(old_td)}")
-s = s.replace(old_td, new_td)
+typedef_insert = re.compile(
+    r'(?m)^(?P<indent>[ \t]*)TypeDef \*td = calloc\(1, sizeof\(TypeDef\)\);\n'
+    r'(?P=indent)td->name = strndup\(ident->loc, ident->len\);\n'
+    r'(?P=indent)td->ty = ty;\n'
+    r'(?P=indent)td->next = typedefs;\n'
+    r'(?P=indent)typedefs = td;\n'
+)
+
+def replace_typedef_insert(match):
+    return match.group('indent') + 'push_typedef(ident, ty);\n'
+
+s, count = typedef_insert.subn(replace_typedef_insert, s)
+if count != 2:
+    raise SystemExit(f"expected two typedef insertion blocks, found {count}")
 
 for old, new, label in repls:
     if old not in s:
