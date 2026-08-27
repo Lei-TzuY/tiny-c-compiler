@@ -16,6 +16,7 @@ test: minicc
 	bash ./test/incomplete_tags.sh
 	bash ./test/typedef_scope.sh
 	bash ./test/enum_scope.sh
+	bash ./test/enum_constexpr_tags.sh
 
 clean:
 	rm -f minicc *.o *~ tmp*

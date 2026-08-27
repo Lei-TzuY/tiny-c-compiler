@@ -16,11 +16,18 @@ struct TypeDef {
     Type *ty;
 };
 
+typedef enum {
+    TAG_STRUCT,
+    TAG_UNION,
+    TAG_ENUM,
+} TagKind;
+
 typedef struct StructTag StructTag;
 struct StructTag {
     StructTag *next;
     char *name;
     Type *ty;
+    TagKind kind;
 };
 
 // ---- Block Scope ----
@@ -70,10 +77,20 @@ static StructTag *find_tag(const char *name) {
     return NULL;
 }
 
-static StructTag *push_tag(const char *name, Type *ty) {
+static const char *tag_kind_name(TagKind kind) {
+    switch (kind) {
+    case TAG_STRUCT: return "struct";
+    case TAG_UNION: return "union";
+    case TAG_ENUM: return "enum";
+    }
+    return "tag";
+}
+
+static StructTag *push_tag(const char *name, Type *ty, TagKind kind) {
     StructTag *tag = calloc(1, sizeof(StructTag));
     tag->name = strdup(name);
     tag->ty = ty;
+    tag->kind = kind;
     tag->next = current_scope->tags;
     current_scope->tags = tag;
     return tag;
@@ -398,6 +415,7 @@ static Type *new_record_type(void) {
 // typedef aliases and earlier pointers linked to the completed record.
 static Type *record_decl(Token **rest, Token *tok, bool is_union) {
     const char *kind = is_union ? "union" : "struct";
+    TagKind tag_kind = is_union ? TAG_UNION : TAG_STRUCT;
     char *tag_name = NULL;
 
     if (tok->kind == TK_IDENT) {
@@ -412,7 +430,10 @@ static Type *record_decl(Token **rest, Token *tok, bool is_union) {
         StructTag *tag = find_tag(tag_name);
         if (!tag) {
             Type *ty = new_record_type();
-            tag = push_tag(tag_name, ty);
+            tag = push_tag(tag_name, ty, tag_kind);
+        } else if (tag->kind != tag_kind) {
+            error_at(tok->loc, "%s %s conflicts with %s tag", kind, tag_name,
+                     tag_kind_name(tag->kind));
         }
         *rest = tok;
         return tag->ty;
@@ -422,12 +443,15 @@ static Type *record_decl(Token **rest, Token *tok, bool is_union) {
     if (tag_name) {
         StructTag *tag = find_tag_in_scope(current_scope, tag_name);
         if (tag) {
+            if (tag->kind != tag_kind)
+                error_at(tok->loc, "%s %s conflicts with %s tag", kind, tag_name,
+                         tag_kind_name(tag->kind));
             if (!tag->ty->is_incomplete)
                 error_at(tok->loc, "redefinition of %s %s", kind, tag_name);
             ty = tag->ty;
         } else {
             ty = new_record_type();
-            push_tag(tag_name, ty);
+            push_tag(tag_name, ty, tag_kind);
         }
     } else {
         ty = new_record_type();
@@ -488,6 +512,154 @@ static Type *record_decl(Token **rest, Token *tok, bool is_union) {
     return ty;
 }
 
+static int64_t cast_const_integer(int64_t val, Type *ty) {
+    if (!ty || !is_integer(ty))
+        error("cast in integer constant expression must target an integer type");
+
+    if (ty->kind == TY_BOOL)
+        return val != 0;
+
+    if (ty->size == 1)
+        return ty->is_unsigned ? (uint8_t)val : (int8_t)val;
+    if (ty->size == 2)
+        return ty->is_unsigned ? (uint16_t)val : (int16_t)val;
+    if (ty->size == 4)
+        return ty->is_unsigned ? (uint32_t)val : (int32_t)val;
+    return val;
+}
+
+static int64_t eval_const_expr(Node *node) {
+    if (!node)
+        error("expected integer constant expression");
+
+    switch (node->kind) {
+    case ND_NUM:
+        if (node->ty && is_flonum(node->ty))
+            error("floating value is not an integer constant expression");
+        return node->val;
+    case ND_ADD:
+        return eval_const_expr(node->lhs) + eval_const_expr(node->rhs);
+    case ND_SUB:
+        return eval_const_expr(node->lhs) - eval_const_expr(node->rhs);
+    case ND_MUL:
+        return eval_const_expr(node->lhs) * eval_const_expr(node->rhs);
+    case ND_DIV: {
+        int64_t lhs = eval_const_expr(node->lhs);
+        int64_t rhs = eval_const_expr(node->rhs);
+        if (!rhs)
+            error("division by zero in integer constant expression");
+        return lhs / rhs;
+    }
+    case ND_MOD: {
+        int64_t lhs = eval_const_expr(node->lhs);
+        int64_t rhs = eval_const_expr(node->rhs);
+        if (!rhs)
+            error("modulo by zero in integer constant expression");
+        return lhs % rhs;
+    }
+    case ND_BITAND:
+        return eval_const_expr(node->lhs) & eval_const_expr(node->rhs);
+    case ND_BITOR:
+        return eval_const_expr(node->lhs) | eval_const_expr(node->rhs);
+    case ND_BITXOR:
+        return eval_const_expr(node->lhs) ^ eval_const_expr(node->rhs);
+    case ND_BITNOT:
+        return ~eval_const_expr(node->lhs);
+    case ND_SHL:
+    case ND_SHR: {
+        int64_t lhs = eval_const_expr(node->lhs);
+        int64_t rhs = eval_const_expr(node->rhs);
+        if (rhs < 0 || rhs >= 64)
+            error("invalid shift count in integer constant expression");
+        return node->kind == ND_SHL ? (lhs << rhs) : (lhs >> rhs);
+    }
+    case ND_EQ:
+        return eval_const_expr(node->lhs) == eval_const_expr(node->rhs);
+    case ND_NE:
+        return eval_const_expr(node->lhs) != eval_const_expr(node->rhs);
+    case ND_LT:
+        return eval_const_expr(node->lhs) < eval_const_expr(node->rhs);
+    case ND_LE:
+        return eval_const_expr(node->lhs) <= eval_const_expr(node->rhs);
+    case ND_NOT:
+        return !eval_const_expr(node->lhs);
+    case ND_LOGAND: {
+        int64_t lhs = eval_const_expr(node->lhs);
+        return lhs ? !!eval_const_expr(node->rhs) : 0;
+    }
+    case ND_LOGOR: {
+        int64_t lhs = eval_const_expr(node->lhs);
+        return lhs ? 1 : !!eval_const_expr(node->rhs);
+    }
+    case ND_TERNARY:
+        return eval_const_expr(node->cond) ? eval_const_expr(node->then)
+                                           : eval_const_expr(node->els);
+    case ND_CAST:
+        return cast_const_integer(eval_const_expr(node->lhs), node->ty);
+    default:
+        error("not an integer constant expression");
+    }
+}
+
+static Type *enum_decl(Token **rest, Token *tok) {
+    char *tag_name = NULL;
+
+    if (tok->kind == TK_IDENT) {
+        tag_name = strndup(tok->loc, tok->len);
+        tok = tok->next;
+    }
+
+    if (!equal(tok, "{")) {
+        if (!tag_name)
+            error_at(tok->loc, "expected enum tag or body");
+        StructTag *tag = find_tag(tag_name);
+        if (!tag)
+            error_at(tok->loc, "unknown enum tag: %s", tag_name);
+        if (tag->kind != TAG_ENUM)
+            error_at(tok->loc, "enum %s conflicts with %s tag", tag_name,
+                     tag_kind_name(tag->kind));
+        *rest = tok;
+        return ty_int;
+    }
+
+    if (tag_name) {
+        StructTag *tag = find_tag_in_scope(current_scope, tag_name);
+        if (tag) {
+            if (tag->kind != TAG_ENUM)
+                error_at(tok->loc, "enum %s conflicts with %s tag", tag_name,
+                         tag_kind_name(tag->kind));
+            error_at(tok->loc, "redefinition of enum %s", tag_name);
+        }
+        push_tag(tag_name, ty_int, TAG_ENUM);
+    }
+
+    tok = skip(tok, "{");
+    int64_t val = 0;
+
+    while (!equal(tok, "}")) {
+        if (tok->kind != TK_IDENT)
+            error_at(tok->loc, "expected enumerator name");
+
+        char *name = strndup(tok->loc, tok->len);
+        tok = tok->next;
+
+        if (consume(&tok, tok, "=")) {
+            Node *value = ternary(&tok, tok);
+            val = eval_const_expr(value);
+        }
+
+        push_enum_const(name, val++);
+
+        if (consume(&tok, tok, ","))
+            continue;
+        if (!equal(tok, "}"))
+            error_at(tok->loc, "expected ',' or '}' in enum definition");
+    }
+
+    *rest = skip(tok, "}");
+    return ty_int;
+}
+
 static Type *declspec(Token **rest, Token *tok) {
     Type *ty = NULL;
 
@@ -535,28 +707,7 @@ static Type *declspec(Token **rest, Token *tok) {
         }
 
         if (equal(tok, "enum")) {
-            tok = tok->next;
-            if (tok->kind == TK_IDENT && !equal(tok, "{"))
-                tok = tok->next;
-            if (consume(&tok, tok, "{")) {
-                int64_t val = 0;
-                while (!equal(tok, "}")) {
-                    if (tok->kind != TK_IDENT)
-                        error_at(tok->loc, "expected identifier");
-                    char *name = strndup(tok->loc, tok->len);
-                    tok = tok->next;
-                    if (consume(&tok, tok, "=")) {
-                        if (tok->kind != TK_NUM)
-                            error_at(tok->loc, "expected integer constant");
-                        val = tok->val;
-                        tok = tok->next;
-                    }
-                    push_enum_const(name, val++);
-                    consume(&tok, tok, ",");
-                }
-                tok = skip(tok, "}");
-            }
-            ty = ty_int;
+            ty = enum_decl(&tok, tok->next);
             continue;
         }
 
