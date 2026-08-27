@@ -5,11 +5,25 @@ s = p.read_text()
 
 needle = '''static bool pointer_assignment_compatible(Type *dst, Type *src) {
 '''
-helper = r'''static bool record_shape_compatible(Type *a, Type *b) {
+helper = r'''static bool record_has_visible_tag(Type *ty) {
+    for (Scope *sc = current_scope; sc; sc = sc->parent)
+        for (StructTag *tag = sc->tags; tag; tag = tag->next)
+            if (tag->ty == ty)
+                return true;
+    return false;
+}
+
+static bool record_shape_compatible(Type *a, Type *b) {
     if (a == b)
         return true;
     if (!a || !b || a->kind != TY_STRUCT || b->kind != TY_STRUCT)
         return false;
+
+    // Tagged records retain C's nominal identity. Structural matching exists
+    // only for the compiler's historical anonymous-record extension.
+    if (record_has_visible_tag(a) || record_has_visible_tag(b))
+        return false;
+
     if (a->size != b->size || a->align != b->align)
         return false;
 
@@ -41,8 +55,8 @@ replacement = '''    if (type_compatible(dst->base, src->base))
 
     // Preserve the compiler's long-standing educational extension for
     // pointers to separately declared anonymous records that have the same
-    // member layout. File-scope redeclaration compatibility remains strict
-    // Type identity; this exception exists only for expression conversion.
+    // member layout. Tagged records and file-scope redeclarations remain
+    // nominally typed.
     if (dst->base && src->base && dst->base->kind == TY_STRUCT &&
         src->base->kind == TY_STRUCT &&
         record_shape_compatible(dst->base, src->base))
