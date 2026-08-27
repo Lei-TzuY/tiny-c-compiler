@@ -567,9 +567,11 @@ static void gen_expr(Node *node) {
         printf("  cmp $0, %%rax\n");
         printf("  je .L.else.%d\n", c);
         gen_expr(node->then);
+        cast_value(node->then->ty, node->ty);
         printf("  jmp .L.end.%d\n", c);
         printf(".L.else.%d:\n", c);
         gen_expr(node->els);
+        cast_value(node->els->ty, node->ty);
         printf(".L.end.%d:\n", c);
         return;
     }

@@ -1354,6 +1354,110 @@ static Node *new_checked_assign(Node *lhs, Node *rhs, Token *op) {
     return new_binary(ND_ASSIGN, lhs, rhs);
 }
 
+static Type *decay_value_type(Type *ty) {
+    if (!ty)
+        return NULL;
+    if (ty->kind == TY_ARRAY)
+        return pointer_to(ty->base);
+    if (ty->kind == TY_FUNC)
+        return pointer_to(ty);
+    return ty;
+}
+
+static bool is_scalar_expr(Node *node) {
+    add_type(node);
+    Type *ty = decay_value_type(node->ty);
+    return ty && (is_numeric(ty) || ty->kind == TY_PTR);
+}
+
+static bool pointer_pair_compatible(Type *a, Type *b, bool relational_only) {
+    a = decay_value_type(a);
+    b = decay_value_type(b);
+    if (!a || !b || a->kind != TY_PTR || b->kind != TY_PTR)
+        return false;
+
+    if (type_compatible(a->base, b->base)) {
+        if (!relational_only)
+            return true;
+        return a->base && a->base->kind != TY_VOID && a->base->kind != TY_FUNC;
+    }
+
+    if (relational_only)
+        return false;
+
+    bool a_void = a->base && a->base->kind == TY_VOID;
+    bool b_void = b->base && b->base->kind == TY_VOID;
+    bool a_func = a->base && a->base->kind == TY_FUNC;
+    bool b_func = b->base && b->base->kind == TY_FUNC;
+    return !a_func && !b_func && (a_void || b_void);
+}
+
+static bool equality_operands_compatible(Node *lhs, Node *rhs) {
+    add_type(lhs);
+    add_type(rhs);
+
+    if (is_numeric(lhs->ty) && is_numeric(rhs->ty))
+        return true;
+
+    Type *lt = decay_value_type(lhs->ty);
+    Type *rt = decay_value_type(rhs->ty);
+    bool lp = lt && lt->kind == TY_PTR;
+    bool rp = rt && rt->kind == TY_PTR;
+
+    if (lp && is_null_pointer_constant(rhs))
+        return true;
+    if (rp && is_null_pointer_constant(lhs))
+        return true;
+    return lp && rp && pointer_pair_compatible(lt, rt, false);
+}
+
+static bool relational_operands_compatible(Node *lhs, Node *rhs) {
+    add_type(lhs);
+    add_type(rhs);
+    if (is_numeric(lhs->ty) && is_numeric(rhs->ty))
+        return true;
+    return pointer_pair_compatible(lhs->ty, rhs->ty, true);
+}
+
+static Type *conditional_result_type(Node *then, Node *els, Token *question) {
+    add_type(then);
+    add_type(els);
+
+    if (is_numeric(then->ty) && is_numeric(els->ty))
+        return get_common_type(then->ty, els->ty);
+
+    if (then->ty->kind == TY_VOID && els->ty->kind == TY_VOID)
+        return ty_void;
+
+    if (then->ty->kind == TY_STRUCT && els->ty->kind == TY_STRUCT &&
+        type_compatible(then->ty, els->ty))
+        return then->ty;
+
+    Type *tt = decay_value_type(then->ty);
+    Type *et = decay_value_type(els->ty);
+    bool tp = tt && tt->kind == TY_PTR;
+    bool ep = et && et->kind == TY_PTR;
+
+    if (tp && is_null_pointer_constant(els))
+        return tt;
+    if (ep && is_null_pointer_constant(then))
+        return et;
+
+    if (tp && ep) {
+        if (type_compatible(tt->base, et->base))
+            return tt;
+
+        bool t_void = tt->base && tt->base->kind == TY_VOID;
+        bool e_void = et->base && et->base->kind == TY_VOID;
+        bool t_func = tt->base && tt->base->kind == TY_FUNC;
+        bool e_func = et->base && et->base->kind == TY_FUNC;
+        if (!t_func && !e_func && (t_void || e_void))
+            return pointer_to(ty_void);
+    }
+
+    error_at(question->loc, "incompatible conditional operands");
+}
+
 static Node *assign(Token **rest, Token *tok) {
     Node *node = ternary(&tok, tok);
     if (equal(tok, "=")) {
@@ -1390,27 +1494,43 @@ static Node *ternary(Token **rest, Token *tok) {
         *rest = tok;
         return cond;
     }
+
+    Token *question = tok;
+    if (!is_scalar_expr(cond))
+        error_at(question->loc, "conditional expression requires scalar condition");
+
     Node *node = new_node(ND_TERNARY);
     node->cond = cond;
     tok = tok->next;
     node->then = expr(&tok, tok);
     tok = skip(tok, ":");
     node->els = ternary(rest, tok);
+    node->ty = conditional_result_type(node->then, node->els, question);
     return node;
 }
 
 static Node *logor(Token **rest, Token *tok) {
     Node *node = logand(&tok, tok);
-    while (equal(tok, "||"))
-        node = new_binary(ND_LOGOR, node, logand(&tok, tok->next));
+    while (equal(tok, "||")) {
+        Token *op = tok;
+        Node *rhs = logand(&tok, tok->next);
+        if (!is_scalar_expr(node) || !is_scalar_expr(rhs))
+            error_at(op->loc, "logical operator requires scalar operands");
+        node = new_binary(ND_LOGOR, node, rhs);
+    }
     *rest = tok;
     return node;
 }
 
 static Node *logand(Token **rest, Token *tok) {
     Node *node = bitor_expr(&tok, tok);
-    while (equal(tok, "&&"))
-        node = new_binary(ND_LOGAND, node, bitor_expr(&tok, tok->next));
+    while (equal(tok, "&&")) {
+        Token *op = tok;
+        Node *rhs = bitor_expr(&tok, tok->next);
+        if (!is_scalar_expr(node) || !is_scalar_expr(rhs))
+            error_at(op->loc, "logical operator requires scalar operands");
+        node = new_binary(ND_LOGAND, node, rhs);
+    }
     *rest = tok;
     return node;
 }
@@ -1442,8 +1562,15 @@ static Node *bitand_expr(Token **rest, Token *tok) {
 static Node *equality(Token **rest, Token *tok) {
     Node *node = relational(&tok, tok);
     for (;;) {
-        if (equal(tok, "==")) { node = new_binary(ND_EQ, node, relational(&tok, tok->next)); continue; }
-        if (equal(tok, "!=")) { node = new_binary(ND_NE, node, relational(&tok, tok->next)); continue; }
+        if (equal(tok, "==") || equal(tok, "!=")) {
+            Token *op = tok;
+            NodeKind kind = equal(tok, "==") ? ND_EQ : ND_NE;
+            Node *rhs = relational(&tok, tok->next);
+            if (!equality_operands_compatible(node, rhs))
+                error_at(op->loc, "invalid equality operands");
+            node = new_binary(kind, node, rhs);
+            continue;
+        }
         *rest = tok;
         return node;
     }
@@ -1462,10 +1589,18 @@ static Node *shift(Token **rest, Token *tok) {
 static Node *relational(Token **rest, Token *tok) {
     Node *node = shift(&tok, tok);
     for (;;) {
-        if (equal(tok, "<"))  { node = new_binary(ND_LT, node, shift(&tok, tok->next)); continue; }
-        if (equal(tok, "<=")) { node = new_binary(ND_LE, node, shift(&tok, tok->next)); continue; }
-        if (equal(tok, ">"))  { node = new_binary(ND_LT, shift(&tok, tok->next), node); continue; }
-        if (equal(tok, ">=")) { node = new_binary(ND_LE, shift(&tok, tok->next), node); continue; }
+        if (equal(tok, "<") || equal(tok, "<=") ||
+            equal(tok, ">") || equal(tok, ">=")) {
+            Token *op = tok;
+            bool reverse = equal(tok, ">") || equal(tok, ">=");
+            bool inclusive = equal(tok, "<=") || equal(tok, ">=");
+            Node *rhs = shift(&tok, tok->next);
+            if (!relational_operands_compatible(node, rhs))
+                error_at(op->loc, "invalid relational operands");
+            node = reverse ? new_binary(inclusive ? ND_LE : ND_LT, rhs, node)
+                           : new_binary(inclusive ? ND_LE : ND_LT, node, rhs);
+            continue;
+        }
         *rest = tok;
         return node;
     }
@@ -1508,7 +1643,13 @@ static Node *unary(Token **rest, Token *tok) {
     if (equal(tok, "-"))  return new_binary(ND_SUB, new_num(0), unary(rest, tok->next));
     if (equal(tok, "&"))  return new_unary(ND_ADDR, unary(rest, tok->next));
     if (equal(tok, "*"))  return new_unary(ND_DEREF, unary(rest, tok->next));
-    if (equal(tok, "!"))  return new_unary(ND_NOT, unary(rest, tok->next));
+    if (equal(tok, "!")) {
+        Token *op = tok;
+        Node *operand = unary(rest, tok->next);
+        if (!is_scalar_expr(operand))
+            error_at(op->loc, "logical not requires scalar operand");
+        return new_unary(ND_NOT, operand);
+    }
     if (equal(tok, "~"))  return new_unary(ND_BITNOT, unary(rest, tok->next));
     if (equal(tok, "++")) return new_inc_dec(ND_PRE_INC, unary(rest, tok->next));
     if (equal(tok, "--")) return new_inc_dec(ND_PRE_DEC, unary(rest, tok->next));

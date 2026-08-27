@@ -26,6 +26,7 @@ test: minicc
 	bash ./test/type_names.sh
 	bash ./test/type_compatibility.sh
 	bash ./test/semantic_assignments.sh
+	bash ./test/expression_operators.sh
 
 clean:
 	rm -f minicc *.o *~ tmp*
