@@ -114,7 +114,12 @@ repls.append((
         }
 ''',
 '''        // Check for a typedef name visible in the current lexical scope.
+        // Once a concrete type specifier was already consumed, an identifier
+        // that happens to match an outer typedef is the declarator name, not a
+        // second type specifier (e.g. `typedef char T;` or `int T;`).
         if (tok->kind == TK_IDENT) {
+            if (ty)
+                break;
             TypeDef *td = find_typedef(tok);
             if (td) {
                 tok = tok->next;
