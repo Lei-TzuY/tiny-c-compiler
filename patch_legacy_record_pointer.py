@@ -52,4 +52,15 @@ replacement = '''    if (type_compatible(dst->base, src->base))
 '''
 if s.count(needle) != 1:
     raise SystemExit(f'compatibility insertion anchor count={s.count(needle)}')
+s = s.replace(needle, replacement, 1)
+
+needle = '''    if (dst->kind == TY_STRUCT && src->kind == TY_STRUCT)
+        return type_compatible(dst, src);
+'''
+replacement = '''    if (dst->kind == TY_STRUCT && src->kind == TY_STRUCT)
+        return type_compatible(dst, src) || record_shape_compatible(dst, src);
+'''
+if s.count(needle) != 1:
+    raise SystemExit(f'record-value compatibility anchor count={s.count(needle)}')
+
 p.write_text(s.replace(needle, replacement, 1))
