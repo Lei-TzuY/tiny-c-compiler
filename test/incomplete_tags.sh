@@ -44,4 +44,15 @@ assert_reject 'struct S; int main() { return sizeof(struct S); }'
 assert_reject 'struct S; struct T { struct S field; }; int main() { return 0; }'
 assert_reject 'struct S { int x; }; struct S { int y; }; int main() { return 0; }'
 
+
+# Every declarator in a comma-separated declaration must be validated independently.
+assert_reject 'struct S; struct S *ptr, value; int main() { return 0; }'
+assert_reject 'struct S; static struct S *ptr, value; int main() { return 0; }'
+assert_record 6 'struct S; extern struct S *ptr, value; struct S { int x; }; int main() { struct S s; s.x=6; return s.x; }'
+
+# typedef declarations may introduce more than one name.
+assert_record 11 'typedef int A, B; int main() { A a=5; B b=6; return a+b; }'
+assert_record 8 'typedef struct Pair Pair, *PairPtr; struct Pair { int x; }; int main() { Pair p; PairPtr q=&p; q->x=8; return p.x; }'
+assert_record 9 'int main() { typedef int A, B; A a=4; B b=5; return a+b; }'
+
 echo "All incomplete record/tag scope tests passed!"

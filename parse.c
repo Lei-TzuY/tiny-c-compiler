@@ -957,12 +957,17 @@ static Node *stmt(Token **rest, Token *tok) {
         tok = tok->next;
         Type *basety = declspec(&tok, tok);
         if (!equal(tok, ";")) {
-            Token *ident;
-            basety = declarator(&tok, tok, basety, &ident);
-            TypeDef *td = calloc(1, sizeof(TypeDef));
-            td->name = strndup(ident->loc, ident->len);
-            td->ty = basety;
-            td->next = typedefs; typedefs = td;
+            for (;;) {
+                Token *ident;
+                Type *ty = declarator(&tok, tok, basety, &ident);
+                TypeDef *td = calloc(1, sizeof(TypeDef));
+                td->name = strndup(ident->loc, ident->len);
+                td->ty = ty;
+                td->next = typedefs;
+                typedefs = td;
+                if (!consume(&tok, tok, ","))
+                    break;
+            }
         }
         *rest = skip(tok, ";");
         return new_node(ND_EXPR_STMT);
@@ -1457,12 +1462,17 @@ Program *parse(Token *tok) {
             tok = tok->next;
             Type *basety = declspec(&tok, tok);
             if (!equal(tok, ";")) {
-                Token *ident;
-                basety = declarator(&tok, tok, basety, &ident);
-                TypeDef *td = calloc(1, sizeof(TypeDef));
-                td->name = strndup(ident->loc, ident->len);
-                td->ty = basety;
-                td->next = typedefs; typedefs = td;
+                for (;;) {
+                    Token *ident;
+                    Type *ty = declarator(&tok, tok, basety, &ident);
+                    TypeDef *td = calloc(1, sizeof(TypeDef));
+                    td->name = strndup(ident->loc, ident->len);
+                    td->ty = ty;
+                    td->next = typedefs;
+                    typedefs = td;
+                    if (!consume(&tok, tok, ","))
+                        break;
+                }
             }
             tok = skip(tok, ";");
             continue;
@@ -1556,11 +1566,11 @@ Program *parse(Token *tok) {
             leave_scope();
             cur = cur->next = fn;
         } else {
-            if (!is_extern && is_incomplete_object_type(ty))
-                error_at(ident->loc, "variable has incomplete type");
-
             // Global variable(s) (possibly with initializer)
             for (;;) {
+                if (!is_extern && is_incomplete_object_type(ty))
+                    error_at(ident->loc, "variable has incomplete type");
+
                 Obj *var = calloc(1, sizeof(Obj));
                 var->name = strndup(ident->loc, ident->len);
                 var->ty = ty;
