@@ -43,3 +43,5 @@ The compiler is designed as an educational systems-programming project rather th
 - Static aggregate initializers use zero-filled byte images plus per-offset linker relocations, supporting pointer/function/string addresses inside arrays and records, nested aggregates, designators, and record padding.
 
 - Union types retain their record kind through semantic analysis; automatic/static union initializers select exactly one member (the first by default or a designated member), preserve overlapping storage correctly, and reject excess initializer elements.
+
+- Static-storage objects are emitted at their declared type alignment, including initialized/uninitialized scalars, relocatable pointers, arrays, records, unions, and block-static objects.

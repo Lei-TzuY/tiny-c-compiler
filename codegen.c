@@ -1145,6 +1145,16 @@ static void gen_stmt(Node *node) {
 
 static int align_up_cg(int n, int a) { return (n + a - 1) / a * a; }
 
+// File-scope and block-static objects must begin at an address satisfying their
+// declared type alignment. GAS data directives do not implicitly realign the
+// location counter, so a one-byte object emitted immediately before a long,
+// pointer, double or record would otherwise leave the later symbol misaligned.
+static void emit_data_alignment(Obj *var) {
+    int align = var->ty && var->ty->align > 0 ? var->ty->align : 1;
+    if (align > 1)
+        printf("  .balign %d\n", align);
+}
+
 static void assign_lvar_offsets(Program *prog) {
     for (Function *fn = prog->fns; fn; fn = fn->next) {
         int offset = 0;
@@ -1198,6 +1208,7 @@ static void emit_data(Program *prog) {
             printf("  .data\n");
             if (!var->is_static)
                 printf("  .globl %s\n", var->name);
+            emit_data_alignment(var);
             printf("%s:\n", var->name);
 
             for (int off = 0; off < var->init_image_size;) {
@@ -1233,6 +1244,7 @@ static void emit_data(Program *prog) {
                 if (!var->is_static)
                     printf("  .globl %s\n", var->name);
             }
+            emit_data_alignment(var);
             printf("%s:\n", var->name);
             for (int i = 0; i < var->ty->array_len; i++)
                 printf("  .byte %d\n", (unsigned char)var->init_data[i]);
@@ -1240,6 +1252,7 @@ static void emit_data(Program *prog) {
             printf("  .data\n");
             if (!var->is_static)
                 printf("  .globl %s\n", var->name);
+            emit_data_alignment(var);
             printf("%s:\n", var->name);
             int elem_size = var->ty->base ? var->ty->base->size : 4;
             for (int i = 0; i < var->init_vals_count; i++) {
@@ -1259,6 +1272,7 @@ static void emit_data(Program *prog) {
             printf("  .data\n");
             if (!var->is_static)
                 printf("  .globl %s\n", var->name);
+            emit_data_alignment(var);
             printf("%s:\n", var->name);
             if (var->init_reloc_addend > 0)
                 printf("  .quad %s+%" PRId64 "\n", var->init_reloc_label,
@@ -1272,6 +1286,7 @@ static void emit_data(Program *prog) {
             printf("  .data\n");
             if (!var->is_static)
                 printf("  .globl %s\n", var->name);
+            emit_data_alignment(var);
             printf("%s:\n", var->name);
             if (var->ty->kind == TY_FLOAT) {
                 union { float f; uint32_t u; } u = { (float)var->finit_val };
@@ -1291,6 +1306,7 @@ static void emit_data(Program *prog) {
             printf("  .data\n");
             if (!var->is_static)
                 printf("  .globl %s\n", var->name);
+            emit_data_alignment(var);
             printf("%s:\n", var->name);
             printf("  .zero %d\n", var->ty->size);
         }
