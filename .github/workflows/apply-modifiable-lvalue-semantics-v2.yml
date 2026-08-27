@@ -1,0 +1,32 @@
+name: Apply modifiable lvalue semantics migration v2
+
+on:
+  push:
+    branches:
+      - agent/modifiable-lvalue-semantics-v2
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/modifiable-lvalue-semantics-v2
+      - name: Apply migration
+        run: python3 tools/apply_modifiable_lvalue_semantics.py
+      - name: Test compiler
+        run: |
+          make clean
+          make test
+      - name: Commit verified implementation
+        run: |
+          rm tools/apply_modifiable_lvalue_semantics.py
+          rm .github/workflows/apply-modifiable-lvalue-semantics-v2.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add parse.c Makefile README.md test/lvalue_semantics.sh tools/apply_modifiable_lvalue_semantics.py .github/workflows/apply-modifiable-lvalue-semantics-v2.yml
+          git commit -m 'Enforce modifiable lvalue semantics'
+          git push origin HEAD:agent/modifiable-lvalue-semantics-v2
