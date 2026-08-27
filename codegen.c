@@ -339,81 +339,124 @@ static void gen_compound_assign(Node *node) {
 }
 
 // Generate a function call (direct or indirect via function pointer).
-// Integer/pointer arguments use rdi..r9; float/double arguments independently
-// use xmm0..xmm7 as required by the System V AMD64 ABI.
+// Integer/pointer arguments use rdi..r9 and float/double arguments independently
+// use xmm0..xmm7. Once a register class is exhausted, later arguments of that
+// class are copied to a contiguous caller stack-argument area in source order.
 static void gen_funcall(Node *node) {
     bool indirect = (node->funcname == NULL);
 
     if (indirect) {
         gen_expr(node->lhs);
-        push(); // save function address below argument spills
+        push(); // function address remains above the argument spills
     }
 
     Node *args[32];
     bool fp_arg[32];
+    bool stack_arg[32];
     int abi_slot[32];
+    int stack_slot[32];
     int nargs = 0;
     int gp_count = 0;
     int fp_count = 0;
+    int stack_count = 0;
 
+    // Preserve the compiler's existing left-to-right argument evaluation by
+    // spilling every computed value first. Each spill occupies one 8-byte slot.
     for (Node *arg = node->args; arg; arg = arg->next) {
         if (nargs >= 32)
             error("too many arguments");
         add_type(arg);
         args[nargs] = arg;
+        fp_arg[nargs] = is_flonum(arg->ty);
+        stack_arg[nargs] = false;
 
         gen_expr(arg);
-        if (is_flonum(arg->ty)) {
-            if (fp_count >= 8)
-                error("too many floating-point register arguments");
-            fp_arg[nargs] = true;
-            abi_slot[nargs] = fp_count++;
+        if (fp_arg[nargs]) {
+            if (fp_count < 8)
+                abi_slot[nargs] = fp_count++;
+            else {
+                stack_arg[nargs] = true;
+                stack_slot[nargs] = stack_count++;
+            }
             pushf(arg->ty);
         } else {
-            if (gp_count >= 6)
-                error("too many integer register arguments");
-            fp_arg[nargs] = false;
-            abi_slot[nargs] = gp_count++;
+            if (gp_count < 6)
+                abi_slot[nargs] = gp_count++;
+            else {
+                stack_arg[nargs] = true;
+                stack_slot[nargs] = stack_count++;
+            }
             push();
         }
         nargs++;
     }
 
-    for (int i = nargs - 1; i >= 0; i--) {
+    // r11 points at the last argument spill. Argument i lives at
+    // (nargs-1-i)*8(r11), independent of whether it will use a register or stack.
+    printf("  mov %%rsp, %%r11\n");
+
+    for (int i = 0; i < nargs; i++) {
+        if (stack_arg[i])
+            continue;
+        int src = (nargs - 1 - i) * 8;
         if (fp_arg[i]) {
-            char reg[16];
-            sprintf(reg, "%%xmm%d", abi_slot[i]);
-            popf(args[i]->ty, reg);
+            if (args[i]->ty->kind == TY_FLOAT)
+                printf("  movss %d(%%r11), %%xmm%d\n", src, abi_slot[i]);
+            else
+                printf("  movsd %d(%%r11), %%xmm%d\n", src, abi_slot[i]);
         } else {
-            pop(argreg64[abi_slot[i]]);
+            printf("  mov %d(%%r11), %s\n", src, argreg64[abi_slot[i]]);
         }
     }
 
-    int c = count();
-
     if (indirect)
-        pop("%r10");
+        printf("  mov %d(%%r11), %%r10\n", nargs * 8);
 
-    printf("  mov %%rsp, %%rax\n");
-    printf("  and $15, %%rax\n");
-    printf("  jnz .L.call.%d\n", c);
-    // For variadic callees, SysV requires AL to contain the number of vector
-    // registers used. Non-variadic callees ignore it.
+    // Keep alignment padding above the final stack arguments so the first
+    // stack-passed argument remains at 0(%rsp) immediately before `call`.
+    int pad = (depth + stack_count) & 1;
+    if (pad) {
+        printf("  sub $8, %%rsp\n");
+        depth++;
+    }
+
+    if (stack_count) {
+        printf("  sub $%d, %%rsp\n", stack_count * 8);
+        depth += stack_count;
+
+        for (int i = 0; i < nargs; i++) {
+            if (!stack_arg[i])
+                continue;
+            int src = (nargs - 1 - i) * 8;
+            int dst = stack_slot[i] * 8;
+            // Raw 8-byte copy preserves both integer and SSE-class spill bits;
+            // float callees consume only the low 4 bytes from their stack slot.
+            printf("  mov %d(%%r11), %%rax\n", src);
+            printf("  mov %%rax, %d(%%rsp)\n", dst);
+        }
+    }
+
+    // SysV variadic calls use AL for the number of XMM registers actually used.
     printf("  mov $%d, %%eax\n", fp_count);
     if (indirect)
         printf("  call *%%r10\n");
     else
         printf("  call %s\n", node->funcname);
-    printf("  jmp .L.end.%d\n", c);
-    printf(".L.call.%d:\n", c);
-    printf("  sub $8, %%rsp\n");
-    printf("  mov $%d, %%eax\n", fp_count);
-    if (indirect)
-        printf("  call *%%r10\n");
-    else
-        printf("  call %s\n", node->funcname);
-    printf("  add $8, %%rsp\n");
-    printf(".L.end.%d:\n", c);
+
+    if (stack_count) {
+        printf("  add $%d, %%rsp\n", stack_count * 8);
+        depth -= stack_count;
+    }
+    if (pad) {
+        printf("  add $8, %%rsp\n");
+        depth--;
+    }
+
+    int spill_slots = nargs + (indirect ? 1 : 0);
+    if (spill_slots) {
+        printf("  add $%d, %%rsp\n", spill_slots * 8);
+        depth -= spill_slots;
+    }
 }
 
 static void gen_expr(Node *node) {
@@ -988,32 +1031,59 @@ void codegen(Program *prog) {
             printf("  mov %%r8,  %d(%%rbp)\n", fn->va_offset + 32);
             printf("  mov %%r9,  %d(%%rbp)\n", fn->va_offset + 40);
         } else {
-            // Save passed-by-register arguments to the stack. Integer and SSE
-            // register numbers advance independently under SysV AMD64.
+            // Save register arguments to locals and copy overflow arguments from
+            // the caller stack. GPR/SSE register numbers advance independently,
+            // while stack-passed arguments share one source-order slot sequence.
             int gp = 0;
             int fp = 0;
+            int stack_arg = 0;
             for (Obj *var = fn->params; var; var = var->param_next) {
                 if (is_flonum(var->ty)) {
-                    if (fp >= 8)
-                        error("too many floating-point parameters");
-                    if (var->ty->kind == TY_FLOAT)
-                        printf("  movss %%xmm%d, %d(%%rbp)\n", fp, var->offset);
-                    else
-                        printf("  movsd %%xmm%d, %d(%%rbp)\n", fp, var->offset);
-                    fp++;
+                    if (fp < 8) {
+                        if (var->ty->kind == TY_FLOAT)
+                            printf("  movss %%xmm%d, %d(%%rbp)\n", fp, var->offset);
+                        else
+                            printf("  movsd %%xmm%d, %d(%%rbp)\n", fp, var->offset);
+                        fp++;
+                    } else {
+                        int src = 16 + stack_arg++ * 8;
+                        if (var->ty->kind == TY_FLOAT) {
+                            printf("  movss %d(%%rbp), %%xmm15\n", src);
+                            printf("  movss %%xmm15, %d(%%rbp)\n", var->offset);
+                        } else {
+                            printf("  movsd %d(%%rbp), %%xmm15\n", src);
+                            printf("  movsd %%xmm15, %d(%%rbp)\n", var->offset);
+                        }
+                    }
                     continue;
                 }
 
-                if (gp >= 6)
-                    error("too many integer parameters");
-                if (var->ty->kind == TY_BOOL || var->ty->kind == TY_CHAR)
-                    printf("  mov %s, %d(%%rbp)\n", argreg8[gp++], var->offset);
-                else if (var->ty->kind == TY_SHORT)
-                    printf("  mov %s, %d(%%rbp)\n", argreg16[gp++], var->offset);
-                else if (var->ty->kind == TY_INT)
-                    printf("  mov %s, %d(%%rbp)\n", argreg32[gp++], var->offset);
-                else
-                    printf("  mov %s, %d(%%rbp)\n", argreg64[gp++], var->offset);
+                if (gp < 6) {
+                    if (var->ty->kind == TY_BOOL || var->ty->kind == TY_CHAR)
+                        printf("  mov %s, %d(%%rbp)\n", argreg8[gp++], var->offset);
+                    else if (var->ty->kind == TY_SHORT)
+                        printf("  mov %s, %d(%%rbp)\n", argreg16[gp++], var->offset);
+                    else if (var->ty->kind == TY_INT)
+                        printf("  mov %s, %d(%%rbp)\n", argreg32[gp++], var->offset);
+                    else
+                        printf("  mov %s, %d(%%rbp)\n", argreg64[gp++], var->offset);
+                    continue;
+                }
+
+                int src = 16 + stack_arg++ * 8;
+                if (var->ty->kind == TY_BOOL || var->ty->kind == TY_CHAR) {
+                    printf("  mov %d(%%rbp), %%al\n", src);
+                    printf("  mov %%al, %d(%%rbp)\n", var->offset);
+                } else if (var->ty->kind == TY_SHORT) {
+                    printf("  mov %d(%%rbp), %%ax\n", src);
+                    printf("  mov %%ax, %d(%%rbp)\n", var->offset);
+                } else if (var->ty->kind == TY_INT) {
+                    printf("  mov %d(%%rbp), %%eax\n", src);
+                    printf("  mov %%eax, %d(%%rbp)\n", var->offset);
+                } else {
+                    printf("  mov %d(%%rbp), %%rax\n", src);
+                    printf("  mov %%rax, %d(%%rbp)\n", var->offset);
+                }
             }
         }
 
