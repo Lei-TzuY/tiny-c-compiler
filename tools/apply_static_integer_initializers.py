@@ -67,15 +67,13 @@ new_array = '''                    Type *elem_ty = (ty->kind == TY_ARRAY) ? ty->
 '''
 s = s.replace(old_array, new_array)
 
-old_scalar = '''                if (is_flonum(ty))
+local_old = '''                if (is_flonum(ty))
                     var->finit_val = parse_const_double(&tok, tok);
                 else
                     var->init_val = parse_const_int(&tok, tok);
                 var->has_init_val = true;
 '''
-if s.count(old_scalar) != 2:
-    raise SystemExit(f"scalar initializer blocks: expected two anchors, found {s.count(old_scalar)}")
-new_scalar = '''                if (is_flonum(ty)) {
+local_new = '''                if (is_flonum(ty)) {
                     var->finit_val = parse_const_double(&tok, tok);
                 } else if (is_integer(ty) || ty->kind == TY_PTR) {
                     var->init_val = parse_static_integer_initializer(&tok, tok, ty);
@@ -84,7 +82,24 @@ new_scalar = '''                if (is_flonum(ty)) {
                 }
                 var->has_init_val = true;
 '''
-s = s.replace(old_scalar, new_scalar)
+s = replace_once(s, local_old, local_new, 'block-scope static scalar initializer')
+
+global_old = '''                        if (is_flonum(ty))
+                            var->finit_val = parse_const_double(&tok, tok);
+                        else
+                            var->init_val = parse_const_int(&tok, tok);
+                        var->has_init_val = true;
+'''
+global_new = '''                        if (is_flonum(ty)) {
+                            var->finit_val = parse_const_double(&tok, tok);
+                        } else if (is_integer(ty) || ty->kind == TY_PTR) {
+                            var->init_val = parse_static_integer_initializer(&tok, tok, ty);
+                        } else {
+                            error_at(tok->loc, "unsupported scalar static initializer type");
+                        }
+                        var->has_init_val = true;
+'''
+s = replace_once(s, global_old, global_new, 'file-scope scalar initializer')
 p.write_text(s)
 
 # Focused regression coverage.
