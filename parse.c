@@ -1186,17 +1186,37 @@ static bool invalid_sizeof_type(Type *ty) {
     return is_incomplete_object_type(ty);
 }
 
-// Parse a constant integer (with optional sign) for global initializers
-static int64_t parse_const_int(Token **rest, Token *tok) {
-    bool neg = consume(&tok, tok, "-");
-    bool pos = false;
-    if (!neg) pos = consume(&tok, tok, "+");
-    (void)pos;
-    if (tok->kind != TK_NUM || tok->is_float)
-        error_at(tok->loc, "expected integer constant");
-    int64_t val = tok->val;
-    if (neg) val = -val;
-    *rest = tok->next;
+// Parse and evaluate an integer constant expression used by an object with
+// static storage duration. Reuse the same type-aware evaluator as enums, case
+// labels, and array bounds so signedness, integer promotions, short-circuiting,
+// casts, and shift/division diagnostics cannot drift between contexts.
+static int64_t parse_static_integer_initializer(Token **rest, Token *tok,
+                                                Type *target) {
+    Token *start = tok;
+    Node *node = assign(&tok, tok);
+    add_type(node);
+
+    if (!is_integer(node->ty))
+        error_at(start->loc, "static initializer is not an integer constant expression");
+
+    int64_t val = eval_const_expr(node);
+
+    if (target) {
+        if (is_integer(target)) {
+            val = cast_const_integer(val, target);
+        } else if (target->kind == TY_PTR) {
+            // A null pointer constant is an integer constant expression with
+            // value zero. Address constants are intentionally a separate
+            // feature; reject arbitrary nonzero integer-to-pointer statics.
+            if (val != 0)
+                error_at(start->loc, "nonzero integer is not a valid static pointer initializer");
+            val = 0;
+        } else {
+            error_at(start->loc, "unsupported static integer initializer target type");
+        }
+    }
+
+    *rest = tok;
     return val;
 }
 
@@ -1338,7 +1358,8 @@ static Node *declaration(Token **rest, Token *tok, bool is_static, bool is_exter
                     if (cnt > 0) tok = skip(tok, ",");
                     if (equal(tok, "}")) break;
                     if (cnt >= cap) { cap *= 2; vals = realloc(vals, cap * sizeof(int64_t)); }
-                    vals[cnt++] = parse_const_int(&tok, tok);
+                    Type *elem_ty = (ty->kind == TY_ARRAY) ? ty->base : NULL;
+                    vals[cnt++] = parse_static_integer_initializer(&tok, tok, elem_ty);
                 }
                 tok = skip(tok, "}");
                 if (ty->kind == TY_ARRAY && ty->array_len == 0) {
@@ -1348,10 +1369,13 @@ static Node *declaration(Token **rest, Token *tok, bool is_static, bool is_exter
                 var->init_vals = vals;
                 var->init_vals_count = cnt;
             } else {
-                if (is_flonum(ty))
+                if (is_flonum(ty)) {
                     var->finit_val = parse_const_double(&tok, tok);
-                else
-                    var->init_val = parse_const_int(&tok, tok);
+                } else if (is_integer(ty) || ty->kind == TY_PTR) {
+                    var->init_val = parse_static_integer_initializer(&tok, tok, ty);
+                } else {
+                    error_at(tok->loc, "unsupported scalar static initializer type");
+                }
                 var->has_init_val = true;
             }
             continue;
@@ -2743,7 +2767,8 @@ Program *parse(Token *tok) {
                             if (cnt > 0) tok = skip(tok, ",");
                             if (equal(tok, "}")) break;
                             if (cnt >= cap) { cap *= 2; vals = realloc(vals, cap * sizeof(int64_t)); }
-                            vals[cnt++] = parse_const_int(&tok, tok);
+                            Type *elem_ty = (ty->kind == TY_ARRAY) ? ty->base : NULL;
+                    vals[cnt++] = parse_static_integer_initializer(&tok, tok, elem_ty);
                         }
                         tok = skip(tok, "}");
 
@@ -2755,10 +2780,13 @@ Program *parse(Token *tok) {
                         var->init_vals = vals;
                         var->init_vals_count = cnt;
                     } else {
-                        if (is_flonum(ty))
+                        if (is_flonum(ty)) {
                             var->finit_val = parse_const_double(&tok, tok);
-                        else
-                            var->init_val = parse_const_int(&tok, tok);
+                        } else if (is_integer(ty) || ty->kind == TY_PTR) {
+                            var->init_val = parse_static_integer_initializer(&tok, tok, ty);
+                        } else {
+                            error_at(tok->loc, "unsupported scalar static initializer type");
+                        }
                         var->has_init_val = true;
                     }
                 }
