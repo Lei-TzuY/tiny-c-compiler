@@ -1,0 +1,26 @@
+name: Apply record va_arg core
+on:
+  push:
+    branches:
+      - agent/sysv-variadic-record-va-arg
+permissions:
+  contents: write
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/sysv-variadic-record-va-arg
+      - name: Apply migration
+        run: python3 tools/apply_record_va_arg_core.py
+      - name: Build compiler
+        run: make clean && make
+      - name: Commit core changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add parse.c codegen.c
+          git diff --cached --quiet && exit 0
+          git commit -m "Support record-valued va_arg core lowering"
+          git push origin HEAD:agent/sysv-variadic-record-va-arg
