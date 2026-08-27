@@ -1,0 +1,34 @@
+name: Apply SysV integer record ABI migration
+
+on:
+  push:
+    branches:
+      - agent/sysv-integer-record-abi
+
+permissions:
+  contents: write
+
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Apply migration
+        run: python3 tools/apply_sysv_integer_record_abi.py
+      - name: Run full test suite
+        run: |
+          make clean
+          make test
+      - name: Commit generated changes
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add minicc.h parse.c codegen.c Makefile README.md test/sysv_record_abi.sh
+          if git diff --cached --quiet; then
+            echo 'No generated changes'
+            exit 0
+          fi
+          git commit -m 'Support SysV integer-class record ABI'
+          git push
