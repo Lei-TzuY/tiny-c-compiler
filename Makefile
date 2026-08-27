@@ -42,6 +42,7 @@ test: minicc
 	bash ./test/static_integer_initializers.sh
 	bash ./test/static_address_initializers.sh
 	bash ./test/aggregate_static_relocations.sh
+	bash ./test/union_initializers.sh
 	bash ./test/aggregate_initializers.sh
 	bash ./test/array_designators.sh
 	bash ./test/call_arguments.sh

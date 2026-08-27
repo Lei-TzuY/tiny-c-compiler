@@ -84,6 +84,7 @@ struct Type {
     int align;        // alignment requirement
     bool is_unsigned; // true for unsigned integer types
     bool is_incomplete; // forward-declared struct/union with no body yet
+    bool is_union;      // TY_STRUCT represents both records; true for union
     Type *base;       // Pointer or array
     int array_len;    // Array
     Member *members;  // Struct members

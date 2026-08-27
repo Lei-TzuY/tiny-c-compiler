@@ -558,11 +558,12 @@ static bool is_incomplete_object_type(Type *ty) {
     return false;
 }
 
-static Type *new_record_type(void) {
+static Type *new_record_type(bool is_union) {
     Type *ty = calloc(1, sizeof(Type));
     ty->kind = TY_STRUCT;
     ty->align = 1;
     ty->is_incomplete = true;
+    ty->is_union = is_union;
     return ty;
 }
 
@@ -586,7 +587,7 @@ static Type *record_decl(Token **rest, Token *tok, bool is_union) {
 
         StructTag *tag = find_tag(tag_name);
         if (!tag) {
-            Type *ty = new_record_type();
+            Type *ty = new_record_type(is_union);
             tag = push_tag(tag_name, ty, tag_kind);
         } else if (tag->kind != tag_kind) {
             error_at(tok->loc, "%s %s conflicts with %s tag", kind, tag_name,
@@ -607,11 +608,11 @@ static Type *record_decl(Token **rest, Token *tok, bool is_union) {
                 error_at(tok->loc, "redefinition of %s %s", kind, tag_name);
             ty = tag->ty;
         } else {
-            ty = new_record_type();
+            ty = new_record_type(is_union);
             push_tag(tag_name, ty, tag_kind);
         }
     } else {
-        ty = new_record_type();
+        ty = new_record_type(is_union);
     }
 
     tok = skip(tok, "{");
@@ -664,11 +665,13 @@ static Type *record_decl(Token **rest, Token *tok, bool is_union) {
 
     ty->align = align;
     ty->members = head.next;
+    ty->is_union = is_union;
     ty->is_incomplete = false;
     for (Type *q = ty->qual_next; q; q = q->qual_next) {
         q->size = ty->size;
         q->align = ty->align;
         q->members = ty->members;
+        q->is_union = ty->is_union;
         q->is_incomplete = false;
     }
     *rest = tok;
@@ -1430,6 +1433,17 @@ static void append_zero_initializer(Node **tail, Node *lhs, Type *ty, Token *whe
     }
 
     if (ty->kind == TY_STRUCT) {
+        if (ty->is_union) {
+            Member *m = ty->members;
+            if (m) {
+                Node *member = new_node(ND_MEMBER);
+                member->lhs = lhs;
+                member->member = m;
+                append_zero_initializer(tail, member, m->ty, where);
+            }
+            return;
+        }
+
         for (Member *m = ty->members; m; m = m->next) {
             Node *member = new_node(ND_MEMBER);
             member->lhs = lhs;
@@ -1717,6 +1731,7 @@ static Type *parse_static_image_initializer(Obj *var, Token **rest, Token *tok,
     ensure_static_image(var, offset + ty->size);
     Member *next_member = ty->members;
     bool first = true;
+    int initialized_members = 0;
     while (!equal(tok, "}")) {
         if (!first) {
             tok = skip(tok, ",");
@@ -1724,6 +1739,9 @@ static Type *parse_static_image_initializer(Obj *var, Token **rest, Token *tok,
                 break;
         }
         first = false;
+
+        if (ty->is_union && initialized_members)
+            error_at(tok->loc, "excess elements in union initializer");
 
         if (equal(tok, "["))
             error_at(tok->loc, "array designator requires an array initializer");
@@ -1740,12 +1758,19 @@ static Type *parse_static_image_initializer(Obj *var, Token **rest, Token *tok,
             error_at(tok->loc, "excess elements in record initializer");
         }
 
-        reset_static_subobject(var, offset + member->offset, member->ty->size);
+        // All union members overlap at offset zero. Clear the complete union so
+        // a designated pointer member cannot leave stale relocation/data bytes
+        // from an earlier representation of the same object.
+        if (ty->is_union)
+            reset_static_subobject(var, offset, ty->size);
+        else
+            reset_static_subobject(var, offset + member->offset, member->ty->size);
         Type *member_ty = parse_static_image_initializer(var, &tok, tok,
                                                          member->ty,
                                                          offset + member->offset);
         if (member_ty != member->ty)
             error_at(brace->loc, "incomplete array record members are not supported");
+        initialized_members++;
         next_member = member->next;
     }
 
@@ -1841,10 +1866,13 @@ static Node *declaration(Token **rest, Token *tok, bool is_static, bool is_exter
             bool *member_init = member_count ? calloc(member_count, sizeof(bool)) : NULL;
             Member *cur_mem = (ty->kind == TY_STRUCT) ? ty->members : NULL;
             Node *before_init = block_cur;
+            int initialized_union_members = 0;
 
             while (!equal(tok, "}")) {
                 if (equal(tok, ",")) tok = tok->next;
                 if (equal(tok, "}")) break;
+                if (ty->kind == TY_STRUCT && ty->is_union && initialized_union_members)
+                    error_at(tok->loc, "excess elements in union initializer");
 
                 // Designated initializer: .member = expr
                 if (consume(&tok, tok, ".")) {
@@ -1868,6 +1896,8 @@ static Node *declaration(Token **rest, Token *tok, bool is_static, bool is_exter
                     member_node->member = m;
                     Node *a = new_initializer_assign(member_node, e, tok);
                     block_cur = block_cur->next = new_unary(ND_EXPR_STMT, a);
+                    if (ty->is_union)
+                        initialized_union_members++;
                     cur_mem = m->next;
                     continue;
                 }
@@ -1927,6 +1957,8 @@ static Node *declaration(Token **rest, Token *tok, bool is_static, bool is_exter
                     member_node->member = cur_mem;
                     Node *a = new_initializer_assign(member_node, e, tok);
                     block_cur = block_cur->next = new_unary(ND_EXPR_STMT, a);
+                    if (ty->is_union)
+                        initialized_union_members++;
                     cur_mem = cur_mem->next;
                 }
             }
@@ -1951,6 +1983,14 @@ static Node *declaration(Token **rest, Token *tok, bool is_static, bool is_exter
                     if (i < elem_cap && elem_init[i]) continue;
                     Node *lhs = new_unary(ND_DEREF, new_add(new_var_node(var), new_num(i)));
                     append_zero_initializer(&zero_cur, lhs, ty->base, brace);
+                }
+            } else if (ty->is_union) {
+                if (!initialized_union_members && ty->members) {
+                    Member *m = ty->members;
+                    Node *member = new_node(ND_MEMBER);
+                    member->lhs = new_var_node(var);
+                    member->member = m;
+                    append_zero_initializer(&zero_cur, member, m->ty, brace);
                 }
             } else {
                 int mi = 0;
