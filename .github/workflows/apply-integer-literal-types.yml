@@ -1,0 +1,29 @@
+name: Apply integer literal typing migration
+
+on:
+  push:
+    branches:
+      - agent/integer-literal-types
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/integer-literal-types
+      - name: Apply migration
+        run: python3 tools/apply_integer_literal_types.py
+      - name: Test compiler
+        run: make clean && make test
+      - name: Commit verified implementation
+        run: |
+          rm -f tools/apply_integer_literal_types.py .github/workflows/apply-integer-literal-types.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'Implement typed integer literals and long long'
+          git push origin HEAD:agent/integer-literal-types
