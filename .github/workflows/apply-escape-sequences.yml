@@ -17,7 +17,9 @@ jobs:
         with:
           ref: agent/c-escape-sequences
       - name: Apply migration
-        run: python3 tools/apply_escape_sequences.py
+        run: |
+          python3 tools/apply_escape_sequences.py
+          python3 tools/fix_escape_test_quoting.py
       - name: Run full test suite
         run: make test
       - name: Commit generated changes
