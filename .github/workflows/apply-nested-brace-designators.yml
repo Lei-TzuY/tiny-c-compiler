@@ -1,0 +1,34 @@
+name: Apply nested-brace designator migration
+
+on:
+  push:
+    branches:
+      - agent/nested-brace-designators
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/nested-brace-designators
+          fetch-depth: 0
+
+      - name: Apply migration
+        run: python3 tools/apply_nested_brace_designators.py
+
+      - name: Test compiler
+        run: make clean && make test
+
+      - name: Commit verified implementation
+        run: |
+          rm -f tools/apply_nested_brace_designators.py
+          rm -f .github/workflows/apply-nested-brace-designators.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add parse.c Makefile README.md test/nested_brace_designators.sh tools/apply_nested_brace_designators.py .github/workflows/apply-nested-brace-designators.yml
+          git commit -m "Support nested-brace designated initializers"
+          git push origin HEAD:agent/nested-brace-designators
