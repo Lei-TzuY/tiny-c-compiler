@@ -29,6 +29,13 @@ jobs:
           if anchor not in s:
               raise SystemExit('missing assignment_compatible forward declaration')
           s = s.replace(anchor, anchor + 'static Node *new_checked_assign(Node *lhs, Node *rhs, Token *op);\n', 1)
+
+          old = '''    if (src->kind == TY_FUNC)\n        return dst->base && dst->base->kind == TY_FUNC &&\n               type_compatible(dst->base, src);\n\n    if (src->kind != TY_PTR)\n        return false;\n'''
+          new = '''    if (src->kind == TY_FUNC)\n        return dst->base && dst->base->kind == TY_FUNC &&\n               type_compatible(dst->base, src);\n\n    // Array expressions decay to pointers to their first element in value\n    // contexts such as assignment, initialization, return and arguments.\n    if (src->kind == TY_ARRAY)\n        return type_compatible(dst->base, src->base) ||\n               (dst->base && dst->base->kind == TY_VOID);\n\n    if (src->kind != TY_PTR)\n        return false;\n'''
+          if old not in s:
+              raise SystemExit('missing pointer compatibility anchor')
+          s = s.replace(old, new, 1)
+
           pattern = re.compile(r'(?m)^(?P<i>\s*)if \(expected\) \{\n(?P=i)    if \(is_numeric\(arg->ty\) && is_numeric\(expected->ty\) &&\n(?P=i)        arg->ty != expected->ty\) \{')
           def repl(m):
               i = m.group('i')
