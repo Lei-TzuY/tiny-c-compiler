@@ -1358,7 +1358,8 @@ static Node *stmt(Token **rest, Token *tok) {
         tok = skip(tok, ":");
         Node *node = new_node(ND_CASE);
         node->val = val;
-        *rest = tok;
+        node->unique_label = new_unique_name();
+        node->lhs = stmt(rest, tok);
         return node;
     }
 
@@ -1372,7 +1373,8 @@ static Node *stmt(Token **rest, Token *tok) {
 
         tok = skip(tok->next, ":");
         Node *node = new_node(ND_DEFAULT);
-        *rest = tok;
+        node->unique_label = new_unique_name();
+        node->lhs = stmt(rest, tok);
         return node;
     }
 
