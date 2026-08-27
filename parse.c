@@ -1712,6 +1712,101 @@ static Member *find_static_initializer_member(Type *ty, Token *tok) {
     return NULL;
 }
 
+static bool is_initializer_aggregate(Type *ty) {
+    return ty && (ty->kind == TY_ARRAY || ty->kind == TY_STRUCT);
+}
+
+static Type *parse_static_image_initializer(Obj *var, Token **rest, Token *tok,
+                                            Type *ty, int offset);
+
+// A nested aggregate may omit its own braces. Consume exactly the number of
+// positional subobjects belonging to this aggregate and leave the separator
+// before the next enclosing subobject untouched. The backing static image is
+// already zero-filled, so an early enclosing '}' naturally leaves the remainder
+// of the elided aggregate initialized to zero.
+static void parse_static_image_elided(Obj *var, Token **rest, Token *tok,
+                                      Type *ty, int offset, Token *where) {
+    if (!is_initializer_aggregate(ty))
+        error_at(where->loc, "internal error: brace elision requires aggregate type");
+
+    if (ty->kind == TY_ARRAY) {
+        if (ty->array_len == 0)
+            error_at(where->loc, "nested incomplete arrays are not supported");
+        ensure_static_image(var, offset + ty->size);
+
+        for (int i = 0; i < ty->array_len; i++) {
+            if (i > 0) {
+                if (equal(tok, "}"))
+                    break;
+                tok = skip(tok, ",");
+                if (equal(tok, "}"))
+                    break;
+            }
+            if (equal(tok, "[") || equal(tok, "."))
+                error_at(tok->loc, "designators in brace-elided nested aggregates are not yet supported");
+
+            Type *child_ty = ty->base;
+            int child_offset = offset + i * child_ty->size;
+            reset_static_subobject(var, child_offset, child_ty->size);
+
+            if (parse_static_string_array_initializer(var, &tok, tok,
+                                                       child_ty, child_offset))
+                continue;
+            if (is_initializer_aggregate(child_ty) && !equal(tok, "{")) {
+                parse_static_image_elided(var, &tok, tok, child_ty,
+                                          child_offset, where);
+                continue;
+            }
+
+            Type *parsed = parse_static_image_initializer(var, &tok, tok,
+                                                          child_ty, child_offset);
+            if (parsed != child_ty)
+                error_at(where->loc, "nested incomplete arrays are not supported");
+        }
+        *rest = tok;
+        return;
+    }
+
+    ensure_static_image(var, offset + ty->size);
+    int initialized = 0;
+    for (Member *m = ty->members; m; m = m->next) {
+        if (initialized > 0) {
+            if (equal(tok, "}"))
+                break;
+            tok = skip(tok, ",");
+            if (equal(tok, "}"))
+                break;
+        }
+        if (equal(tok, "[") || equal(tok, "."))
+            error_at(tok->loc, "designators in brace-elided nested aggregates are not yet supported");
+
+        if (ty->is_union)
+            reset_static_subobject(var, offset, ty->size);
+        else
+            reset_static_subobject(var, offset + m->offset, m->ty->size);
+
+        int child_offset = offset + m->offset;
+        if (parse_static_string_array_initializer(var, &tok, tok,
+                                                   m->ty, child_offset)) {
+            initialized++;
+        } else if (is_initializer_aggregate(m->ty) && !equal(tok, "{")) {
+            parse_static_image_elided(var, &tok, tok, m->ty,
+                                      child_offset, where);
+            initialized++;
+        } else {
+            Type *parsed = parse_static_image_initializer(var, &tok, tok,
+                                                          m->ty, child_offset);
+            if (parsed != m->ty)
+                error_at(where->loc, "incomplete array record members are not supported");
+            initialized++;
+        }
+
+        if (ty->is_union)
+            break;
+    }
+    *rest = tok;
+}
+
 static Type *parse_static_image_initializer(Obj *var, Token **rest, Token *tok,
                                             Type *ty, int offset) {
     if (parse_static_string_array_initializer(var, rest, tok, ty, offset))
@@ -1757,7 +1852,9 @@ static Type *parse_static_image_initializer(Obj *var, Token **rest, Token *tok,
                 error_at(tok->loc, "member designator requires a record initializer");
 
             int index = next_index;
+            bool designated = false;
             if (equal(tok, "[")) {
+                designated = true;
                 Token *designator = tok;
                 tok = tok->next;
                 index = parse_array_designator_index(&tok, tok, designator);
@@ -1768,12 +1865,22 @@ static Type *parse_static_image_initializer(Obj *var, Token **rest, Token *tok,
             if (ty->array_len > 0 && index >= ty->array_len)
                 error_at(tok->loc, "array designator index exceeds array bounds");
 
-            int elem_offset = offset + index * ty->base->size;
-            reset_static_subobject(var, elem_offset, ty->base->size);
-            Type *elem_ty = parse_static_image_initializer(var, &tok, tok,
-                                                           ty->base, elem_offset);
-            if (elem_ty != ty->base)
-                error_at(brace->loc, "nested incomplete arrays are not supported");
+            Type *elem_ty = ty->base;
+            int elem_offset = offset + index * elem_ty->size;
+            reset_static_subobject(var, elem_offset, elem_ty->size);
+            if (parse_static_string_array_initializer(var, &tok, tok,
+                                                       elem_ty, elem_offset)) {
+                // Character-array string initializer consumed as one subobject.
+            } else if (!designated && is_initializer_aggregate(elem_ty) &&
+                       !equal(tok, "{")) {
+                parse_static_image_elided(var, &tok, tok, elem_ty,
+                                          elem_offset, brace);
+            } else {
+                Type *parsed = parse_static_image_initializer(var, &tok, tok,
+                                                              elem_ty, elem_offset);
+                if (parsed != elem_ty)
+                    error_at(brace->loc, "nested incomplete arrays are not supported");
+            }
 
             if (index > max_index)
                 max_index = index;
@@ -1810,7 +1917,9 @@ static Type *parse_static_image_initializer(Obj *var, Token **rest, Token *tok,
             error_at(tok->loc, "array designator requires an array initializer");
 
         Member *member = next_member;
+        bool designated = false;
         if (consume(&tok, tok, ".")) {
+            designated = true;
             if (tok->kind != TK_IDENT)
                 error_at(tok->loc, "expected member name in designated initializer");
             member = find_static_initializer_member(ty, tok);
@@ -1828,17 +1937,112 @@ static Type *parse_static_image_initializer(Obj *var, Token **rest, Token *tok,
             reset_static_subobject(var, offset, ty->size);
         else
             reset_static_subobject(var, offset + member->offset, member->ty->size);
-        Type *member_ty = parse_static_image_initializer(var, &tok, tok,
-                                                         member->ty,
-                                                         offset + member->offset);
-        if (member_ty != member->ty)
-            error_at(brace->loc, "incomplete array record members are not supported");
+
+        int member_offset = offset + member->offset;
+        if (parse_static_string_array_initializer(var, &tok, tok,
+                                                   member->ty, member_offset)) {
+            // Character-array string initializer consumed as one subobject.
+        } else if (!designated && is_initializer_aggregate(member->ty) &&
+                   !equal(tok, "{")) {
+            parse_static_image_elided(var, &tok, tok, member->ty,
+                                      member_offset, brace);
+        } else {
+            Type *parsed = parse_static_image_initializer(var, &tok, tok,
+                                                          member->ty, member_offset);
+            if (parsed != member->ty)
+                error_at(brace->loc, "incomplete array record members are not supported");
+        }
         initialized_members++;
         next_member = member->next;
     }
 
     *rest = skip(tok, "}");
     return ty;
+}
+
+// Parse one nested automatic aggregate subobject, with or without its own
+// braces. Zero the complete subobject first, then overwrite explicitly supplied
+// positional leaves. In unbraced mode the helper consumes only separators that
+// belong inside the subobject and leaves the next enclosing comma untouched.
+static void parse_automatic_aggregate_subobject(Node **tail, Node *lhs, Type *ty,
+                                                 Token **rest, Token *tok,
+                                                 Token *where) {
+    if (!is_initializer_aggregate(ty))
+        error_at(where->loc, "internal error: automatic aggregate initializer expected");
+    if (ty->kind == TY_ARRAY && ty->array_len == 0)
+        error_at(where->loc, "nested incomplete arrays are not supported");
+
+    append_zero_initializer(tail, lhs, ty, where);
+    bool braced = consume(&tok, tok, "{");
+
+    if (ty->kind == TY_ARRAY) {
+        for (int i = 0; i < ty->array_len; i++) {
+            if (i > 0) {
+                if (equal(tok, "}"))
+                    break;
+                tok = skip(tok, ",");
+                if (equal(tok, "}"))
+                    break;
+            }
+            if (equal(tok, "[") || equal(tok, "."))
+                error_at(tok->loc, "designators in nested aggregate initializers are not yet supported");
+
+            Node *child = new_unary(ND_DEREF, new_add(lhs, new_num(i)));
+            if (append_automatic_string_array_initializer(tail, child, ty->base,
+                                                           &tok, tok))
+                continue;
+            if (is_initializer_aggregate(ty->base)) {
+                parse_automatic_aggregate_subobject(tail, child, ty->base,
+                                                     &tok, tok, where);
+                continue;
+            }
+
+            Node *rhs = assign(&tok, tok);
+            Node *a = new_initializer_assign(child, rhs, where);
+            *tail = (*tail)->next = new_unary(ND_EXPR_STMT, a);
+        }
+    } else {
+        int initialized = 0;
+        for (Member *m = ty->members; m; m = m->next) {
+            if (initialized > 0) {
+                if (equal(tok, "}"))
+                    break;
+                tok = skip(tok, ",");
+                if (equal(tok, "}"))
+                    break;
+            }
+            if (equal(tok, "[") || equal(tok, "."))
+                error_at(tok->loc, "designators in nested aggregate initializers are not yet supported");
+
+            Node *child = new_node(ND_MEMBER);
+            child->lhs = lhs;
+            child->member = m;
+            if (append_automatic_string_array_initializer(tail, child, m->ty,
+                                                           &tok, tok)) {
+                initialized++;
+            } else if (is_initializer_aggregate(m->ty)) {
+                parse_automatic_aggregate_subobject(tail, child, m->ty,
+                                                     &tok, tok, where);
+                initialized++;
+            } else {
+                Node *rhs = assign(&tok, tok);
+                Node *a = new_initializer_assign(child, rhs, where);
+                *tail = (*tail)->next = new_unary(ND_EXPR_STMT, a);
+                initialized++;
+            }
+
+            if (ty->is_union)
+                break;
+        }
+    }
+
+    if (braced) {
+        if (equal(tok, ","))
+            tok = tok->next;
+        *rest = skip(tok, "}");
+    } else {
+        *rest = tok;
+    }
 }
 
 // declaration = declspec (declarator ("=" (expr | "{" initializer "}"))?)
@@ -1962,9 +2166,14 @@ static Node *declaration(Token **rest, Token *tok, bool is_static, bool is_exter
                                                                     member_node,
                                                                     m->ty,
                                                                     &tok, tok)) {
-                        Node *e = assign(&tok, tok);
-                        Node *a = new_initializer_assign(member_node, e, tok);
-                        block_cur = block_cur->next = new_unary(ND_EXPR_STMT, a);
+                        if (is_initializer_aggregate(m->ty) && equal(tok, "{")) {
+                            parse_automatic_aggregate_subobject(&block_cur, member_node,
+                                                                m->ty, &tok, tok, brace);
+                        } else {
+                            Node *e = assign(&tok, tok);
+                            Node *a = new_initializer_assign(member_node, e, tok);
+                            block_cur = block_cur->next = new_unary(ND_EXPR_STMT, a);
+                        }
                     }
                     if (ty->is_union)
                         initialized_union_members++;
@@ -1996,9 +2205,14 @@ static Node *declaration(Token **rest, Token *tok, bool is_static, bool is_exter
                     if (!append_automatic_string_array_initializer(&block_cur, lhs,
                                                                     ty->base,
                                                                     &tok, tok)) {
-                        Node *e = assign(&tok, tok);
-                        Node *a = new_initializer_assign(lhs, e, tok);
-                        block_cur = block_cur->next = new_unary(ND_EXPR_STMT, a);
+                        if (is_initializer_aggregate(ty->base) && equal(tok, "{")) {
+                            parse_automatic_aggregate_subobject(&block_cur, lhs,
+                                                                ty->base, &tok, tok, brace);
+                        } else {
+                            Node *e = assign(&tok, tok);
+                            Node *a = new_initializer_assign(lhs, e, tok);
+                            block_cur = block_cur->next = new_unary(ND_EXPR_STMT, a);
+                        }
                     }
                     cur_idx = idx + 1;
                     continue;
@@ -2021,9 +2235,14 @@ static Node *declaration(Token **rest, Token *tok, bool is_static, bool is_exter
                     if (!append_automatic_string_array_initializer(&block_cur, lhs,
                                                                     ty->base,
                                                                     &tok, tok)) {
-                        Node *e = assign(&tok, tok);
-                        Node *a = new_initializer_assign(lhs, e, tok);
-                        block_cur = block_cur->next = new_unary(ND_EXPR_STMT, a);
+                        if (is_initializer_aggregate(ty->base)) {
+                            parse_automatic_aggregate_subobject(&block_cur, lhs,
+                                                                ty->base, &tok, tok, brace);
+                        } else {
+                            Node *e = assign(&tok, tok);
+                            Node *a = new_initializer_assign(lhs, e, tok);
+                            block_cur = block_cur->next = new_unary(ND_EXPR_STMT, a);
+                        }
                     }
                 } else {
                     if (!cur_mem)
@@ -2037,9 +2256,14 @@ static Node *declaration(Token **rest, Token *tok, bool is_static, bool is_exter
                                                                     member_node,
                                                                     cur_mem->ty,
                                                                     &tok, tok)) {
-                        Node *e = assign(&tok, tok);
-                        Node *a = new_initializer_assign(member_node, e, tok);
-                        block_cur = block_cur->next = new_unary(ND_EXPR_STMT, a);
+                        if (is_initializer_aggregate(cur_mem->ty)) {
+                            parse_automatic_aggregate_subobject(&block_cur, member_node,
+                                                                cur_mem->ty, &tok, tok, brace);
+                        } else {
+                            Node *e = assign(&tok, tok);
+                            Node *a = new_initializer_assign(member_node, e, tok);
+                            block_cur = block_cur->next = new_unary(ND_EXPR_STMT, a);
+                        }
                     }
                     if (ty->is_union)
                         initialized_union_members++;
