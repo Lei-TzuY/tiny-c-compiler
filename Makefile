@@ -21,6 +21,7 @@ test: minicc
 	bash ./test/prototype_params.sh
 	bash ./test/function_pointer_prototype.sh
 	bash ./test/callable_declarators.sh
+	bash ./test/prototype_arity.sh
 
 clean:
 	rm -f minicc *.o *~ tmp*

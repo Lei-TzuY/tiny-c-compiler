@@ -89,6 +89,7 @@ struct Type {
     Type *return_ty;  // TY_FUNC: return type
     Obj *params;       // TY_FUNC: declared parameter types (metadata Obj list)
     bool is_variadic; // TY_FUNC: variadic function (...)
+    bool has_prototype; // TY_FUNC: distinguish f(void)/f(int) from old-style f()
 };
 
 struct Member {

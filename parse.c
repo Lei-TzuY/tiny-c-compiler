@@ -763,6 +763,7 @@ static Type *declarator_impl(Token **rest, Token *tok, Type *ty, Token **ident,
         Obj param_head = {};
         Obj *pcur = &param_head;
         bool is_variadic = false;
+        bool has_prototype = !equal(tok, ")");
 
         if (equal(tok, "void") && equal(tok->next, ")")) {
             tok = tok->next; // void parameter list = no parameters
@@ -809,6 +810,7 @@ static Type *declarator_impl(Token **rest, Token *tok, Type *ty, Token **ident,
         Type *fty = func_type(ty); // ty is the return type (the base)
         fty->params = param_head.param_next;
         fty->is_variadic = is_variadic;
+        fty->has_prototype = has_prototype;
         ty = pointer_to(fty);
         for (int i = 0; i < extra_ptrs; i++)
             ty = pointer_to(ty);
@@ -1424,12 +1426,16 @@ static Node *indirect_funcall(Token **rest, Token *tok, Node *callee) {
 
     Obj *expected = fty->params;
     bool variadic = fty->is_variadic;
+    bool has_prototype = fty->has_prototype;
     Node head = {};
     Node *cur = &head;
 
     while (!equal(tok, ")")) {
         if (cur != &head)
             tok = skip(tok, ",");
+
+        if (has_prototype && !expected && !variadic)
+            error_at(tok->loc, "too many arguments");
 
         Node *arg = assign(&tok, tok);
         add_type(arg);
@@ -1458,6 +1464,9 @@ static Node *indirect_funcall(Token **rest, Token *tok, Node *callee) {
 
         cur = cur->next = arg;
     }
+
+    if (has_prototype && expected)
+        error_at(tok->loc, "too few arguments");
 
     *rest = skip(tok, ")");
     node->args = head.next;
@@ -1597,11 +1606,15 @@ static Node *primary(Token **rest, Token *tok) {
 
                 Obj *expected = fty ? fty->params : NULL;
                 bool variadic = fty && fty->is_variadic;
+                bool has_prototype = fty && fty->has_prototype;
                 Node head = {};
                 Node *cur = &head;
                 while (!equal(tok, ")")) {
                     if (cur != &head)
                         tok = skip(tok, ",");
+
+                    if (has_prototype && !expected && !variadic)
+                        error_at(tok->loc, "too many arguments");
 
                     Node *arg = assign(&tok, tok);
                     add_type(arg);
@@ -1630,6 +1643,9 @@ static Node *primary(Token **rest, Token *tok) {
 
                     cur = cur->next = arg;
                 }
+                if (has_prototype && expected)
+                    error_at(tok->loc, "too few arguments");
+
                 *rest = skip(tok, ")");
                 node->args = head.next;
                 return node;
@@ -1644,11 +1660,16 @@ static Node *primary(Token **rest, Token *tok) {
 
             Obj *expected = (var && var->is_function) ? var->func_params : NULL;
             bool variadic = var && var->is_function && var->func_variadic;
+            bool has_prototype = var && var->is_function && var->ty->kind == TY_FUNC &&
+                                 var->ty->has_prototype;
             Node head = {};
             Node *cur = &head;
             while (!equal(tok, ")")) {
                 if (cur != &head)
                     tok = skip(tok, ",");
+
+                if (has_prototype && !expected && !variadic)
+                    error_at(tok->loc, "too many arguments");
 
                 Node *arg = assign(&tok, tok);
                 add_type(arg);
@@ -1678,6 +1699,9 @@ static Node *primary(Token **rest, Token *tok) {
 
                 cur = cur->next = arg;
             }
+            if (has_prototype && expected)
+                error_at(tok->loc, "too few arguments");
+
             *rest = skip(tok, ")");
             node->args = head.next;
             return node;
@@ -1756,15 +1780,27 @@ static void resolve_gotos(void) {
 // Register a function symbol as a global Obj so it can be used as a value
 // (e.g. function pointer assignment: fp = add;)
 static void register_function_symbol(char *name, Type *return_ty, bool is_static,
-                                     Obj *params, bool is_variadic) {
+                                     Obj *params, bool is_variadic, bool has_prototype) {
     // A later definition refreshes metadata from an earlier prototype.
     for (Obj *var = globals; var; var = var->next) {
         if (!strcmp(var->name, name) && var->is_function) {
-            var->ty = func_type(return_ty);
-            var->ty->params = params;
-            var->ty->is_variadic = is_variadic;
-            var->func_params = params;
-            var->func_variadic = is_variadic;
+            Type *old_ty = var->ty;
+            Type *fty = func_type(return_ty);
+            if (!has_prototype && old_ty && old_ty->kind == TY_FUNC &&
+                old_ty->has_prototype) {
+                // An old-style `f()` redeclaration must not erase a previously
+                // known prototype.
+                fty->params = old_ty->params;
+                fty->is_variadic = old_ty->is_variadic;
+                fty->has_prototype = true;
+            } else {
+                fty->params = params;
+                fty->is_variadic = is_variadic;
+                fty->has_prototype = has_prototype;
+            }
+            var->ty = fty;
+            var->func_params = fty->params;
+            var->func_variadic = fty->is_variadic;
             var->is_static = is_static;
             return;
         }
@@ -1775,6 +1811,7 @@ static void register_function_symbol(char *name, Type *return_ty, bool is_static
     fn_obj->ty = func_type(return_ty);
     fn_obj->ty->params = params;
     fn_obj->ty->is_variadic = is_variadic;
+    fn_obj->ty->has_prototype = has_prototype;
     fn_obj->func_params = params;
     fn_obj->func_variadic = is_variadic;
     fn_obj->is_local = false;
@@ -1825,7 +1862,9 @@ Program *parse(Token *tok) {
         Type *ty = declarator(&tok, tok, basety, &ident);
 
         if (consume(&tok, tok, "(")) {
-            // Function definition or prototype
+            // Function definition or prototype. In C11, an empty `()` does
+            // not provide a parameter prototype; `(void)` does.
+            bool has_prototype = !equal(tok, ")");
             char *name = strndup(ident->loc, ident->len);
 
             locals = NULL;
@@ -1898,7 +1937,7 @@ Program *parse(Token *tok) {
 
             // Register function symbol for calls and function-pointer usage.
             register_function_symbol(name, basety, is_static,
-                                     param_head.param_next, is_variadic);
+                                     param_head.param_next, is_variadic, has_prototype);
 
             // Function prototype
             if (consume(&tok, tok, ";")) {
