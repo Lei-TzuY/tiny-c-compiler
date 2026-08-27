@@ -3044,6 +3044,27 @@ static Node *cast_call_argument(Node *arg, Type *ty) {
     return cast;
 }
 
+// Record object operations are supported inside a function, but the backend has
+// not yet implemented the SysV AMD64 aggregate argument/return classification.
+// Reject only actual ABI boundaries so harmless prototypes/typedefs remain
+// representable while code generation can never silently pass an object address
+// where the ABI requires record bytes/register classes or a hidden sret pointer.
+static void check_supported_function_abi(Type *fty, Token *at) {
+    if (!fty || fty->kind != TY_FUNC)
+        return;
+
+    if (fty->return_ty && fty->return_ty->kind == TY_STRUCT)
+        error_at(at->loc,
+                 "record return by value is not supported by the x86-64 backend");
+
+    if (!fty->has_prototype)
+        return;
+    for (Obj *param = fty->params; param; param = param->param_next)
+        if (param->ty && param->ty->kind == TY_STRUCT)
+            error_at(at->loc,
+                     "record parameter by value is not supported by the x86-64 backend");
+}
+
 // Parse a call's comma-separated argument list after the opening parenthesis.
 // All call forms use this one path so prototype arity, assignment compatibility,
 // numeric coercion, and default argument promotions cannot drift apart.
@@ -3061,8 +3082,16 @@ static Node *parse_call_arguments(Token **rest, Token *tok, Type *fty) {
         if (has_prototype && !expected && !variadic)
             error_at(tok->loc, "too many arguments");
 
+        Token *arg_tok = tok;
         Node *arg = assign(&tok, tok);
         add_type(arg);
+
+        // An unprototyped call or variadic tail has no declared parameter to
+        // inspect ahead of time. Catch aggregate values from their actual type
+        // so these paths cannot bypass the same backend ABI limitation.
+        if (arg->ty && arg->ty->kind == TY_STRUCT)
+            error_at(arg_tok->loc,
+                     "record argument by value is not supported by the x86-64 backend");
 
         if (expected) {
             if (!assignment_compatible(expected->ty, arg))
@@ -3100,6 +3129,7 @@ static Node *indirect_funcall(Token **rest, Token *tok, Node *callee) {
 
     if (!fty)
         error_at(tok->loc, "called object is not a function or function pointer");
+    check_supported_function_abi(fty, tok);
 
     Node *node = new_node(ND_FUNCALL);
     node->funcname = NULL;
@@ -3279,6 +3309,7 @@ static Node *primary(Token **rest, Token *tok) {
                     fty = fn->ty;
                     node->ty = fty->return_ty;
                 }
+                check_supported_function_abi(fty, tok);
 
                 tok = skip(tok->next, "(");
                 node->args = parse_call_arguments(&tok, tok, fty);
@@ -3554,12 +3585,19 @@ Program *parse(Token *tok) {
 
         if (ty->kind == TY_FUNC) {
             char *name = strndup(ident->loc, ident->len);
+            bool is_definition = !equal(tok, ";");
+
+            // Prototypes may describe ABI shapes the educational backend does
+            // not lower yet, but a definition would immediately require the
+            // callee side of that ABI and must therefore be diagnosed.
+            if (is_definition)
+                check_supported_function_abi(ty, ident);
 
             // Register the declaration before parsing a body so recursion and
             // function-address expressions inside the definition see it.
             register_function_symbol(name, ty->return_ty, is_static,
                                      ty->params, ty->is_variadic, ty->has_prototype,
-                                     !equal(tok, ";"));
+                                     is_definition);
 
             // Prototype only: the recursive declarator has already consumed
             // the complete parameter list.

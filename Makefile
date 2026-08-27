@@ -48,6 +48,7 @@ test: minicc
 	bash ./test/brace_elision.sh
 	bash ./test/array_designators.sh
 	bash ./test/call_arguments.sh
+	bash ./test/record_abi_firewall.sh
 	bash ./test/string_array_initializers.sh
 	bash ./test/nested_string_initializers.sh
 	bash ./test/sysv_variadic_callee.sh
