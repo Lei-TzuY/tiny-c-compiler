@@ -16,12 +16,15 @@ jobs:
         with:
           ref: agent/aggregate-brace-elision
       - name: Apply migration
-        run: python3 tools/apply_aggregate_brace_elision.py
+        run: |
+          python3 tools/fix_brace_elision_migration.py
+          python3 tools/apply_aggregate_brace_elision.py
       - name: Test compiler
         run: make clean && make test
       - name: Commit verified implementation
         run: |
           rm tools/apply_aggregate_brace_elision.py
+          rm tools/fix_brace_elision_migration.py
           rm .github/workflows/apply-aggregate-brace-elision.yml
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
