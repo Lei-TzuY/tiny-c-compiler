@@ -43,6 +43,74 @@ static int parse_array_designator_index(Token **rest, Token *tok, Token *where) 
     *rest = tok;
     return (int)converted;
 }
+
+// Parse a static-storage-duration integer array initializer. The backing value
+// vector is indexed by the actual designated subscript, so omitted elements are
+// represented as zero and out-of-order/repeated designators retain C semantics.
+static void parse_static_integer_array_initializer(Obj *var, Type **ty,
+                                                   Token **rest, Token *tok) {
+    Token *brace = tok;
+    if ((*ty)->kind != TY_ARRAY || !is_integer((*ty)->base))
+        error_at(brace->loc, "static brace initializer currently supports integer arrays");
+
+    Type *elem_ty = (*ty)->base;
+    tok = tok->next;
+    int cap = (*ty)->array_len > 0 ? (*ty)->array_len : 16;
+    if (cap < 1)
+        cap = 16;
+    int64_t *vals = calloc(cap, sizeof(int64_t));
+    int cur_idx = 0;
+    int max_idx = -1;
+    bool first_elem = true;
+
+    while (!equal(tok, "}")) {
+        if (!first_elem) {
+            tok = skip(tok, ",");
+            if (equal(tok, "}"))
+                break;
+        }
+        first_elem = false;
+
+        if (equal(tok, "."))
+            error_at(tok->loc, "member designator requires a record initializer");
+
+        if (equal(tok, "[")) {
+            Token *designator = tok;
+            tok = tok->next;
+            cur_idx = parse_array_designator_index(&tok, tok, designator);
+            tok = skip(tok, "]");
+            tok = skip(tok, "=");
+        }
+
+        if ((*ty)->array_len > 0 && cur_idx >= (*ty)->array_len)
+            error_at(tok->loc, "array designator index exceeds array bounds");
+
+        while (cur_idx >= cap) {
+            int old_cap = cap;
+            cap *= 2;
+            vals = realloc(vals, cap * sizeof(int64_t));
+            memset(vals + old_cap, 0, (cap - old_cap) * sizeof(int64_t));
+        }
+
+        vals[cur_idx] = parse_static_integer_initializer(&tok, tok, elem_ty);
+        if (cur_idx > max_idx)
+            max_idx = cur_idx;
+        cur_idx++;
+    }
+    tok = skip(tok, "}");
+
+    if ((*ty)->array_len == 0) {
+        int inferred = max_idx + 1;
+        if (inferred <= 0)
+            error_at(brace->loc, "cannot infer array size from empty initializer");
+        *ty = array_of(elem_ty, inferred);
+        var->ty = *ty;
+    }
+
+    var->init_vals = vals;
+    var->init_vals_count = max_idx + 1;
+    *rest = tok;
+}
 '''
 
 if s.count(anchor) != 1:
@@ -78,9 +146,9 @@ old_static = r'''        // Static/extern: constant initializer only
         }
 '''
 
-new_static = r'''        // Static/extern: constant initializer only. Integer arrays support the
-        // same [constant-expression] designator semantics as automatic arrays;
-        // calloc-backed holes model static zero initialization naturally.
+new_static = r'''        // Static/extern: constant initializer only. Integer arrays share the
+        // file-scope designated-initializer parser so block/static and global
+        // objects cannot drift in their [constant-expression] semantics.
         if (is_static || is_extern) {
             if (equal(tok, "{")) {
                 Token *brace = tok;
@@ -91,79 +159,24 @@ new_static = r'''        // Static/extern: constant initializer only. Integer ar
                 if (ty->kind == TY_STRUCT)
                     error_at(brace->loc, "static record brace initializers are not yet supported");
 
-                // Preserve scalar brace initialization as a single scalar
-                // constant with an optional trailing comma.
-                if (ty->kind != TY_ARRAY) {
-                    tok = tok->next;
-                    if (equal(tok, "}"))
-                        error_at(brace->loc, "empty scalar initializer");
-                    parse_static_scalar_initializer(var, &tok, tok, ty);
-                    if (equal(tok, ","))
-                        tok = tok->next;
-                    tok = skip(tok, "}");
+                if (ty->kind == TY_ARRAY) {
+                    parse_static_integer_array_initializer(var, &ty, &tok, tok);
                     continue;
                 }
 
-                if (!is_integer(ty->base))
-                    error_at(brace->loc, "static brace initializer currently supports integer arrays");
-
+                // Preserve scalar brace initialization as a single scalar
+                // constant with an optional trailing comma.
                 tok = tok->next;
-                int cap = ty->array_len > 0 ? ty->array_len : 16;
-                if (cap < 1) cap = 16;
-                int64_t *vals = calloc(cap, sizeof(int64_t));
-                int cur_idx = 0;
-                int max_idx = -1;
-                bool first_elem = true;
-
-                while (!equal(tok, "}")) {
-                    if (!first_elem) {
-                        tok = skip(tok, ",");
-                        if (equal(tok, "}"))
-                            break;
-                    }
-                    first_elem = false;
-
-                    if (equal(tok, "."))
-                        error_at(tok->loc, "member designator requires a record initializer");
-
-                    if (equal(tok, "[")) {
-                        Token *designator = tok;
-                        tok = tok->next;
-                        cur_idx = parse_array_designator_index(&tok, tok, designator);
-                        tok = skip(tok, "]");
-                        tok = skip(tok, "=");
-                    }
-
-                    if (ty->array_len > 0 && cur_idx >= ty->array_len)
-                        error_at(tok->loc, "array designator index exceeds array bounds");
-
-                    while (cur_idx >= cap) {
-                        int old_cap = cap;
-                        cap *= 2;
-                        vals = realloc(vals, cap * sizeof(int64_t));
-                        memset(vals + old_cap, 0, (cap - old_cap) * sizeof(int64_t));
-                    }
-
-                    vals[cur_idx] = parse_static_integer_initializer(&tok, tok, ty->base);
-                    if (cur_idx > max_idx)
-                        max_idx = cur_idx;
-                    cur_idx++;
-                }
-                tok = skip(tok, "}");
-
-                if (ty->array_len == 0) {
-                    int inferred = max_idx + 1;
-                    if (inferred <= 0)
-                        error_at(brace->loc, "cannot infer array size from empty initializer");
-                    ty = array_of(ty->base, inferred);
-                    var->ty = ty;
-                }
-
-                var->init_vals = vals;
-                var->init_vals_count = max_idx + 1;
-            } else {
+                if (equal(tok, "}"))
+                    error_at(brace->loc, "empty scalar initializer");
                 parse_static_scalar_initializer(var, &tok, tok, ty);
+                if (equal(tok, ","))
+                    tok = tok->next;
+                tok = skip(tok, "}");
+                continue;
             }
+
+            parse_static_scalar_initializer(var, &tok, tok, ty);
             continue;
         }
 '''
@@ -236,6 +249,54 @@ new_auto = r'''                // Designated initializer: [integer-constant-expr
 if s.count(old_auto) != 1:
     raise SystemExit(f'automatic designator block count={s.count(old_auto)}')
 s = s.replace(old_auto, new_auto, 1)
+
+old_global = r'''                    } else if (equal(tok, "{")) {
+                        tok = tok->next;
+                        int cap = 16, cnt = 0;
+                        int64_t *vals = calloc(cap, sizeof(int64_t));
+                        while (!equal(tok, "}")) {
+                            if (cnt > 0) tok = skip(tok, ",");
+                            if (equal(tok, "}")) break;
+                            if (cnt >= cap) { cap *= 2; vals = realloc(vals, cap * sizeof(int64_t)); }
+                            Type *elem_ty = (ty->kind == TY_ARRAY) ? ty->base : NULL;
+                    vals[cnt++] = parse_static_integer_initializer(&tok, tok, elem_ty);
+                        }
+                        tok = skip(tok, "}");
+
+                        if (ty->kind == TY_ARRAY && ty->array_len == 0) {
+                            ty = array_of(ty->base, cnt);
+                            var->ty = ty;
+                        }
+
+                        var->init_vals = vals;
+                        var->init_vals_count = cnt;
+'''
+
+new_global = r'''                    } else if (equal(tok, "{")) {
+                        Token *brace = tok;
+
+                        // Do not silently serialize padded records as a dense
+                        // list of .long values. Typed static-record data is a
+                        // separate feature and should fail clearly for now.
+                        if (ty->kind == TY_STRUCT)
+                            error_at(brace->loc, "static record brace initializers are not yet supported");
+
+                        if (ty->kind == TY_ARRAY) {
+                            parse_static_integer_array_initializer(var, &ty, &tok, tok);
+                        } else {
+                            tok = tok->next;
+                            if (equal(tok, "}"))
+                                error_at(brace->loc, "empty scalar initializer");
+                            parse_static_scalar_initializer(var, &tok, tok, ty);
+                            if (equal(tok, ","))
+                                tok = tok->next;
+                            tok = skip(tok, "}");
+                        }
+'''
+
+if s.count(old_global) != 1:
+    raise SystemExit(f'global initializer block count={s.count(old_global)}')
+s = s.replace(old_global, new_global, 1)
 p.write_text(s)
 
 # Wire focused regression coverage into make test.
