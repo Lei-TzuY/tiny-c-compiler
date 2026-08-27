@@ -20,6 +20,7 @@ test: minicc
 	bash ./test/abi_stack_args.sh
 	bash ./test/prototype_params.sh
 	bash ./test/function_pointer_prototype.sh
+	bash ./test/callable_declarators.sh
 
 clean:
 	rm -f minicc *.o *~ tmp*

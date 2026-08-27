@@ -179,6 +179,7 @@ static Node *postfix(Token **rest, Token *tok);
 static Node *primary(Token **rest, Token *tok);
 static Type *declspec(Token **rest, Token *tok);
 static Type *declarator(Token **rest, Token *tok, Type *ty, Token **ident);
+static Type *abstract_declarator(Token **rest, Token *tok, Type *ty, Token **ident);
 
 static bool is_typename(Token *tok) {
     if (equal(tok, "int") || equal(tok, "char") || equal(tok, "void") ||
@@ -733,7 +734,8 @@ static Type *declspec(Token **rest, Token *tok) {
     return ty ? ty : ty_int;
 }
 
-static Type *declarator(Token **rest, Token *tok, Type *ty, Token **ident) {
+static Type *declarator_impl(Token **rest, Token *tok, Type *ty, Token **ident,
+                             bool allow_abstract) {
     while (consume(&tok, tok, "*"))
         ty = pointer_to(ty);
 
@@ -745,10 +747,14 @@ static Type *declarator(Token **rest, Token *tok, Type *ty, Token **ident) {
         while (consume(&tok, tok, "*"))
             extra_ptrs++;
 
-        if (tok->kind != TK_IDENT)
+        if (tok->kind == TK_IDENT) {
+            *ident = tok;
+            tok = tok->next;
+        } else if (allow_abstract) {
+            *ident = NULL;
+        } else {
             error_at(tok->loc, "expected identifier in function pointer declarator");
-        *ident = tok;
-        tok = tok->next;
+        }
         tok = skip(tok, ")");
         tok = skip(tok, "(");
 
@@ -783,7 +789,7 @@ static Type *declarator(Token **rest, Token *tok, Type *ty, Token **ident) {
                 Token *pident = NULL;
                 if (tok->kind == TK_IDENT ||
                     (equal(tok, "(") && equal(tok->next, "*"))) {
-                    param_ty = declarator(&tok, tok, param_ty, &pident);
+                    param_ty = declarator_impl(&tok, tok, param_ty, &pident, true);
                 } else if (!equal(tok, ",") && !equal(tok, ")")) {
                     error_at(tok->loc, "expected function pointer parameter declarator");
                 }
@@ -811,8 +817,13 @@ static Type *declarator(Token **rest, Token *tok, Type *ty, Token **ident) {
         return ty;
     }
 
-    if (tok->kind != TK_IDENT)
-        error_at(tok->loc, "expected a variable name");
+    if (tok->kind != TK_IDENT) {
+        if (!allow_abstract)
+            error_at(tok->loc, "expected a variable name");
+        *ident = NULL;
+        *rest = tok;
+        return ty;
+    }
 
     *ident = tok;
     tok = tok->next;
@@ -835,6 +846,14 @@ static Type *declarator(Token **rest, Token *tok, Type *ty, Token **ident) {
 
     *rest = tok;
     return ty;
+}
+
+static Type *declarator(Token **rest, Token *tok, Type *ty, Token **ident) {
+    return declarator_impl(rest, tok, ty, ident, false);
+}
+
+static Type *abstract_declarator(Token **rest, Token *tok, Type *ty, Token **ident) {
+    return declarator_impl(rest, tok, ty, ident, true);
 }
 
 // Parse a constant integer (with optional sign) for global initializers
@@ -1384,10 +1403,80 @@ static Node *unary(Token **rest, Token *tok) {
     return postfix(rest, tok);
 }
 
+static Node *indirect_funcall(Token **rest, Token *tok, Node *callee) {
+    add_type(callee);
+
+    Type *fty = NULL;
+    if (callee->ty->kind == TY_FUNC)
+        fty = callee->ty;
+    else if (callee->ty->kind == TY_PTR && callee->ty->base &&
+             callee->ty->base->kind == TY_FUNC)
+        fty = callee->ty->base;
+
+    if (!fty)
+        error_at(tok->loc, "called object is not a function or function pointer");
+
+    Node *node = new_node(ND_FUNCALL);
+    node->funcname = NULL;
+    node->lhs = callee;
+    node->ty = fty->return_ty;
+    tok = skip(tok, "(");
+
+    Obj *expected = fty->params;
+    bool variadic = fty->is_variadic;
+    Node head = {};
+    Node *cur = &head;
+
+    while (!equal(tok, ")")) {
+        if (cur != &head)
+            tok = skip(tok, ",");
+
+        Node *arg = assign(&tok, tok);
+        add_type(arg);
+
+        if (expected) {
+            if (is_numeric(arg->ty) && is_numeric(expected->ty) &&
+                arg->ty != expected->ty) {
+                Node *cast = new_unary(ND_CAST, arg);
+                cast->ty = expected->ty;
+                arg = cast;
+            }
+            expected = expected->param_next;
+        } else if (variadic) {
+            Type *promoted = NULL;
+            if (arg->ty->kind == TY_FLOAT)
+                promoted = ty_double;
+            else if (arg->ty->kind == TY_BOOL || arg->ty->kind == TY_CHAR ||
+                     arg->ty->kind == TY_SHORT)
+                promoted = ty_int;
+            if (promoted) {
+                Node *cast = new_unary(ND_CAST, arg);
+                cast->ty = promoted;
+                arg = cast;
+            }
+        }
+
+        cur = cur->next = arg;
+    }
+
+    *rest = skip(tok, ")");
+    node->args = head.next;
+    return node;
+}
+
 static Node *postfix(Token **rest, Token *tok) {
     Node *node = primary(&tok, tok);
 
     for (;;) {
+        // A call is a postfix operator in C, so the callee may be any
+        // expression whose type is function or pointer-to-function. This
+        // covers `(fp)(x)`, `(*fp)(x)`, `(&fn)(x)`, ternary/comma callees,
+        // and deeper pointer chains after explicit dereference.
+        if (equal(tok, "(")) {
+            node = indirect_funcall(&tok, tok, node);
+            continue;
+        }
+
         if (equal(tok, "[")) {
             Node *idx = expr(&tok, tok->next);
             tok = skip(tok, "]");
@@ -1774,9 +1863,18 @@ Program *parse(Token *tok) {
                     Obj *var = NULL;
                     if (tok->kind == TK_IDENT ||
                         (equal(tok, "(") && equal(tok->next, "*"))) {
-                        param_ty = declarator(&tok, tok, param_ty, &pident);
-                        char *pname = strndup(pident->loc, pident->len);
-                        var = create_lvar(pname);
+                        // Function prototypes may use abstract callback declarators,
+                        // e.g. `int apply(int (*)(int), int);`. Definitions still
+                        // require names and are rejected below when pident is NULL.
+                        param_ty = abstract_declarator(&tok, tok, param_ty, &pident);
+                        if (pident) {
+                            char *pname = strndup(pident->loc, pident->len);
+                            var = create_lvar(pname);
+                        } else {
+                            has_unnamed_params = true;
+                            var = calloc(1, sizeof(Obj));
+                            var->is_local = true;
+                        }
                     } else {
                         // Prototype parameter names are optional in C. Keep an
                         // anonymous metadata Obj so direct-call coercion still
