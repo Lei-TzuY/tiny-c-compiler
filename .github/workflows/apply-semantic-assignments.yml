@@ -48,6 +48,25 @@ jobs:
           if n != 2:
               raise SystemExit(f'expected 2 remaining fixed-argument call sites, got {n}')
           p.write_text(s)
+
+          # Three historical struct tests accidentally relied on distinct
+          # anonymous record types being compatible. Preserve their codegen
+          # intent while making them valid C by sharing a tagged type.
+          t = Path('test/test.sh')
+          ts = t.read_text()
+          fixes = {
+            'assert 5 "int main() { struct { int x; int y; } p; p.x=5; struct { int x; int y; } *q=&p; return q->x; }"':
+            'assert 5 "int main() { struct P { int x; int y; }; struct P p; p.x=5; struct P *q=&p; return q->x; }"',
+            'assert 9 "int main() { struct { int x; } s; s.x=9; struct { int x; } *p=&s; return p->x; }"':
+            'assert 9 "int main() { struct S { int x; }; struct S s; s.x=9; struct S *p=&s; return p->x; }"',
+            'assert 3 "int main() { struct { int x; } a; struct { int x; } b; a.x=3; b=a; return b.x; }"':
+            'assert 3 "int main() { struct S { int x; }; struct S a; struct S b; a.x=3; b=a; return b.x; }"',
+          }
+          for old_test, new_test in fixes.items():
+              if old_test not in ts:
+                  raise SystemExit('missing legacy anonymous-struct test anchor')
+              ts = ts.replace(old_test, new_test, 1)
+          t.write_text(ts)
           PY
       - name: Test compiler
         run: make clean && make test
