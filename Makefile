@@ -46,6 +46,7 @@ test: minicc
 	bash ./test/aggregate_initializers.sh
 	bash ./test/array_designators.sh
 	bash ./test/call_arguments.sh
+	bash ./test/nested_string_initializers.sh
 	bash ./test/string_array_initializers.sh
 	bash ./test/sysv_variadic_callee.sh
 
