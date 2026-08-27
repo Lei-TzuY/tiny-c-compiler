@@ -51,3 +51,5 @@ The compiler is designed as an educational systems-programming project rather th
 - Small records use SysV AMD64 per-eightbyte INTEGER/SSE classification across direct/indirect calls and returns. GP/XMM pools are tracked independently; if either class cannot fit an aggregate, the whole record falls back to the stack without consuming the other class, and bidirectional host-GCC interoperability is regression-tested.
 
 Static-storage floating scalars and aggregate floating subobjects accept arithmetic constant-expression initializers, including casts, conditionals, and mixed integer/floating arithmetic.
+
+Designated aggregate initializers support nested designator lists such as `[1][2]`, `[1].field`, `.inner.x`, and `.rows[1]` for both static storage and automatic objects.

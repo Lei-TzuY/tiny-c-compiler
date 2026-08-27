@@ -1895,6 +1895,163 @@ static bool is_initializer_aggregate(Type *ty) {
     return ty && (ty->kind == TY_ARRAY || ty->kind == TY_STRUCT);
 }
 
+typedef enum {
+    INIT_DESIGNATOR_INDEX,
+    INIT_DESIGNATOR_MEMBER,
+} InitializerDesignatorKind;
+
+typedef struct InitializerDesignator InitializerDesignator;
+struct InitializerDesignator {
+    InitializerDesignator *next;
+    InitializerDesignatorKind kind;
+    int index;
+    Member *member;
+    Type *result_ty;
+};
+
+typedef struct {
+    InitializerDesignator *head;
+    InitializerDesignator *tail;
+    Type *target_ty;
+    int first_index;
+    Member *first_member;
+    int depth;
+} InitializerDesignatorPath;
+
+static InitializerDesignatorPath
+parse_initializer_designator_path(Token **rest, Token *tok, Type *root_ty) {
+    InitializerDesignatorPath path = {.first_index = -1};
+    Type *cur = root_ty;
+
+    while (equal(tok, "[") || equal(tok, ".")) {
+        InitializerDesignator *step = calloc(1, sizeof(InitializerDesignator));
+
+        if (equal(tok, "[")) {
+            Token *where = tok;
+            if (!cur || cur->kind != TY_ARRAY)
+                error_at(where->loc, "array designator requires an array subobject");
+            if (cur->array_len == 0 && path.depth > 0)
+                error_at(where->loc, "nested incomplete arrays are not supported");
+
+            tok = tok->next;
+            int index = parse_array_designator_index(&tok, tok, where);
+            tok = skip(tok, "]");
+            if (cur->array_len > 0 && index >= cur->array_len)
+                error_at(where->loc, "array designator index exceeds array bounds");
+
+            step->kind = INIT_DESIGNATOR_INDEX;
+            step->index = index;
+            step->result_ty = cur->base;
+            if (path.depth == 0)
+                path.first_index = index;
+            cur = cur->base;
+        } else {
+            Token *where = tok;
+            if (!cur || cur->kind != TY_STRUCT)
+                error_at(where->loc, "member designator requires a record subobject");
+            tok = tok->next;
+            if (tok->kind != TK_IDENT)
+                error_at(tok->loc, "expected member name in designated initializer");
+
+            Member *member = find_static_initializer_member(cur, tok);
+            if (!member)
+                error_at(tok->loc, "unknown member in designated initializer");
+            tok = tok->next;
+
+            step->kind = INIT_DESIGNATOR_MEMBER;
+            step->member = member;
+            step->result_ty = member->ty;
+            if (path.depth == 0)
+                path.first_member = member;
+            cur = member->ty;
+        }
+
+        if (!path.head)
+            path.head = step;
+        else
+            path.tail->next = step;
+        path.tail = step;
+        path.depth++;
+    }
+
+    if (!path.depth)
+        error_at(tok->loc, "expected initializer designator");
+
+    path.target_ty = cur;
+    *rest = skip(tok, "=");
+    return path;
+}
+
+static void free_initializer_designator_path(InitializerDesignatorPath *path) {
+    for (InitializerDesignator *step = path->head; step;) {
+        InitializerDesignator *next = step->next;
+        free(step);
+        step = next;
+    }
+    path->head = path->tail = NULL;
+}
+
+static int apply_static_designator_path(Obj *var, Type *root_ty, int root_offset,
+                                        InitializerDesignatorPath *path) {
+    Type *cur = root_ty;
+    int offset = root_offset;
+
+    for (InitializerDesignator *step = path->head; step; step = step->next) {
+        if (step->kind == INIT_DESIGNATOR_INDEX) {
+            offset += step->index * cur->base->size;
+        } else {
+            // Selecting a union member replaces the complete overlapping
+            // representation.  Clear both bytes and relocations before walking
+            // farther into the selected member.
+            if (cur->is_union)
+                reset_static_subobject(var, offset, cur->size);
+            offset += step->member->offset;
+        }
+        cur = step->result_ty;
+    }
+    return offset;
+}
+
+typedef struct {
+    Node *lhs;
+    Type *ty;
+    Node *top_lhs;
+    Type *top_ty;
+} AutomaticDesignatedTarget;
+
+static AutomaticDesignatedTarget
+apply_automatic_designator_path(Node *root_lhs, Type *root_ty,
+                                 InitializerDesignatorPath *path) {
+    Node *lhs = root_lhs;
+    Type *cur = root_ty;
+    Node *top_lhs = NULL;
+    Type *top_ty = NULL;
+
+    for (InitializerDesignator *step = path->head; step; step = step->next) {
+        if (step->kind == INIT_DESIGNATOR_INDEX) {
+            lhs = new_unary(ND_DEREF, new_add(lhs, new_num(step->index)));
+        } else {
+            Node *member = new_node(ND_MEMBER);
+            member->lhs = lhs;
+            member->member = step->member;
+            lhs = member;
+        }
+        cur = step->result_ty;
+        if (!top_lhs) {
+            top_lhs = lhs;
+            top_ty = cur;
+        }
+    }
+
+    return (AutomaticDesignatedTarget){
+        .lhs = lhs,
+        .ty = cur,
+        .top_lhs = top_lhs,
+        .top_ty = top_ty,
+    };
+}
+
+
 static Type *parse_static_image_initializer(Obj *var, Token **rest, Token *tok,
                                             Type *ty, int offset);
 
@@ -2030,19 +2187,37 @@ static Type *parse_static_image_initializer(Obj *var, Token **rest, Token *tok,
             if (equal(tok, "."))
                 error_at(tok->loc, "member designator requires a record initializer");
 
-            int index = next_index;
-            bool designated = false;
-            if (equal(tok, "[")) {
-                designated = true;
-                Token *designator = tok;
-                tok = tok->next;
-                index = parse_array_designator_index(&tok, tok, designator);
-                tok = skip(tok, "]");
-                tok = skip(tok, "=");
+            if (equal(tok, "[") || equal(tok, ".")) {
+                InitializerDesignatorPath path =
+                    parse_initializer_designator_path(&tok, tok, ty);
+                if (path.first_index < 0)
+                    error_at(brace->loc, "array initializer designator must start with an index");
+
+                int index = path.first_index;
+                Type *target_ty = path.target_ty;
+                int target_offset = apply_static_designator_path(var, ty, offset, &path);
+                reset_static_subobject(var, target_offset, target_ty->size);
+                free_initializer_designator_path(&path);
+
+                if (parse_static_string_array_initializer(var, &tok, tok,
+                                                           target_ty, target_offset)) {
+                    // String literal consumed as the designated character array.
+                } else {
+                    Type *parsed = parse_static_image_initializer(var, &tok, tok,
+                                                                  target_ty, target_offset);
+                    if (parsed != target_ty)
+                        error_at(brace->loc, "nested incomplete arrays are not supported");
+                }
+
+                if (index > max_index)
+                    max_index = index;
+                next_index = index + 1;
+                continue;
             }
 
+            int index = next_index;
             if (ty->array_len > 0 && index >= ty->array_len)
-                error_at(tok->loc, "array designator index exceeds array bounds");
+                error_at(tok->loc, "excess elements in array initializer");
 
             Type *elem_ty = ty->base;
             int elem_offset = offset + index * elem_ty->size;
@@ -2050,8 +2225,7 @@ static Type *parse_static_image_initializer(Obj *var, Token **rest, Token *tok,
             if (parse_static_string_array_initializer(var, &tok, tok,
                                                        elem_ty, elem_offset)) {
                 // Character-array string initializer consumed as one subobject.
-            } else if (!designated && is_initializer_aggregate(elem_ty) &&
-                       !equal(tok, "{")) {
+            } else if (is_initializer_aggregate(elem_ty) && !equal(tok, "{")) {
                 parse_static_image_elided(var, &tok, tok, elem_ty,
                                           elem_offset, brace);
             } else {
@@ -2092,26 +2266,39 @@ static Type *parse_static_image_initializer(Obj *var, Token **rest, Token *tok,
         if (ty->is_union && initialized_members)
             error_at(tok->loc, "excess elements in union initializer");
 
-        if (equal(tok, "["))
-            error_at(tok->loc, "array designator requires an array initializer");
+        if (equal(tok, ".") || equal(tok, "[")) {
+            InitializerDesignatorPath path =
+                parse_initializer_designator_path(&tok, tok, ty);
+            if (!path.first_member)
+                error_at(brace->loc, "record initializer designator must start with a member");
 
-        Member *member = next_member;
-        bool designated = false;
-        if (consume(&tok, tok, ".")) {
-            designated = true;
-            if (tok->kind != TK_IDENT)
-                error_at(tok->loc, "expected member name in designated initializer");
-            member = find_static_initializer_member(ty, tok);
-            if (!member)
-                error_at(tok->loc, "unknown member in designated initializer");
-            tok = skip(tok->next, "=");
-        } else if (!member) {
-            error_at(tok->loc, "excess elements in record initializer");
+            Member *member = path.first_member;
+            Type *target_ty = path.target_ty;
+            int target_offset = apply_static_designator_path(var, ty, offset, &path);
+            reset_static_subobject(var, target_offset, target_ty->size);
+            free_initializer_designator_path(&path);
+
+            if (parse_static_string_array_initializer(var, &tok, tok,
+                                                       target_ty, target_offset)) {
+                // String literal consumed as the designated character array.
+            } else {
+                Type *parsed = parse_static_image_initializer(var, &tok, tok,
+                                                              target_ty, target_offset);
+                if (parsed != target_ty)
+                    error_at(brace->loc, "incomplete array record members are not supported");
+            }
+
+            initialized_members++;
+            next_member = member->next;
+            continue;
         }
 
+        Member *member = next_member;
+        if (!member)
+            error_at(tok->loc, "excess elements in record initializer");
+
         // All union members overlap at offset zero. Clear the complete union so
-        // a designated pointer member cannot leave stale relocation/data bytes
-        // from an earlier representation of the same object.
+        // a positional pointer member cannot leave stale relocation/data bytes.
         if (ty->is_union)
             reset_static_subobject(var, offset, ty->size);
         else
@@ -2121,8 +2308,7 @@ static Type *parse_static_image_initializer(Obj *var, Token **rest, Token *tok,
         if (parse_static_string_array_initializer(var, &tok, tok,
                                                    member->ty, member_offset)) {
             // Character-array string initializer consumed as one subobject.
-        } else if (!designated && is_initializer_aggregate(member->ty) &&
-                   !equal(tok, "{")) {
+        } else if (is_initializer_aggregate(member->ty) && !equal(tok, "{")) {
             parse_static_image_elided(var, &tok, tok, member->ty,
                                       member_offset, brace);
         } else {
@@ -2224,6 +2410,24 @@ static void parse_automatic_aggregate_subobject(Node **tail, Node *lhs, Type *ty
     }
 }
 
+static void parse_automatic_designated_initializer(Node **tail, Node *lhs, Type *ty,
+                                                    Token **rest, Token *tok,
+                                                    Token *where) {
+    if (append_automatic_string_array_initializer(tail, lhs, ty, rest, tok))
+        return;
+
+    if (is_initializer_aggregate(ty) && equal(tok, "{")) {
+        parse_automatic_aggregate_subobject(tail, lhs, ty, rest, tok, where);
+        return;
+    }
+
+    Node *rhs = assign(&tok, tok);
+    Node *a = new_initializer_assign(lhs, rhs, where);
+    *tail = (*tail)->next = new_unary(ND_EXPR_STMT, a);
+    *rest = tok;
+}
+
+
 // declaration = declspec (declarator ("=" (expr | "{" initializer "}"))?)
 //               ("," declarator ("=" (expr | "{" initializer "}"))?)* ";"
 static Node *declaration(Token **rest, Token *tok, bool is_static, bool is_extern) {
@@ -2320,80 +2524,62 @@ static Node *declaration(Token **rest, Token *tok, bool is_static, bool is_exter
                 if (ty->kind == TY_STRUCT && ty->is_union && initialized_union_members)
                     error_at(tok->loc, "excess elements in union initializer");
 
-                // Designated initializer: .member = initializer
-                if (consume(&tok, tok, ".")) {
-                    if (ty->kind != TY_STRUCT)
-                        error_at(tok->loc, "member designator requires a record initializer");
-                    if (tok->kind != TK_IDENT)
-                        error_at(tok->loc, "expected member name in designated initializer");
-                    char *mname = strndup(tok->loc, tok->len);
-                    tok = skip(tok->next, "=");
-
-                    Member *m = ty->members;
-                    for (; m; m = m->next)
-                        if (!strcmp(m->name, mname)) break;
-                    if (!m)
-                        error_at(tok->loc, "unknown member in designated initializer");
-
-                    int mi = record_member_index(ty, m);
-                    if (mi >= 0) member_init[mi] = true;
-                    Node *member_node = new_node(ND_MEMBER);
-                    member_node->lhs = new_var_node(var);
-                    member_node->member = m;
-
-                    if (!append_automatic_string_array_initializer(&block_cur,
-                                                                    member_node,
-                                                                    m->ty,
-                                                                    &tok, tok)) {
-                        if (is_initializer_aggregate(m->ty) && equal(tok, "{")) {
-                            parse_automatic_aggregate_subobject(&block_cur, member_node,
-                                                                m->ty, &tok, tok, brace);
-                        } else {
-                            Node *e = assign(&tok, tok);
-                            Node *a = new_initializer_assign(member_node, e, tok);
-                            block_cur = block_cur->next = new_unary(ND_EXPR_STMT, a);
-                        }
-                    }
-                    if (ty->is_union)
-                        initialized_union_members++;
-                    cur_mem = m->next;
-                    continue;
-                }
-
-                // Designated initializer: [integer-constant-expression] = initializer
-                if (equal(tok, "[")) {
+                // Designated initializer-list. A chain such as
+                // [1][2], [1].field, .inner.x, or .rows[1] resolves to one
+                // nested target before parsing its initializer.
+                if (equal(tok, ".") || equal(tok, "[")) {
                     Token *designator = tok;
-                    if (ty->kind != TY_ARRAY)
-                        error_at(tok->loc, "array designator requires an array initializer");
-                    tok = tok->next;
-                    int idx = parse_array_designator_index(&tok, tok, designator);
-                    tok = skip(tok, "]");
-                    tok = skip(tok, "=");
-                    if (ty->array_len > 0 && idx >= ty->array_len)
-                        error_at(tok->loc, "array designator index exceeds array bounds");
-                    while (idx >= elem_cap) {
-                        int old_cap = elem_cap;
-                        elem_cap *= 2;
-                        elem_init = realloc(elem_init, elem_cap * sizeof(bool));
-                        memset(elem_init + old_cap, 0, (elem_cap - old_cap) * sizeof(bool));
+                    InitializerDesignatorPath path =
+                        parse_initializer_designator_path(&tok, tok, ty);
+                    AutomaticDesignatedTarget target =
+                        apply_automatic_designator_path(new_var_node(var), ty, &path);
+
+                    bool was_initialized = false;
+                    if (ty->kind == TY_ARRAY) {
+                        if (path.first_index < 0)
+                            error_at(designator->loc,
+                                     "array initializer designator must start with an index");
+                        int idx = path.first_index;
+                        while (idx >= elem_cap) {
+                            int old_cap = elem_cap;
+                            elem_cap *= 2;
+                            elem_init = realloc(elem_init, elem_cap * sizeof(bool));
+                            memset(elem_init + old_cap, 0,
+                                   (elem_cap - old_cap) * sizeof(bool));
+                        }
+                        was_initialized = elem_init[idx];
+                        elem_init[idx] = true;
+                        if (idx > max_idx)
+                            max_idx = idx;
+                        cur_idx = idx + 1;
+                    } else {
+                        if (!path.first_member)
+                            error_at(designator->loc,
+                                     "record initializer designator must start with a member");
+                        Member *member = path.first_member;
+                        int mi = record_member_index(ty, member);
+                        if (mi < 0)
+                            error_at(designator->loc, "invalid record initializer member");
+                        was_initialized = member_init[mi];
+                        member_init[mi] = true;
+                        cur_mem = member->next;
+                        if (ty->is_union)
+                            initialized_union_members++;
                     }
 
-                    elem_init[idx] = true;
-                    if (idx > max_idx) max_idx = idx;
-                    Node *lhs = new_unary(ND_DEREF, new_add(new_var_node(var), new_num(idx)));
-                    if (!append_automatic_string_array_initializer(&block_cur, lhs,
-                                                                    ty->base,
-                                                                    &tok, tok)) {
-                        if (is_initializer_aggregate(ty->base) && equal(tok, "{")) {
-                            parse_automatic_aggregate_subobject(&block_cur, lhs,
-                                                                ty->base, &tok, tok, brace);
-                        } else {
-                            Node *e = assign(&tok, tok);
-                            Node *a = new_initializer_assign(lhs, e, tok);
-                            block_cur = block_cur->next = new_unary(ND_EXPR_STMT, a);
-                        }
-                    }
-                    cur_idx = idx + 1;
+                    // A path that enters a nested aggregate initializes that
+                    // complete top-level subobject. Zero it on the first path
+                    // only; subsequent paths into the same subobject must keep
+                    // values written by earlier designators.
+                    if (!was_initialized && path.depth > 1 &&
+                        is_initializer_aggregate(target.top_ty))
+                        append_zero_initializer(&block_cur, target.top_lhs,
+                                                target.top_ty, brace);
+
+                    free_initializer_designator_path(&path);
+                    parse_automatic_designated_initializer(&block_cur,
+                                                           target.lhs, target.ty,
+                                                           &tok, tok, brace);
                     continue;
                 }
 
