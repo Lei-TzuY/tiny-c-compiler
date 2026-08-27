@@ -1215,6 +1215,56 @@ static double parse_const_double(Token **rest, Token *tok) {
     return val;
 }
 
+static Token *string_initializer_token(Token *tok, Token **after) {
+    if (tok->kind == TK_STR) {
+        *after = tok->next;
+        return tok;
+    }
+
+    if (!equal(tok, "{") || tok->next->kind != TK_STR)
+        return NULL;
+
+    Token *str = tok->next;
+    Token *end = str->next;
+    if (equal(end, ","))
+        end = end->next;
+    if (!equal(end, "}"))
+        return NULL;
+
+    *after = end->next;
+    return str;
+}
+
+static bool is_character_array(Type *ty) {
+    return ty && ty->kind == TY_ARRAY && ty->base && ty->base->kind == TY_CHAR;
+}
+
+static void prepare_string_array_type(Obj *var, Type **ty, Token *str) {
+    if (!is_character_array(*ty))
+        error_at(str->loc, "string literal can initialize only a character array here");
+
+    int source_len = str->ty->array_len;
+    int payload_len = source_len - 1;
+
+    if ((*ty)->array_len == 0) {
+        *ty = array_of((*ty)->base, source_len);
+        var->ty = *ty;
+        return;
+    }
+
+    if ((*ty)->array_len < payload_len)
+        error_at(str->loc, "initializer string is too long for character array");
+}
+
+static char *build_string_array_image(Type *ty, Token *str) {
+    char *data = calloc(ty->array_len, 1);
+    int copy = str->ty->array_len;
+    if (copy > ty->array_len)
+        copy = ty->array_len;
+    memcpy(data, str->str, copy);
+    return data;
+}
+
 // declaration = declspec (declarator ("=" (expr | "{" initializer "}"))?)
 //               ("," declarator ("=" (expr | "{" initializer "}"))?)* ";"
 static Node *declaration(Token **rest, Token *tok, bool is_static, bool is_extern) {
@@ -1249,6 +1299,34 @@ static Node *declaration(Token **rest, Token *tok, bool is_static, bool is_exter
         if (!equal(tok, "="))
             continue;
         tok = tok->next; // skip '='
+
+        Token *after_string = NULL;
+        Token *string_tok = string_initializer_token(tok, &after_string);
+        if (string_tok && ty->kind == TY_ARRAY) {
+            prepare_string_array_type(var, &ty, string_tok);
+
+            if (is_static || is_extern) {
+                var->init_data = build_string_array_image(ty, string_tok);
+                tok = after_string;
+                continue;
+            }
+
+            for (int i = 0; i < ty->array_len; i++) {
+                int value = 0;
+                if (i < string_tok->ty->array_len)
+                    value = (unsigned char)string_tok->str[i];
+                Node *lhs = new_unary(ND_DEREF,
+                                      new_add(new_var_node(var), new_num(i)));
+                Node *a = new_initializer_assign(lhs, new_num(value), string_tok);
+                block_cur = block_cur->next = new_unary(ND_EXPR_STMT, a);
+            }
+            tok = after_string;
+            continue;
+        }
+
+        if (string_tok && (is_static || is_extern))
+            error_at(string_tok->loc,
+                     "static string initializer is supported only for character arrays");
 
         // Static/extern: constant initializer only
         if (is_static || is_extern) {
@@ -2332,6 +2410,7 @@ static Node *primary(Token **rest, Token *tok) {
         var->ty = tok->ty;
         var->is_local = false;
         var->init_data = tok->str;
+        var->is_string_literal = true;
         var->next = globals;
         globals = var;
 
@@ -2647,7 +2726,16 @@ Program *parse(Token *tok) {
                     error_at(ident->loc, "redefinition of global '%s'", var->name);
 
                 if (consume(&tok, tok, "=")) {
-                    if (equal(tok, "{")) {
+                    Token *after_string = NULL;
+                    Token *string_tok = string_initializer_token(tok, &after_string);
+                    if (string_tok) {
+                        if (!is_character_array(ty))
+                            error_at(string_tok->loc,
+                                     "global string initializer is supported only for character arrays");
+                        prepare_string_array_type(var, &ty, string_tok);
+                        var->init_data = build_string_array_image(ty, string_tok);
+                        tok = after_string;
+                    } else if (equal(tok, "{")) {
                         tok = tok->next;
                         int cap = 16, cnt = 0;
                         int64_t *vals = calloc(cap, sizeof(int64_t));
@@ -2666,14 +2754,6 @@ Program *parse(Token *tok) {
 
                         var->init_vals = vals;
                         var->init_vals_count = cnt;
-                    } else if (tok->kind == TK_STR) {
-                        // String initializer: char s[] = "hello";
-                        var->init_data = tok->str;
-                        if (ty->kind == TY_ARRAY && ty->array_len == 0) {
-                            ty = array_of(ty->base, tok->ty->array_len);
-                            var->ty = ty;
-                        }
-                        tok = tok->next;
                     } else {
                         if (is_flonum(ty))
                             var->finit_val = parse_const_double(&tok, tok);

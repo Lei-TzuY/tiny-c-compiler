@@ -1195,10 +1195,16 @@ static void emit_data(Program *prog) {
         if (var->is_extern) continue;   // extern declarations don't allocate
 
         if (var->init_data) {
-            printf("  .section .rodata\n");
+            if (var->is_string_literal)
+                printf("  .section .rodata\n");
+            else {
+                printf("  .data\n");
+                if (!var->is_static)
+                    printf("  .globl %s\n", var->name);
+            }
             printf("%s:\n", var->name);
             for (int i = 0; i < var->ty->array_len; i++)
-                printf("  .byte %d\n", var->init_data[i]);
+                printf("  .byte %d\n", (unsigned char)var->init_data[i]);
         } else if (var->init_vals) {
             printf("  .data\n");
             if (!var->is_static)

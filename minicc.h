@@ -241,6 +241,7 @@ struct Obj {
 
     // Global variable or string literal
     char *init_data;
+    bool is_string_literal; // compiler-generated literal storage belongs in .rodata
     int64_t init_val;    // for initialized global scalars
     double finit_val;    // for initialized double/float global scalars
     bool has_init_val;

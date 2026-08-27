@@ -40,6 +40,7 @@ test: minicc
 	bash ./test/escape_sequences.sh
 	bash ./test/constant_expressions.sh
 	bash ./test/call_arguments.sh
+	bash ./test/string_array_initializers.sh
 	bash ./test/sysv_variadic_callee.sh
 
 clean:
