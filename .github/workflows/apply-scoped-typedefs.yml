@@ -1,0 +1,29 @@
+name: Apply scoped typedef migration
+
+on:
+  push:
+    branches:
+      - agent/scoped-typedefs
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/scoped-typedefs
+      - name: Apply migration
+        run: python3 tools/apply_scoped_typedefs.py
+      - name: Test compiler
+        run: make clean && make test
+      - name: Commit verified implementation
+        run: |
+          rm -f tools/apply_scoped_typedefs.py .github/workflows/apply-scoped-typedefs.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Scope typedef names lexically"
+          git push origin HEAD:agent/scoped-typedefs
