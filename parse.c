@@ -2922,6 +2922,32 @@ static Node *declaration(Token **rest, Token *tok, bool is_static, bool is_exter
     return block;
 }
 
+// Parse C11 _Static_assert(constant-expression, string-literal); at either
+// file or block scope. The controlling expression must be an integer constant
+// expression and is evaluated entirely during parsing, so no runtime node is
+// emitted for a successful assertion.
+static Token *parse_static_assertion(Token *tok) {
+    Token *keyword = tok;
+    tok = skip(tok->next, "(");
+
+    Node *cond = ternary(&tok, tok);
+    add_type(cond);
+    if (!is_integer(cond->ty))
+        error_at(keyword->loc, "_Static_assert requires an integer constant expression");
+    int64_t value = eval_const_expr(cond);
+
+    tok = skip(tok, ",");
+    if (tok->kind != TK_STR)
+        error_at(tok->loc, "_Static_assert requires a string literal message");
+    char *message = tok->str;
+    tok = skip(tok->next, ")");
+    tok = skip(tok, ";");
+
+    if (!value)
+        error_at(keyword->loc, "static assertion failed: %s", message);
+    return tok;
+}
+
 static bool is_label(Token *tok) {
     if (tok->kind != TK_IDENT) return false;
     if (equal(tok->next, ":")) {
@@ -2933,6 +2959,11 @@ static bool is_label(Token *tok) {
 }
 
 static Node *stmt(Token **rest, Token *tok) {
+    if (equal(tok, "_Static_assert")) {
+        *rest = parse_static_assertion(tok);
+        return new_node(ND_EXPR_STMT);
+    }
+
     if (equal(tok, "return")) {
         Token *ret_tok = tok;
         Node *node = new_node(ND_RETURN);
@@ -4161,6 +4192,11 @@ Program *parse(Token *tok) {
     current_scope = calloc(1, sizeof(Scope));
 
     while (tok->kind != TK_EOF) {
+        if (equal(tok, "_Static_assert")) {
+            tok = parse_static_assertion(tok);
+            continue;
+        }
+
         // Top-level typedef
         if (equal(tok, "typedef")) {
             tok = tok->next;
