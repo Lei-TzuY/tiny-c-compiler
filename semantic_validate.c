@@ -18,19 +18,39 @@ static bool valid_incdec_operand(Type *ty) {
     return ty->kind == TY_PTR && is_complete_object_type(ty->base);
 }
 
-static void validate_node(Node *node) {
+static bool program_has_function_symbol(Program *prog, const char *name) {
+    if (!prog || !name)
+        return false;
+
+    for (Obj *obj = prog->globals; obj; obj = obj->next)
+        if (obj->is_function && obj->name && !strcmp(obj->name, name))
+            return true;
+    return false;
+}
+
+static void validate_node(Program *prog, Node *node) {
     for (; node; node = node->next) {
-        validate_node(node->lhs);
-        validate_node(node->rhs);
-        validate_node(node->cond);
-        validate_node(node->then);
-        validate_node(node->els);
-        validate_node(node->init);
-        validate_node(node->inc);
-        validate_node(node->body);
-        validate_node(node->args);
+        validate_node(prog, node->lhs);
+        validate_node(prog, node->rhs);
+        validate_node(prog, node->cond);
+        validate_node(prog, node->then);
+        validate_node(prog, node->els);
+        validate_node(prog, node->init);
+        validate_node(prog, node->inc);
+        validate_node(prog, node->body);
+        validate_node(prog, node->args);
 
         switch (node->kind) {
+        case ND_FUNCALL:
+            // Direct calls retain their source-level callee name.  The parser
+            // historically allowed an unknown identifier here and assigned an
+            // implicit int return type, deferring misspellings to the linker.
+            // Reject calls that never resolve to any function declaration in
+            // the translation unit; indirect calls have funcname == NULL and
+            // were already type-checked against their function-pointer type.
+            if (node->funcname && !program_has_function_symbol(prog, node->funcname))
+                error("call to undeclared function '%s'", node->funcname);
+            break;
         case ND_PRE_INC:
         case ND_PRE_DEC:
         case ND_POST_INC:
@@ -47,5 +67,5 @@ static void validate_node(Node *node) {
 
 void validate_program(Program *prog) {
     for (Function *fn = prog->fns; fn; fn = fn->next)
-        validate_node(fn->body);
+        validate_node(prog, fn->body);
 }
