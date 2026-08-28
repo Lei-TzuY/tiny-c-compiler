@@ -1,0 +1,26 @@
+name: Replay incomplete flexible arrays
+on:
+  push:
+    branches:
+      - agent/incomplete-flexible-arrays-v2
+permissions:
+  contents: write
+jobs:
+  replay:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Replay validated permanent commits
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin agent/incomplete-flexible-arrays
+          git cherry-pick 558b84da7a457ecf36500d012e1bb32423a83aba
+          git cherry-pick 41ef4bafe89cf6d28e8e3494ed64b84753feec59
+      - name: Test
+        run: make clean && make test
+      - name: Push rebased implementation
+        run: git push origin HEAD:agent/incomplete-flexible-arrays-v2
