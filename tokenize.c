@@ -212,6 +212,125 @@ static void concat_adjacent_strings(Token *tok) {
     }
 }
 
+static char *scan_decimal_digits(char *p) {
+    while (isdigit((unsigned char)*p))
+        p++;
+    return p;
+}
+
+static char *scan_hex_digits(char *p) {
+    while (hex_digit_value(*p) >= 0)
+        p++;
+    return p;
+}
+
+// Recognize a C99 floating constant by grammar before handing the validated
+// spelling to strtod for conversion.  strtod intentionally accepts a broader
+// implementation syntax on some hosts, so it must not decide whether a token
+// is a legal C floating constant.
+static bool read_floating_literal(char *start, char **rest, double *value,
+                                  Type **literal_ty) {
+    char *p = start;
+    char *body_end;
+
+    if (p[0] == '0' && (p[1] == 'x' || p[1] == 'X')) {
+        p += 2;
+        char *before = p;
+        p = scan_hex_digits(p);
+        bool have_digit = p != before;
+        bool has_dot = false;
+
+        if (*p == '.') {
+            has_dot = true;
+            p++;
+            char *after = p;
+            p = scan_hex_digits(p);
+            have_digit = have_digit || p != after;
+        }
+
+        if (!have_digit) {
+            if (has_dot || *p == 'p' || *p == 'P')
+                error_at(start,
+                         "hexadecimal floating constant requires a hexadecimal digit");
+            return false;
+        }
+
+        // A hexadecimal floating constant always requires a binary exponent.
+        // Without a dot or p/P this spelling remains an ordinary hex integer.
+        if (*p != 'p' && *p != 'P') {
+            if (has_dot)
+                error_at(start,
+                         "hexadecimal floating constant requires a p/P exponent");
+            return false;
+        }
+
+        p++;
+        if (*p == '+' || *p == '-')
+            p++;
+        char *exp = p;
+        p = scan_decimal_digits(p);
+        if (p == exp)
+            error_at(start, "floating exponent requires at least one decimal digit");
+        body_end = p;
+    } else {
+        char *before = p;
+        p = scan_decimal_digits(p);
+        bool have_digit = p != before;
+        bool has_dot = false;
+        bool has_exp = false;
+
+        if (*p == '.') {
+            has_dot = true;
+            p++;
+            char *after = p;
+            p = scan_decimal_digits(p);
+            have_digit = have_digit || p != after;
+        }
+
+        if (*p == 'e' || *p == 'E') {
+            has_exp = true;
+            p++;
+            if (*p == '+' || *p == '-')
+                p++;
+            char *exp = p;
+            p = scan_decimal_digits(p);
+            if (p == exp)
+                error_at(start,
+                         "floating exponent requires at least one decimal digit");
+        }
+
+        if (!has_dot && !has_exp)
+            return false;
+        if (!have_digit)
+            error_at(start, "floating constant requires a decimal digit");
+        body_end = p;
+    }
+
+    Type *ty = ty_double;
+    if (*p == 'f' || *p == 'F') {
+        ty = ty_float;
+        p++;
+    } else if (*p == 'l' || *p == 'L') {
+        // The language frontend intentionally does not expose long double yet:
+        // the x86-64 backend has no x87 80-bit storage/call ABI lowering.
+        error_at(start, "long double floating constants are not supported");
+    }
+
+    if (is_ident2(*p))
+        error_at(start, "invalid floating suffix");
+
+    errno = 0;
+    char *converted;
+    double fval = strtod(start, &converted);
+    if (converted != body_end)
+        error_at(start, "invalid floating constant");
+
+    *rest = p;
+    *value = fval;
+    *literal_ty = ty;
+    return true;
+}
+
 static Type *integer_literal_type(uint64_t val, int base, bool has_u,
                                   int long_count, char *loc) {
     bool decimal = base == 10;
@@ -292,38 +411,20 @@ Token *tokenize(char *p) {
         }
 
         // Numeric literal (integer or floating-point)
-        if (isdigit(*p) || (*p == '.' && isdigit(p[1]))) {
+        if (isdigit((unsigned char)*p) ||
+            (*p == '.' && isdigit((unsigned char)p[1]))) {
             char *q = p;
-            bool hex = p[0] == '0' && (p[1] == 'x' || p[1] == 'X');
+            char *float_end;
+            double fval;
+            Type *float_ty;
 
-            // Let strtod identify decimal/hex floating syntax.  In a hex
-            // integer, e/E are ordinary digits, so only p/P denotes an exponent.
-            char *fend;
-            double fval = strtod(p, &fend);
-            bool is_flonum = *p == '.';
-            for (char *c = p; c < fend; c++) {
-                if (*c == '.' || (!hex && (*c == 'e' || *c == 'E')) ||
-                    (hex && (*c == 'p' || *c == 'P'))) {
-                    is_flonum = true;
-                    break;
-                }
-            }
-            bool is_float_suffix = false;
-            if (*fend == 'f' || *fend == 'F') {
-                is_flonum = true;
-                is_float_suffix = true;
-                fend++;
-            }
-
-            if (is_flonum) {
-                if (is_ident2(*fend))
-                    error_at(q, "invalid floating suffix");
-                p = fend;
+            if (read_floating_literal(p, &float_end, &fval, &float_ty)) {
+                p = float_end;
                 cur = cur->next = new_token(TK_NUM, q, p);
                 cur->line_no = line;
                 cur->is_float = true;
                 cur->fval = fval;
-                cur->ty = is_float_suffix ? ty_float : ty_double;
+                cur->ty = float_ty;
                 continue;
             }
 
