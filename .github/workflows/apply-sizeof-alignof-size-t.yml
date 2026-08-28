@@ -1,0 +1,26 @@
+name: Apply sizeof alignof size_t
+on:
+  push:
+    branches:
+      - agent/sizeof-alignof-size-t
+permissions:
+  contents: write
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/sizeof-alignof-size-t
+      - name: Apply migration
+        run: python3 tools/apply_sizeof_alignof_size_t.py
+      - name: Test
+        run: make clean && make test
+      - name: Commit compiler change
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add parse.c
+          git diff --cached --quiet && exit 0
+          git commit -m "Type sizeof and alignof results as size_t"
+          git push origin HEAD:agent/sizeof-alignof-size-t
