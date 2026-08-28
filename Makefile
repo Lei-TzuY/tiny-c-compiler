@@ -31,6 +31,7 @@ test: minicc
 	bash ./test/type_compatibility.sh
 	bash ./test/semantic_assignments.sh
 	bash ./test/expression_operators.sh
+	bash ./test/unary_plus.sh
 	bash ./test/pointer_arithmetic.sh
 	bash ./test/lvalue_semantics.sh
 	bash ./test/type_qualifiers.sh

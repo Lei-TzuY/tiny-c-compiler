@@ -1086,6 +1086,13 @@ static void gen_expr(Node *node) {
         return;
     }
 
+    if (node->kind == ND_POS) {
+        gen_expr(node->lhs);
+        if (is_integer(node->ty))
+            normalize(node->ty);
+        return;
+    }
+
     if (node->kind == ND_NEG) {
         gen_expr(node->lhs);
         printf("  neg %%rax\n");

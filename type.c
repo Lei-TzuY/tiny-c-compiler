@@ -317,6 +317,7 @@ void add_type(Node *node) {
         node->ty = integer_promotion(node->lhs->ty);
         return;
 
+    case ND_POS:
     case ND_NEG:
         if (!is_numeric(node->lhs->ty))
             error("numeric operand required");

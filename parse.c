@@ -3616,7 +3616,7 @@ static Node *unary(Token **rest, Token *tok) {
         return node;
     }
 
-    if (equal(tok, "+"))  return unary(rest, tok->next);
+    if (equal(tok, "+"))  return new_unary(ND_POS, unary(rest, tok->next));
     if (equal(tok, "-"))  return new_binary(ND_SUB, new_num(0), unary(rest, tok->next));
     if (equal(tok, "&")) {
         Token *op = tok;
