@@ -1021,28 +1021,43 @@ char *preprocess_v2_source(char *input, const char *source_name) {
                 undef_macro(name);
                 free(name);
             } else if (is_cond_active() && !strcmp(directive, "include")) {
-                char quote = *start;
-                if (quote == '"' || quote == '<') {
-                    char end_quote = quote == '"' ? '"' : '>';
-                    char *hname = start + 1;
-                    char *end_h = strchr(hname, end_quote);
-                    if (!end_h)
-                        error("unterminated #include");
-                    *end_h = '\0';
-                    char *owned = NULL;
-                    const char *content = NULL;
-                    if (quote == '"')
-                        owned = read_file_content(hname);
-                    content = owned ? owned : get_builtin_header(hname);
-                    if (!content)
-                        error("cannot include %s", hname);
-                    char *sub = preprocess_v2_source((char *)content, hname);
-                    sb_puts(&out, sub);
-                    if (out.len && out.data[out.len - 1] != '\n')
-                        sb_putc(&out, '\n');
-                    free(sub);
-                    free(owned);
+                // C11 6.10.2: if the directive does not directly contain a
+                // header-name token, macro-expand the remaining preprocessing
+                // tokens and interpret the result as the header name.
+                char *expanded_include = NULL;
+                char *include_operand = start;
+                if (*include_operand != '"' && *include_operand != '<') {
+                    bool directive_comment = false;
+                    expanded_include = expand_text(include_operand, NULL, &directive_comment);
+                    include_operand = expanded_include;
+                    while (*include_operand == ' ' || *include_operand == '\t')
+                        include_operand++;
                 }
+
+                char quote = *include_operand;
+                if (quote != '"' && quote != '<')
+                    error("#include requires a header name");
+                char end_quote = quote == '"' ? '"' : '>';
+                char *hname = include_operand + 1;
+                char *end_h = strchr(hname, end_quote);
+                if (!end_h)
+                    error("unterminated #include");
+                *end_h = '\0';
+
+                char *owned = NULL;
+                const char *content = NULL;
+                if (quote == '"')
+                    owned = read_file_content(hname);
+                content = owned ? owned : get_builtin_header(hname);
+                if (!content)
+                    error("cannot include %s", hname);
+                char *sub = preprocess_v2_source((char *)content, hname);
+                sb_puts(&out, sub);
+                if (out.len && out.data[out.len - 1] != '\n')
+                    sb_putc(&out, '\n');
+                free(sub);
+                free(owned);
+                free(expanded_include);
             } else if (is_cond_active() && !strcmp(directive, "line")) {
                 // C11 #line operands are macro-expanded before interpretation.
                 bool directive_comment = false;

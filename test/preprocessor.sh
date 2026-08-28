@@ -111,4 +111,20 @@ int main() { /* VALUE */ return VALUE; // VALUE
 assert_pp 1 '#include <stdbool.h>
 int main() { bool value = true; return value; }'
 
+# C11 #include operands that are not direct header-name tokens are macro-expanded.
+assert_pp 1 '#define BOOL_HEADER <stdbool.h>
+#include BOOL_HEADER
+int main() { bool value = true; return value; }'
+
+assert_pp 1 '#define HEADER_NAME stdbool.h
+#define WRAP_HEADER(x) <x>
+#include WRAP_HEADER(HEADER_NAME)
+int main() { bool value = true; return value; }'
+
+printf '%s\n' 'int included_value(void) { return 23; }' > tmp-macro-include.h
+assert_pp 23 '#define LOCAL_HEADER "tmp-macro-include.h"
+#include LOCAL_HEADER
+int main() { return included_value(); }'
+rm -f tmp-macro-include.h
+
 echo "All preprocessor tests passed!"
