@@ -1,0 +1,25 @@
+name: Apply enum value range v2
+on:
+  push:
+    branches:
+      - agent/enum-value-range-v2
+permissions:
+  contents: write
+jobs:
+  migrate:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: python3 tools/apply_enum_value_range.py
+      - run: |
+          make clean
+          make test
+      - run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add parse.c Makefile README.md test/enum_value_range.sh
+          git commit -m "Enforce enum value range constraints"
+          git push
