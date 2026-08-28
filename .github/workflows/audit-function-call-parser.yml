@@ -1,0 +1,18 @@
+name: Audit function call parser
+
+on:
+  push:
+    branches:
+      - agent/function-declaration-before-use
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/function-declaration-before-use
+      - name: Show direct-call parser sites
+        run: |
+          grep -n -B 25 -A 55 'funcname' parse.c | head -n 260
+          grep -n -B 20 -A 35 'ND_FUNCALL' parse.c | head -n 300
