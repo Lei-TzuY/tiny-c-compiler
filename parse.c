@@ -3085,6 +3085,7 @@ static Type *parse_static_image_initializer(Obj *var, Token **rest, Token *tok,
 
     ensure_static_image(var, offset + ty->size);
     Member *next_member = ty->members;
+    Member *active_union_member = NULL;
     bool first = true;
     int initialized_members = 0;
     while (!equal(tok, "}")) {
@@ -3095,7 +3096,7 @@ static Type *parse_static_image_initializer(Obj *var, Token **rest, Token *tok,
         }
         first = false;
 
-        if (ty->is_union && initialized_members)
+        if (ty->is_union && initialized_members && !equal(tok, "."))
             error_at(tok->loc, "excess elements in union initializer");
 
         if (equal(tok, ".") || equal(tok, "[")) {
@@ -3107,7 +3108,11 @@ static Type *parse_static_image_initializer(Obj *var, Token **rest, Token *tok,
             Member *member = path.first_member;
             Type *target_ty = path.target_ty;
             int target_offset = apply_static_designator_path(var, ty, offset, &path);
+            if (ty->is_union && active_union_member && active_union_member != member)
+                reset_static_subobject(var, offset, ty->size);
             reset_static_subobject(var, target_offset, target_ty->size);
+            if (ty->is_union)
+                active_union_member = member;
             free_initializer_designator_path(&path);
 
             if (parse_static_string_array_initializer(var, &tok, tok,
@@ -3563,13 +3568,15 @@ static Node *declaration(Token **rest, Token *tok) {
             int member_count = ty->kind == TY_STRUCT ? record_member_count(ty) : 0;
             bool *member_init = member_count ? calloc(member_count, sizeof(bool)) : NULL;
             Member *cur_mem = (ty->kind == TY_STRUCT) ? ty->members : NULL;
+            Member *active_union_member = NULL;
             Node *before_init = block_cur;
             int initialized_union_members = 0;
 
             while (!equal(tok, "}")) {
                 if (equal(tok, ",")) tok = tok->next;
                 if (equal(tok, "}")) break;
-                if (ty->kind == TY_STRUCT && ty->is_union && initialized_union_members)
+                if (ty->kind == TY_STRUCT && ty->is_union &&
+                    initialized_union_members && !equal(tok, "."))
                     error_at(tok->loc, "excess elements in union initializer");
 
                 // Designated initializer-list. A chain such as
@@ -3608,7 +3615,18 @@ static Node *declaration(Token **rest, Token *tok) {
                         int mi = record_member_index(ty, member);
                         if (mi < 0)
                             error_at(designator->loc, "invalid record initializer member");
-                        was_initialized = member_init[mi];
+                        if (ty->is_union && active_union_member != member) {
+                            for (int i = 0; i < member_count; i++)
+                                member_init[i] = false;
+                            was_initialized = false;
+                            Node *top = new_node(ND_MEMBER);
+                            top->lhs = new_var_node(var);
+                            top->member = member;
+                            append_zero_initializer(&block_cur, top, member->ty, brace);
+                            active_union_member = member;
+                        } else {
+                            was_initialized = member_init[mi];
+                        }
                         member_init[mi] = true;
                         cur_mem = member->next;
                         if (ty->is_union)
