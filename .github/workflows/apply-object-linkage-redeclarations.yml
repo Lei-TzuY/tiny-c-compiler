@@ -1,0 +1,36 @@
+name: Apply object linkage redeclaration migration
+
+on:
+  push:
+    branches:
+      - agent/object-linkage-redeclarations
+
+permissions:
+  contents: write
+
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/object-linkage-redeclarations
+          fetch-depth: 0
+      - name: Apply object linkage redeclaration migration
+        run: python3 tools/apply_object_linkage_redeclarations.py
+      - name: Audit object linkage transition checks
+        run: |
+          grep -nE 'register_global_symbol|has_storage_class|non-static declaration.*follows static' parse.c | head -n 120
+      - name: Validate full suite
+        run: make clean && make test
+      - name: Commit generated source changes
+        run: |
+          if git diff --quiet; then
+            echo "No migration changes to commit"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add parse.c README.md Makefile test/object_linkage_redeclarations.sh
+          git commit -m "Validate file-scope object linkage redeclarations"
+          git push origin HEAD:agent/object-linkage-redeclarations
