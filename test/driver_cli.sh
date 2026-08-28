@@ -70,6 +70,24 @@ assert_reject 'output file specified more than once' ./minicc -o a.s -o b.s tmp-
 assert_reject 'input and output files must be different' ./minicc -o tmp-driver-cli.c tmp-driver-cli.c
 assert_reject 'no input file' ./minicc -S
 
+# Path aliases of the input must be rejected too. Otherwise freopen() would
+# truncate the source through a hardlink or symlink even though the path strings
+# differ.
+printf '%s\n' 'int main(void) { return 0; }' > tmp-driver-alias-source.c
+cp tmp-driver-alias-source.c tmp-driver-alias-expected.c
+ln tmp-driver-alias-source.c tmp-driver-alias-hardlink.s
+assert_reject 'input and output files must be different' \
+  ./minicc -o tmp-driver-alias-hardlink.s tmp-driver-alias-source.c
+cmp -s tmp-driver-alias-source.c tmp-driver-alias-expected.c || \
+  fail 'hardlink output alias modified the input source'
+rm -f tmp-driver-alias-hardlink.s
+
+ln -s tmp-driver-alias-source.c tmp-driver-alias-symlink.s
+assert_reject 'input and output files must be different' \
+  ./minicc -E -o tmp-driver-alias-symlink.s tmp-driver-alias-source.c
+cmp -s tmp-driver-alias-source.c tmp-driver-alias-expected.c || \
+  fail 'symlink output alias modified the input source'
+
 printf '%s\n' 'sentinel' > tmp-driver-preserve.s
 printf '%s\n' 'int main( {' > tmp-driver-bad.c
 if ./minicc -o tmp-driver-preserve.s tmp-driver-bad.c >tmp-driver-cli.out 2>tmp-driver-cli.err; then
@@ -84,6 +102,7 @@ rm -f tmp-driver-cli.c tmp-driver-cli.i tmp-driver-cli-output.i \
       tmp-driver-stdin.s tmp-driver-stdin tmp-driver-stdin.i \
       tmp-driver-help.txt tmp-driver-version.txt tmp-driver-cli.out tmp-driver-cli.err \
       tmp-driver-preserve.s tmp-driver-bad.c ./-driver-dash.c tmp-driver-dash.s tmp-driver-dash \
-      a.s b.s
+      tmp-driver-alias-source.c tmp-driver-alias-expected.c tmp-driver-alias-hardlink.s \
+      tmp-driver-alias-symlink.s a.s b.s
 
 echo 'All driver CLI tests passed!'
