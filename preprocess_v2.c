@@ -311,6 +311,72 @@ static char *pp_read_ident(PPExpr *e) {
     return strndup(start, (size_t)(e->p - start));
 }
 
+static int pp_hex_digit(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+static int64_t pp_read_char_constant(PPExpr *e) {
+    pp_skip_space(e);
+    const char *p = e->p;
+    if (*p++ != '\'')
+        error("internal error while reading #if character constant");
+    if (!*p || *p == '\'' || *p == '\n')
+        error("empty or unterminated character constant in #if expression");
+
+    unsigned int value = 0;
+    if (*p != '\\') {
+        value = (unsigned char)*p++;
+    } else {
+        p++;
+        if (!*p)
+            error("unterminated escape in #if character constant");
+        switch (*p) {
+        case '\'': value = '\''; p++; break;
+        case '"': value = '"'; p++; break;
+        case '?': value = '?'; p++; break;
+        case '\\': value = '\\'; p++; break;
+        case 'a': value = '\a'; p++; break;
+        case 'b': value = '\b'; p++; break;
+        case 'f': value = '\f'; p++; break;
+        case 'n': value = '\n'; p++; break;
+        case 'r': value = '\r'; p++; break;
+        case 't': value = '\t'; p++; break;
+        case 'v': value = '\v'; p++; break;
+        case 'x': {
+            p++;
+            int d = pp_hex_digit(*p);
+            if (d < 0)
+                error("hex escape in #if character constant requires a digit");
+            while ((d = pp_hex_digit(*p)) >= 0) {
+                if (value > (255u - (unsigned)d) / 16u)
+                    error("character escape out of byte range in #if expression");
+                value = value * 16u + (unsigned)d;
+                p++;
+            }
+            break;
+        }
+        default:
+            if (*p < '0' || *p > '7')
+                error("unknown escape in #if character constant");
+            for (int i = 0; i < 3 && *p >= '0' && *p <= '7'; i++) {
+                unsigned d = (unsigned)(*p++ - '0');
+                if (value > (255u - d) / 8u)
+                    error("character escape out of byte range in #if expression");
+                value = value * 8u + d;
+            }
+            break;
+        }
+    }
+
+    if (*p != '\'')
+        error("multi-character or unterminated character constant in #if expression");
+    e->p = p + 1;
+    return (int64_t)value;
+}
+
 static int64_t eval_pp_expr_depth(const char *text, int depth, bool suppress_eval);
 static int64_t pp_eval_function_macro(PPExpr *e, Macro *m);
 
@@ -355,6 +421,8 @@ static int64_t pp_primary(PPExpr *e) {
     }
 
     pp_skip_space(e);
+    if (*e->p == '\'')
+        return pp_read_char_constant(e);
     if (isdigit((unsigned char)*e->p)) {
         char *end;
         unsigned long long val = strtoull(e->p, &end, 0);
