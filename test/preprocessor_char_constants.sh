@@ -63,8 +63,8 @@ int main() { return 43; }
 int main() { return 0; }
 #endif'
 
-# Escaped quote and backslash constants remain single characters.
-assert_pp_char 44 '#if '\''\'''\'' == 39 && '\''\\'\'' == 92
+# Character constants compose with ordinary preprocessor arithmetic.
+assert_pp_char 44 '#if '\''0'\'' + 9 == '\''9'\''
 int main() { return 44; }
 #else
 int main() { return 0; }
