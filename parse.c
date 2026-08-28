@@ -453,9 +453,26 @@ static Type *generic_control_type(Node *node) {
     return ty;
 }
 
+static bool address_designates_register_object(Node *node) {
+    if (!node)
+        return false;
+
+    // C forbids computing the address of an object declared with register
+    // storage, including an explicitly selected subobject of that object.
+    // Do not recurse through dereference: &*p computes the address stored in p,
+    // not the address of the register pointer object p itself.
+    if (node->kind == ND_VAR)
+        return node->var && node->var->is_register;
+    if (node->kind == ND_MEMBER)
+        return address_designates_register_object(node->lhs);
+    return false;
+}
+
 static Node *new_checked_addr(Node *operand, Token *op) {
     if (!is_addressable_expr(operand))
         error_at(op->loc, "address-of operand is not an lvalue or function designator");
+    if (address_designates_register_object(operand))
+        error_at(op->loc, "cannot take address of register object");
     return new_unary(ND_ADDR, operand);
 }
 
@@ -1621,6 +1638,7 @@ static Type *func_params(Token **rest, Token *tok, Type *return_ty) {
 
         Obj *param = calloc(1, sizeof(Obj));
         param->ty = param_ty;
+        param->is_register = param_attrs.is_register;
         if (name)
             param->name = strndup(name->loc, name->len);
         cur = cur->param_next = param;
@@ -3254,6 +3272,7 @@ static Node *declaration(Token **rest, Token *tok) {
             var = create_lvar(name);
             var->ty = ty;
         }
+        var->is_register = attrs.is_register;
         apply_object_alignment(var, ty, attrs.align, ident);
 
         if (!equal(tok, "="))
@@ -4971,6 +4990,7 @@ Program *parse(Token *tok) {
                     error_at(ident->loc, "parameter name omitted in function definition");
                 Obj *var = create_lvar(meta->name);
                 var->ty = meta->ty;
+                var->is_register = meta->is_register;
                 pcur = pcur->param_next = var;
             }
 

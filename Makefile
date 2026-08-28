@@ -68,6 +68,7 @@ test: minicc
 	bash ./test/type_specifier_combinations.sh
 	bash ./test/void_object_constraints.sh
 	bash ./test/block_extern_initializer.sh
+	bash ./test/register_address_constraints.sh
 	bash ./test/char_type_identity.sh
 	bash ./test/escape_sequences.sh
 	bash ./test/constant_expressions.sh
