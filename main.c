@@ -2,6 +2,8 @@
 #include "preprocess_v2.h"
 #include <sys/stat.h>
 
+void validate_program(Program *prog);
+
 typedef enum {
     DRIVER_COMPILE_ASSEMBLY,
     DRIVER_PREPROCESS_ONLY,
@@ -186,6 +188,7 @@ int main(int argc, char **argv) {
 
     Token *tok = tokenize(preprocessed);
     Program *prog = parse(tok);
+    validate_program(prog);
 
     // Delay opening the output until preprocessing, tokenization and parsing
     // have succeeded so a front-end error does not truncate an existing file.
