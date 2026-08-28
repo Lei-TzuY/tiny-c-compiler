@@ -1,0 +1,31 @@
+name: Replay constexpr signed overflow v3
+on:
+  push:
+    branches:
+      - agent/constexpr-signed-overflow-v3
+permissions:
+  contents: write
+jobs:
+  replay:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Replay validated permanent patch
+        run: |
+          git fetch origin agent/constexpr-signed-overflow-v2
+          git diff --binary a4e968706ad707fbae106e8ff04c4424598d8646 8d55a7f70edeb6f5752d1e9ad1823f2f178dc559 -- parse.c README.md test/constant_expressions.sh > /tmp/constexpr-overflow.patch
+          git apply -3 /tmp/constexpr-overflow.patch
+      - name: Test
+        run: |
+          make clean
+          make test
+      - name: Commit permanent changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add parse.c README.md test/constant_expressions.sh
+          git commit -m "Diagnose signed constant-expression overflow"
+          git push
