@@ -265,6 +265,18 @@ static Type *pointer_operand_target(Type *ty) {
     return NULL;
 }
 
+static Type *decay_pointer_operand_type(Type *ty) {
+    if (!ty)
+        return NULL;
+    if (ty->kind == TY_PTR)
+        return ty;
+    if (ty->kind == TY_ARRAY)
+        return pointer_to(ty->base);
+    if (ty->kind == TY_FUNC)
+        return pointer_to(ty);
+    return NULL;
+}
+
 static Type *equality_type_identity(Type *ty) {
     return ty && ty->origin ? ty->origin : ty;
 }
@@ -331,6 +343,26 @@ static bool pointer_equality_compatible(Type *lhs, Type *rhs) {
     }
 
     return equality_type_compatible(a, b, true);
+}
+
+static Type *conditional_pointer_type(Type *lhs, Type *rhs) {
+    if (!pointer_equality_compatible(lhs, rhs))
+        return NULL;
+
+    Type *lp = decay_pointer_operand_type(lhs);
+    Type *rp = decay_pointer_operand_type(rhs);
+    Type *a = lp->base;
+    Type *b = rp->base;
+
+    if (a->kind == TY_VOID || b->kind == TY_VOID) {
+        Type *base = qualify_type(ty_void,
+                                  a->is_const || b->is_const,
+                                  a->is_volatile || b->is_volatile);
+        return pointer_to(base);
+    }
+
+    Type *base = qualify_type(a, b->is_const, b->is_volatile);
+    return pointer_to(base);
 }
 
 static bool is_null_pointer_constant(Node *node) {
@@ -493,10 +525,46 @@ void add_type(Node *node) {
         return;
 
     case ND_TERNARY:
-        if (is_numeric(node->then->ty) && is_numeric(node->els->ty))
+        if (!is_scalar_operand(node->cond->ty))
+            error("scalar condition required for conditional operator");
+
+        if (is_numeric(node->then->ty) && is_numeric(node->els->ty)) {
             node->ty = get_common_type(node->then->ty, node->els->ty);
-        else
+            return;
+        }
+
+        if (is_pointer_operand(node->then->ty) &&
+            is_null_pointer_constant(node->els)) {
+            node->ty = decay_pointer_operand_type(node->then->ty);
+            return;
+        }
+        if (is_null_pointer_constant(node->then) &&
+            is_pointer_operand(node->els->ty)) {
+            node->ty = decay_pointer_operand_type(node->els->ty);
+            return;
+        }
+
+        if (is_pointer_operand(node->then->ty) &&
+            is_pointer_operand(node->els->ty)) {
+            node->ty = conditional_pointer_type(node->then->ty, node->els->ty);
+            if (!node->ty)
+                error("incompatible pointer operands for conditional operator");
+            return;
+        }
+
+        if (node->then->ty->kind == TY_VOID && node->els->ty->kind == TY_VOID) {
+            node->ty = ty_void;
+            return;
+        }
+
+        if (node->then->ty->kind == TY_STRUCT &&
+            node->els->ty->kind == TY_STRUCT &&
+            equality_type_compatible(node->then->ty, node->els->ty, true)) {
             node->ty = node->then->ty;
+            return;
+        }
+
+        error("invalid operands for conditional operator");
         return;
 
     case ND_COMMA:
