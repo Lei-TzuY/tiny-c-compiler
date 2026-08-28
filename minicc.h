@@ -131,6 +131,8 @@ extern Type *ty_double;
 bool is_integer(Type *ty);
 bool is_flonum(Type *ty);
 bool is_numeric(Type *ty);
+Type *default_argument_promotion(Type *ty);
+bool prototype_compatible_with_unprototyped(Type *fty);
 
 typedef enum {
     SYSV_ABI_NONE,

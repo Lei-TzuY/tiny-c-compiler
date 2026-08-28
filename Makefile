@@ -48,6 +48,7 @@ test: minicc
 	bash ./test/control_flow_context.sh
 	bash ./test/control_condition_scalars.sh
 	bash ./test/function_type_constraints.sh
+	bash ./test/oldstyle_function_compatibility.sh
 	bash ./test/arithmetic_conversions.sh
 	bash ./test/alignof.sh
 	bash ./test/alignas.sh

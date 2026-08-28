@@ -32,6 +32,33 @@ bool is_numeric(Type *ty) {
     return is_integer(ty) || is_flonum(ty);
 }
 
+// Default argument promotions used by unprototyped calls, variadic tails,
+// and the C function-type compatibility rule for an empty parameter list.
+// NULL means the type is unchanged by the default promotions.
+Type *default_argument_promotion(Type *ty) {
+    if (!ty)
+        return NULL;
+    if (ty->kind == TY_FLOAT)
+        return ty_double;
+    if (ty->kind == TY_BOOL || ty->kind == TY_CHAR || ty->kind == TY_SHORT)
+        return ty_int;
+    return NULL;
+}
+
+// C permits a prototype to be compatible with an old-style empty parameter
+// list only when it has no ellipsis and every parameter type is unchanged by
+// the default argument promotions. Parameter array/function adjustment has
+// already happened while parsing the prototype.
+bool prototype_compatible_with_unprototyped(Type *fty) {
+    if (!fty || fty->kind != TY_FUNC || !fty->has_prototype || fty->is_variadic)
+        return false;
+
+    for (Obj *param = fty->params; param; param = param->param_next)
+        if (default_argument_promotion(param->ty))
+            return false;
+    return true;
+}
+
 // SysV AMD64 classifies records up to two eightbytes independently.  This
 // compiler's scalar type system needs only INTEGER and SSE classes: integers and
 // pointers contribute INTEGER, float/double contribute SSE, and overlapping
@@ -315,8 +342,12 @@ static bool equality_type_compatible(Type *a, Type *b, bool ignore_top_qual) {
     case TY_FUNC: {
         if (!equality_type_compatible(a->return_ty, b->return_ty, false))
             return false;
-        if (!a->has_prototype || !b->has_prototype)
-            return true;
+        if (!a->has_prototype || !b->has_prototype) {
+            if (!a->has_prototype && !b->has_prototype)
+                return true;
+            Type *proto = a->has_prototype ? a : b;
+            return prototype_compatible_with_unprototyped(proto);
+        }
         if (a->is_variadic != b->is_variadic)
             return false;
 

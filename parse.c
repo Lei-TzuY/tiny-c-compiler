@@ -626,6 +626,24 @@ static Obj *create_static_lvar(char *name) {
     return var;
 }
 
+static void check_oldstyle_definition_redeclaration(Obj *old, Type *new_ty,
+                                                    bool new_is_definition,
+                                                    const char *name) {
+    if (!old || !old->is_function || !old->ty || old->ty->kind != TY_FUNC ||
+        !new_ty || new_ty->kind != TY_FUNC)
+        return;
+
+    // This compiler does not implement identifier-list definitions, so an
+    // unprototyped `f(){...}` definition has exactly zero parameters.
+    if (new_is_definition && !old->is_defined && !new_ty->has_prototype &&
+        old->ty->has_prototype && old->ty->params)
+        error("function definition of '%s' has no parameters but prior prototype does", name);
+
+    if (!new_is_definition && old->is_defined && !old->ty->has_prototype &&
+        new_ty->has_prototype && new_ty->params)
+        error("prototype for '%s' declares parameters after a no-parameter definition", name);
+}
+
 // Create a block-scope declaration with linkage. A prior file-scope or earlier
 // block-scope extern declaration is reused when compatible, but the lexical
 // binding itself belongs only to the current block.
@@ -639,7 +657,11 @@ static Obj *create_extern_ref(char *name, Type *ty) {
     if (same_scope) {
         Obj *old = same_scope->var;
         if (old->is_local || strcmp(old->name, name) ||
-            old->is_function != wants_function || !type_compatible(old->ty, ty))
+            old->is_function != wants_function)
+            error("conflicting block-scope declaration of '%s'", name);
+        if (wants_function)
+            check_oldstyle_definition_redeclaration(old, ty, false, name);
+        if (!type_compatible(old->ty, ty))
             error("conflicting block-scope declaration of '%s'", name);
         old->ty = composite_redecl_type(old->ty, ty);
         return old;
@@ -649,6 +671,8 @@ static Obj *create_extern_ref(char *name, Type *ty) {
     if (var) {
         if (var->is_function != wants_function)
             error("'%s' redeclared as different kind of symbol", name);
+        if (wants_function)
+            check_oldstyle_definition_redeclaration(var, ty, false, name);
         if (!type_compatible(var->ty, ty))
             error("conflicting types for '%s'", name);
         var->ty = composite_redecl_type(var->ty, ty);
@@ -3898,16 +3922,6 @@ static Node *unary(Token **rest, Token *tok) {
     return postfix(rest, tok);
 }
 
-static Type *default_argument_promotion(Type *ty) {
-    if (!ty)
-        return NULL;
-    if (ty->kind == TY_FLOAT)
-        return ty_double;
-    if (ty->kind == TY_BOOL || ty->kind == TY_CHAR || ty->kind == TY_SHORT)
-        return ty_int;
-    return NULL;
-}
-
 static Node *cast_call_argument(Node *arg, Type *ty) {
     if (!ty || arg->ty == ty)
         return arg;
@@ -4388,12 +4402,15 @@ static bool type_compatible_impl(Type *a, Type *b, bool ignore_top_qual) {
         if (!type_compatible_impl(a->return_ty, b->return_ty, false))
             return false;
 
-        // Old-style f() remains compatible with a prototype. For prototype
-        // comparison, C ignores only the top-level qualifiers on each parameter
-        // after array/function parameter adjustment; nested pointer qualifiers
-        // remain significant.
-        if (!a->has_prototype || !b->has_prototype)
-            return true;
+        // Two unprototyped function types are compatible. If exactly one
+        // side has a prototype, C additionally requires a non-variadic prototype
+        // whose parameter types are unchanged by the default argument promotions.
+        if (!a->has_prototype || !b->has_prototype) {
+            if (!a->has_prototype && !b->has_prototype)
+                return true;
+            Type *proto = a->has_prototype ? a : b;
+            return prototype_compatible_with_unprototyped(proto);
+        }
         if (a->is_variadic != b->is_variadic)
             return false;
 
@@ -4489,6 +4506,7 @@ static void register_function_symbol(char *name, Type *return_ty, bool is_static
     if (var) {
         if (!var->is_function)
             error("'%s' redeclared as different kind of symbol", name);
+        check_oldstyle_definition_redeclaration(var, fty, is_definition, name);
         if (!type_compatible(var->ty, fty))
             error("conflicting types for function '%s'", name);
         if (is_static && !var->is_static)
