@@ -39,6 +39,7 @@ test: minicc
 	bash ./test/alignof.sh
 	bash ./test/static_assert.sh
 	bash ./test/generic_selection.sh
+	bash ./test/predefined_func.sh
 	bash ./test/gnu_stack.sh
 	bash ./test/static_object_alignment.sh
 	bash ./test/uint64_fp_conversions.sh

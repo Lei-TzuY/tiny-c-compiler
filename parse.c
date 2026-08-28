@@ -4255,6 +4255,24 @@ static void register_function_symbol(char *name, Type *return_ty, bool is_static
     bind_var_in_current_scope(fn_obj->name, fn_obj, false);
 }
 
+// C99 defines __func__ inside every function as if the implementation inserted
+// `static const char __func__[] = "function-name";` immediately after the
+// opening brace. Model it as one compiler-generated static object bound in the
+// function scope so array extent, pointer identity, and const element semantics
+// all follow ordinary variable rules.
+static void bind_predefined_func_name(const char *name) {
+    Obj *var = calloc(1, sizeof(Obj));
+    var->name = new_unique_name();
+    var->ty = array_of(qualify_type(ty_char, true, false), strlen(name) + 1);
+    var->is_local = false;
+    var->is_static = true;
+    var->is_string_literal = true;
+    var->init_data = strdup(name);
+    var->next = globals;
+    globals = var;
+    bind_var_in_current_scope("__func__", var, false);
+}
+
 // program = (function | global-var | typedef)*
 Program *parse(Token *tok) {
     globals = NULL;
@@ -4337,6 +4355,7 @@ Program *parse(Token *tok) {
             }
 
             tok = skip(tok, "{");
+            bind_predefined_func_name(name);
 
             Function *fn = calloc(1, sizeof(Function));
             fn->name = name;
