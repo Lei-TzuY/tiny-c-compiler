@@ -1,0 +1,47 @@
+name: Audit block extern linkage
+
+on:
+  push:
+    branches:
+      - agent/block-extern-linkage
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/block-extern-linkage
+      - name: Show extern reference helper
+        run: |
+          grep -n -B 12 -A 45 'create_extern_ref' parse.c | head -n 180
+      - name: Build compiler
+        run: make clean && make minicc
+      - name: Probe block extern linkage behavior
+        shell: bash
+        run: |
+          set -eu
+          accept() {
+            src="$1"
+            printf '%s\n' "$src" > tmp-audit.c
+            ./minicc tmp-audit.c > tmp-audit.s
+            cc -o tmp-audit tmp-audit.s
+            ./tmp-audit >/dev/null
+            echo "ACCEPT: $src"
+          }
+          reject() {
+            src="$1"
+            printf '%s\n' "$src" > tmp-audit.c
+            if ./minicc tmp-audit.c > /dev/null 2>tmp-audit.err; then
+              echo "UNEXPECTED ACCEPT: $src"
+            else
+              echo "REJECT: $src"
+              cat tmp-audit.err
+            fi
+          }
+          accept 'static int x=3;int main(void){extern int x;return x-3;}'
+          accept 'int x=4;int main(void){extern int x;return x-4;}'
+          accept 'static int f(void);int main(void){extern int f(void);return f()-5;}static int f(void){return 5;}'
+          reject 'static int x;int main(void){extern long x;return 0;}'
+          reject 'int x;int main(void){extern long x;return 0;}'
+          reject 'static int f(void);int main(void){extern long f(void);return 0;}static int f(void){return 0;}'
