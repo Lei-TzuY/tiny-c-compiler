@@ -85,6 +85,7 @@ test: minicc
 	bash ./test/aggregate_static_relocations.sh
 	bash ./test/union_initializers.sh
 	bash ./test/aggregate_initializers.sh
+	bash ./test/scalar_brace_initializers.sh
 	bash ./test/brace_elision.sh
 	bash ./test/array_designators.sh
 	bash ./test/nested_designators.sh

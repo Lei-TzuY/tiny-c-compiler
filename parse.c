@@ -2436,6 +2436,30 @@ static bool append_automatic_string_array_initializer(Node **tail, Node *lhs,
     return true;
 }
 
+static void append_automatic_scalar_initializer(Node **tail, Node *lhs,
+                                                Token **rest, Token *tok,
+                                                Token *where) {
+    if (equal(tok, "{")) {
+        Token *brace = tok;
+        tok = tok->next;
+        if (equal(tok, "}"))
+            error_at(brace->loc, "empty scalar initializer");
+
+        append_automatic_scalar_initializer(tail, lhs, &tok, tok, where);
+        if (equal(tok, ","))
+            tok = tok->next;
+        if (!equal(tok, "}"))
+            error_at(tok->loc, "excess elements in scalar initializer");
+        *rest = tok->next;
+        return;
+    }
+
+    Node *rhs = assign(&tok, tok);
+    Node *a = new_initializer_assign(lhs, rhs, where);
+    *tail = (*tail)->next = new_unary(ND_EXPR_STMT, a);
+    *rest = tok;
+}
+
 
 // Append zero-initialization statements for an automatic aggregate subobject.
 // C requires omitted array elements and record members to be initialized as if
@@ -2960,10 +2984,12 @@ static Type *parse_static_image_initializer(Obj *var, Token **rest, Token *tok,
             tok = tok->next;
             if (equal(tok, "}"))
                 error_at(brace->loc, "empty scalar initializer");
-            parse_static_image_scalar(var, &tok, tok, ty, offset);
+            parse_static_image_initializer(var, &tok, tok, ty, offset);
             if (equal(tok, ","))
                 tok = tok->next;
-            *rest = skip(tok, "}");
+            if (!equal(tok, "}"))
+                error_at(tok->loc, "excess elements in scalar initializer");
+            *rest = tok->next;
             return ty;
         }
         parse_static_image_scalar(var, rest, tok, ty, offset);
@@ -3216,9 +3242,7 @@ static void parse_automatic_aggregate_subobject(Node **tail, Node *lhs, Type *ty
                     continue;
                 }
 
-                Node *rhs = assign(&tok, tok);
-                Node *a = new_initializer_assign(child, rhs, where);
-                *tail = (*tail)->next = new_unary(ND_EXPR_STMT, a);
+                append_automatic_scalar_initializer(tail, child, &tok, tok, where);
             }
 
             if (infer_array) {
@@ -3286,9 +3310,7 @@ static void parse_automatic_aggregate_subobject(Node **tail, Node *lhs, Type *ty
                                                          next_member->ty,
                                                          &tok, tok, where);
                 } else {
-                    Node *rhs = assign(&tok, tok);
-                    Node *a = new_initializer_assign(child, rhs, where);
-                    *tail = (*tail)->next = new_unary(ND_EXPR_STMT, a);
+                    append_automatic_scalar_initializer(tail, child, &tok, tok, where);
                 }
 
                 if (ty->is_union)
@@ -3329,9 +3351,7 @@ static void parse_automatic_aggregate_subobject(Node **tail, Node *lhs, Type *ty
                 continue;
             }
 
-            Node *rhs = assign(&tok, tok);
-            Node *a = new_initializer_assign(child, rhs, where);
-            *tail = (*tail)->next = new_unary(ND_EXPR_STMT, a);
+            append_automatic_scalar_initializer(tail, child, &tok, tok, where);
         }
     } else {
         int initialized = 0;
@@ -3358,9 +3378,7 @@ static void parse_automatic_aggregate_subobject(Node **tail, Node *lhs, Type *ty
                                                      &tok, tok, where);
                 initialized++;
             } else {
-                Node *rhs = assign(&tok, tok);
-                Node *a = new_initializer_assign(child, rhs, where);
-                *tail = (*tail)->next = new_unary(ND_EXPR_STMT, a);
+                append_automatic_scalar_initializer(tail, child, &tok, tok, where);
                 initialized++;
             }
 
@@ -3376,7 +3394,12 @@ static void parse_automatic_aggregate_subobject(Node **tail, Node *lhs, Type *ty
     if (append_automatic_string_array_initializer(tail, lhs, ty, rest, tok))
         return;
 
-    if (is_initializer_aggregate(ty) && equal(tok, "{")) {
+    if (!is_initializer_aggregate(ty)) {
+        append_automatic_scalar_initializer(tail, lhs, rest, tok, where);
+        return;
+    }
+
+    if (equal(tok, "{")) {
         parse_automatic_aggregate_subobject(tail, lhs, ty, rest, tok, where);
         return;
     }
@@ -3519,13 +3542,19 @@ static Node *declaration(Token **rest, Token *tok) {
             continue;
         }
 
-        // Brace-enclosed initializer: { expr, expr, ... }
+        // Brace-enclosed initializer. Scalars contain one initializer
+        // recursively (plus optional trailing commas); aggregates use the full
+        // initializer-list machinery below.
         if (equal(tok, "{")) {
+            if (!is_initializer_aggregate(ty)) {
+                Token *brace = tok;
+                Node *lhs = new_var_node(var);
+                append_automatic_scalar_initializer(&block_cur, lhs, &tok, tok, brace);
+                continue;
+            }
+
             Token *brace = tok;
             tok = tok->next;
-
-            if (ty->kind != TY_ARRAY && ty->kind != TY_STRUCT)
-                error_at(brace->loc, "brace initializer requires an aggregate type");
 
             int cur_idx = 0;
             int max_idx = -1;
@@ -3623,9 +3652,8 @@ static Node *declaration(Token **rest, Token *tok) {
                             parse_automatic_aggregate_subobject(&block_cur, lhs,
                                                                 ty->base, &tok, tok, brace);
                         } else {
-                            Node *e = assign(&tok, tok);
-                            Node *a = new_initializer_assign(lhs, e, tok);
-                            block_cur = block_cur->next = new_unary(ND_EXPR_STMT, a);
+                            append_automatic_scalar_initializer(&block_cur, lhs,
+                                                                &tok, tok, brace);
                         }
                     }
                 } else {
@@ -3644,9 +3672,8 @@ static Node *declaration(Token **rest, Token *tok) {
                             parse_automatic_aggregate_subobject(&block_cur, member_node,
                                                                 cur_mem->ty, &tok, tok, brace);
                         } else {
-                            Node *e = assign(&tok, tok);
-                            Node *a = new_initializer_assign(member_node, e, tok);
-                            block_cur = block_cur->next = new_unary(ND_EXPR_STMT, a);
+                            append_automatic_scalar_initializer(&block_cur, member_node,
+                                                                &tok, tok, brace);
                         }
                     }
                     if (ty->is_union)
@@ -4459,17 +4486,7 @@ static Node *compound_literal(Token **rest, Token *tok, Type *ty,
                                                 type_tok);
             ty = var->ty;
         } else {
-            tok = skip(tok, "{");
-            if (equal(tok, "}"))
-                error_at(tok->loc, "scalar compound literal requires an initializer");
-            Node *rhs = assign(&tok, tok);
-            Node *assign_node = new_initializer_assign(root, rhs, type_tok);
-            tail = tail->next = new_unary(ND_EXPR_STMT, assign_node);
-            if (equal(tok, ","))
-                tok = tok->next;
-            if (!equal(tok, "}"))
-                error_at(tok->loc, "excess elements in scalar compound literal");
-            tok = tok->next;
+            append_automatic_scalar_initializer(&tail, root, &tok, tok, type_tok);
         }
 
         for (Node *stmt = head.next; stmt; stmt = stmt->next) {
@@ -4500,15 +4517,8 @@ static Node *compound_literal(Token **rest, Token *tok, Type *ty,
             ty = parse_static_image_initializer(var, &tok, tok, ty, 0);
             var->ty = ty;
         } else {
-            tok = skip(tok, "{");
-            if (equal(tok, "}"))
-                error_at(tok->loc, "scalar compound literal requires an initializer");
-            parse_static_scalar_initializer(var, &tok, tok, ty);
-            if (equal(tok, ","))
-                tok = tok->next;
-            if (!equal(tok, "}"))
-                error_at(tok->loc, "excess elements in scalar compound literal");
-            tok = tok->next;
+            ty = parse_static_image_initializer(var, &tok, tok, ty, 0);
+            var->ty = ty;
         }
     }
 
