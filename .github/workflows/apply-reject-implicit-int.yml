@@ -1,0 +1,36 @@
+name: Apply implicit-int rejection migration
+
+on:
+  push:
+    branches:
+      - agent/reject-implicit-int
+
+permissions:
+  contents: write
+
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/reject-implicit-int
+          fetch-depth: 0
+      - name: Apply implicit-int rejection migration
+        run: python3 tools/apply_reject_implicit_int.py
+      - name: Audit type-specifier requirement
+        run: |
+          grep -nE 'declaration requires a type specifier|validate_type_specifier_set|TypeSpecState' parse.c | head -n 180
+      - name: Validate full suite
+        run: make clean && make test
+      - name: Commit generated source changes
+        run: |
+          if git diff --quiet; then
+            echo "No migration changes to commit"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add parse.c README.md Makefile test/implicit_int_constraints.sh
+          git commit -m "Reject implicit-int declarations"
+          git push origin HEAD:agent/reject-implicit-int
