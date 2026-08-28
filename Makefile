@@ -45,6 +45,7 @@ test: minicc
 	bash ./test/switch_constraints.sh
 	bash ./test/nested_switch_labels.sh
 	bash ./test/control_flow_context.sh
+	bash ./test/control_condition_scalars.sh
 	bash ./test/arithmetic_conversions.sh
 	bash ./test/alignof.sh
 	bash ./test/sizeof_alignof_size_t.sh

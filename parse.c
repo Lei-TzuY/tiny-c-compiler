@@ -256,6 +256,7 @@ static Type *type_name(Token **rest, Token *tok);
 static bool type_compatible(Type *a, Type *b);
 static bool type_compatible_ignoring_top_qual(Type *a, Type *b);
 static bool assignment_compatible(Type *dst, Node *rhs);
+static bool is_scalar_expr(Node *node);
 static Node *new_initializer_assign(Node *lhs, Node *rhs, Token *at);
 static Node *new_checked_assign(Node *lhs, Node *rhs, Token *op);
 
@@ -3001,6 +3002,12 @@ static bool is_label(Token *tok) {
     return false;
 }
 
+static void require_scalar_condition(Node *cond, Token *keyword,
+                                     const char *construct) {
+    if (!is_scalar_expr(cond))
+        error_at(keyword->loc, "%s condition must have scalar type", construct);
+}
+
 static Node *stmt(Token **rest, Token *tok) {
     if (equal(tok, "_Static_assert")) {
         *rest = parse_static_assertion(tok);
@@ -3052,6 +3059,7 @@ static Node *stmt(Token **rest, Token *tok) {
     }
 
     if (equal(tok, "do")) {
+        Token *do_tok = tok;
         Node *node = new_node(ND_DO);
         current_loop_depth++;
         node->then = stmt(&tok, tok->next);
@@ -3059,6 +3067,7 @@ static Node *stmt(Token **rest, Token *tok) {
         tok = skip(tok, "while");
         tok = skip(tok, "(");
         node->cond = expr(&tok, tok);
+        require_scalar_condition(node->cond, do_tok, "do-while");
         tok = skip(tok, ")");
         *rest = skip(tok, ";");
         return node;
@@ -3134,9 +3143,11 @@ static Node *stmt(Token **rest, Token *tok) {
     }
 
     if (equal(tok, "if")) {
+        Token *if_tok = tok;
         Node *node = new_node(ND_IF);
         tok = skip(tok->next, "(");
         node->cond = expr(&tok, tok);
+        require_scalar_condition(node->cond, if_tok, "if");
         tok = skip(tok, ")");
         node->then = stmt(&tok, tok);
         if (equal(tok, "else"))
@@ -3146,9 +3157,11 @@ static Node *stmt(Token **rest, Token *tok) {
     }
 
     if (equal(tok, "while")) {
+        Token *while_tok = tok;
         Node *node = new_node(ND_WHILE);
         tok = skip(tok->next, "(");
         node->cond = expr(&tok, tok);
+        require_scalar_condition(node->cond, while_tok, "while");
         tok = skip(tok, ")");
         current_loop_depth++;
         node->then = stmt(&tok, tok);
@@ -3158,6 +3171,7 @@ static Node *stmt(Token **rest, Token *tok) {
     }
 
     if (equal(tok, "for")) {
+        Token *for_tok = tok;
         Node *node = new_node(ND_FOR);
         tok = skip(tok->next, "(");
         enter_scope();
@@ -3176,8 +3190,10 @@ static Node *stmt(Token **rest, Token *tok) {
             tok = skip(tok, ";");
         }
 
-        if (!equal(tok, ";"))
+        if (!equal(tok, ";")) {
             node->cond = expr(&tok, tok);
+            require_scalar_condition(node->cond, for_tok, "for");
+        }
         tok = skip(tok, ";");
 
         if (!equal(tok, ")"))
