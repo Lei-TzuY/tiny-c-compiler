@@ -1,5 +1,6 @@
 #include "minicc.h"
 #include "preprocess_v2.h"
+#include <sys/stat.h>
 
 typedef enum {
     DRIVER_COMPILE_ASSEMBLY,
@@ -29,6 +30,18 @@ static void print_usage(FILE *out, const char *prog) {
             "  --version        Show version information and exit\n"
             "  --               End option processing\n",
             prog);
+}
+
+static bool same_existing_file(const char *lhs, const char *rhs) {
+    struct stat a;
+    struct stat b;
+
+    if (!lhs || !rhs || !strcmp(lhs, "-") || !strcmp(rhs, "-"))
+        return false;
+    if (stat(lhs, &a) || stat(rhs, &b))
+        return false;
+
+    return a.st_dev == b.st_dev && a.st_ino == b.st_ino;
 }
 
 static DriverOptions parse_options(int argc, char **argv) {
@@ -98,7 +111,8 @@ static DriverOptions parse_options(int argc, char **argv) {
     if (!opts.input_path)
         error("%s: no input file", argv[0]);
     if (opts.output_path && strcmp(opts.output_path, "-") &&
-        !strcmp(opts.output_path, opts.input_path))
+        (!strcmp(opts.output_path, opts.input_path) ||
+         same_existing_file(opts.output_path, opts.input_path)))
         error("%s: input and output files must be different", argv[0]);
 
     return opts;
