@@ -4846,7 +4846,7 @@ static bool object_has_initializer(Obj *var) {
 }
 
 static Obj *register_global_symbol(Token *ident, Type *ty, bool is_static,
-                                   bool is_extern) {
+                                   bool is_extern, bool has_storage_class) {
     char *name = strndup(ident->loc, ident->len);
     Obj *var = find_global_symbol(name);
     if (var) {
@@ -4856,6 +4856,12 @@ static Obj *register_global_symbol(Token *ident, Type *ty, bool is_static,
             error_at(ident->loc, "conflicting types for '%s'", name);
         if (is_static && !var->is_static)
             error_at(ident->loc, "static declaration of '%s' follows non-static declaration", name);
+        // For file-scope objects, a declaration with no storage-class
+        // specifier has external linkage. Unlike an explicit `extern`, it does
+        // not inherit a prior internal linkage declaration.
+        if (!has_storage_class && var->is_static)
+            error_at(ident->loc,
+                     "non-static declaration of '%s' follows static declaration", name);
 
         var->ty = composite_redecl_type(var->ty, ty);
         if (var->is_static)
@@ -5069,7 +5075,8 @@ Program *parse(Token *tok) {
                     !is_unknown_bound_array_with_complete_element(ty))
                     error_at(ident->loc, "variable has incomplete type");
 
-                Obj *var = register_global_symbol(ident, ty, is_static, is_extern);
+                Obj *var = register_global_symbol(ident, ty, is_static, is_extern,
+                                                  attrs.storage_class_count != 0);
                 apply_object_alignment(var, ty, attrs.align, ident);
                 ty = var->ty;
 
