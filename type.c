@@ -31,11 +31,6 @@ bool is_numeric(Type *ty) {
     return is_integer(ty) || is_flonum(ty);
 }
 
-// SysV AMD64 classifies records up to two eightbytes independently.  This
-// compiler's scalar type system needs only INTEGER and SSE classes: integers and
-// pointers contribute INTEGER, float/double contribute SSE, and overlapping
-// union/subobject contributions merge with INTEGER taking precedence over SSE.
-// Complete records larger than two eightbytes are MEMORY-class.
 static SysVAbiClass merge_sysv_class(SysVAbiClass a, SysVAbiClass b) {
     if (a == SYSV_ABI_NONE)
         return b;
@@ -109,10 +104,6 @@ bool sysv_record_is_memory(Type *ty) {
 Type *qualify_type(Type *ty, bool is_const, bool is_volatile) {
     if (!ty || (!is_const && !is_volatile))
         return ty;
-
-    // Qualifying an array type through a typedef qualifies its element type.
-    // Direct declarations such as `const int a[3]` already arrive in this
-    // shape because the declaration specifiers qualify the element base first.
     if (ty->kind == TY_ARRAY) {
         Type *copy = calloc(1, sizeof(Type));
         *copy = *ty;
@@ -121,21 +112,14 @@ Type *qualify_type(Type *ty, bool is_const, bool is_volatile) {
         copy->qual_next = NULL;
         return copy;
     }
-
-    // Qualifiers on function types have no useful semantics in this compiler;
-    // pointer qualifiers are attached to TY_PTR by the declarator parser.
     if (ty->kind == TY_FUNC)
         return ty;
-
     Type *copy = calloc(1, sizeof(Type));
     *copy = *ty;
     copy->origin = ty->origin ? ty->origin : ty;
     copy->is_const = copy->is_const || is_const;
     copy->is_volatile = copy->is_volatile || is_volatile;
     copy->qual_next = NULL;
-
-    // A qualified clone of a forward-declared record must observe completion
-    // of the canonical tag later in the translation unit.
     if (copy->kind == TY_STRUCT && copy->origin->is_incomplete) {
         copy->qual_next = copy->origin->qual_next;
         copy->origin->qual_next = copy;
@@ -171,8 +155,6 @@ Type *func_type(Type *return_ty) {
     return ty;
 }
 
-// Integer promotions for the LP64 target used by minicc.  All supported
-// char/short/_Bool values fit in int, including their unsigned variants.
 static Type *integer_promotion(Type *ty) {
     if (!is_integer(ty))
         return ty;
@@ -204,39 +186,27 @@ static Type *unsigned_integer_type(Type *ty) {
     }
 }
 
-// Usual arithmetic conversions for the x86-64 LP64 target.  `long` and
-// `long long` are both 64-bit here but retain distinct C ranks, so size alone
-// is insufficient (notably unsigned long + long long -> unsigned long long).
 Type *get_common_type(Type *ty1, Type *ty2) {
     if (ty1->base)
         return pointer_to(ty1->base);
-
     if (ty1->kind == TY_DOUBLE || ty2->kind == TY_DOUBLE)
         return ty_double;
     if (ty1->kind == TY_FLOAT || ty2->kind == TY_FLOAT)
         return ty_float;
-
     ty1 = integer_promotion(ty1);
     ty2 = integer_promotion(ty2);
-
     int r1 = integer_rank(ty1);
     int r2 = integer_rank(ty2);
     if (ty1->is_unsigned == ty2->is_unsigned)
         return r1 >= r2 ? ty1 : ty2;
-
     Type *u = ty1->is_unsigned ? ty1 : ty2;
     Type *s = ty1->is_unsigned ? ty2 : ty1;
     int urank = integer_rank(u);
     int srank = integer_rank(s);
-
     if (urank >= srank)
         return u;
-
-    // The higher-rank signed type wins only when it can represent every value
-    // of the lower-rank unsigned type. On this target that requires more bits.
     if (s->size > u->size)
         return s;
-
     return unsigned_integer_type(s);
 }
 
@@ -245,10 +215,17 @@ static bool is_scalar_operand(Type *ty) {
         return false;
     if (is_numeric(ty) || ty->kind == TY_PTR)
         return true;
-
-    // Array and function designators undergo the standard conversions to
-    // pointers in scalar value contexts such as !, &&, ||, and comparisons.
     return ty->kind == TY_ARRAY || ty->kind == TY_FUNC;
+}
+
+static bool is_object_pointer_operand(Type *ty) {
+    if (!ty)
+        return false;
+    if (ty->kind == TY_ARRAY)
+        return ty->base && ty->base->kind != TY_VOID && ty->base->kind != TY_FUNC;
+    if (ty->kind != TY_PTR || !ty->base)
+        return false;
+    return ty->base->kind != TY_VOID && ty->base->kind != TY_FUNC;
 }
 
 void add_type(Node *node) {
@@ -289,11 +266,6 @@ void add_type(Node *node) {
             node->ty = node->lhs->ty;
             return;
         }
-        // Subtraction is not commutative: only pointer - integer is a valid
-        // pointer-valued form.  A pointer on the right (notably the parser's
-        // internal `0 - operand` representation of unary minus) must not turn
-        // an otherwise-invalid expression such as `-ptr` or `-array` into
-        // pointer arithmetic.
         if (node->rhs->ty && node->rhs->ty->base)
             error("invalid arithmetic operands");
         if (!is_numeric(node->lhs->ty) || !is_numeric(node->rhs->ty))
@@ -321,9 +293,6 @@ void add_type(Node *node) {
     case ND_SHR:
         if (!is_integer(node->lhs->ty) || !is_integer(node->rhs->ty))
             error("integer operands required");
-        // Each operand is integer-promoted independently; unlike ordinary
-        // arithmetic there is no common type, and the result has the promoted
-        // type of the left operand.
         node->ty = integer_promotion(node->lhs->ty);
         return;
 
@@ -331,9 +300,7 @@ void add_type(Node *node) {
     case ND_NEG:
         if (!is_numeric(node->lhs->ty))
             error("numeric operand required");
-        node->ty = is_integer(node->lhs->ty)
-                     ? integer_promotion(node->lhs->ty)
-                     : node->lhs->ty;
+        node->ty = is_integer(node->lhs->ty) ? integer_promotion(node->lhs->ty) : node->lhs->ty;
         return;
 
     case ND_BITNOT:
@@ -357,16 +324,23 @@ void add_type(Node *node) {
 
     case ND_EQ:
     case ND_NE:
-    case ND_LT:
-    case ND_LE:
         if (!is_scalar_operand(node->lhs->ty) || !is_scalar_operand(node->rhs->ty))
             error("scalar operands required for comparison operator");
         node->ty = ty_int;
         return;
 
+    case ND_LT:
+    case ND_LE:
+        if ((is_numeric(node->lhs->ty) && is_numeric(node->rhs->ty)) ||
+            (is_object_pointer_operand(node->lhs->ty) &&
+             is_object_pointer_operand(node->rhs->ty))) {
+            node->ty = ty_int;
+            return;
+        }
+        error("invalid operands for relational comparison");
+        return;
+
     case ND_FUNCALL:
-        // Function-call return types are still resolved as int until the
-        // SysV floating-point function ABI work lands.
         node->ty = ty_int;
         return;
 
@@ -407,9 +381,6 @@ void add_type(Node *node) {
         node->ty = node->var->ty;
         return;
     case ND_MEMBER:
-        // Accessing a member through a const/volatile aggregate carries those
-        // qualifiers onto the member lvalue. This makes both `s.x` and
-        // `p->x` honor a qualified struct/union object.
         node->ty = qualify_type(node->member->ty,
                                 node->lhs->ty && node->lhs->ty->is_const,
                                 node->lhs->ty && node->lhs->ty->is_volatile);
