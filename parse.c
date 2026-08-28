@@ -247,11 +247,13 @@ static Node *unary(Token **rest, Token *tok);
 static Node *postfix(Token **rest, Token *tok);
 static Node *primary(Token **rest, Token *tok);
 typedef struct {
+    bool is_auto;
     bool is_static;
     bool is_extern;
     bool is_register;
     bool is_inline;
     bool is_noreturn;
+    int storage_class_count;
     int align;
 } DeclAttrs;
 
@@ -308,7 +310,7 @@ static bool is_typename(Token *tok) {
 // (storage-class-specifier | type-qualifier | type-name)
 static bool is_decl_start(Token *tok) {
     if (is_typename(tok)) return true;
-    if (equal(tok, "static") || equal(tok, "extern")) return true;
+    if (equal(tok, "auto") || equal(tok, "static") || equal(tok, "extern")) return true;
     if (equal(tok, "const") || equal(tok, "volatile") || equal(tok, "restrict")) return true;
     if (equal(tok, "register") || equal(tok, "inline")) return true;
     if (equal(tok, "_Alignas") || equal(tok, "_Noreturn")) return true;
@@ -773,8 +775,8 @@ static Type *record_decl(Token **rest, Token *tok, bool is_union) {
     while (!equal(tok, "}")) {
         DeclAttrs attrs = {};
         Type *basety = declspec_with_attrs(&tok, tok, &attrs);
-        if (attrs.is_static || attrs.is_extern || attrs.is_register || attrs.is_inline ||
-            attrs.is_noreturn)
+        if (attrs.is_auto || attrs.is_static || attrs.is_extern || attrs.is_register ||
+            attrs.is_inline || attrs.is_noreturn)
             error_at(tok->loc, "storage/function specifier is not allowed on a record member");
         for (bool first = true; !consume(&tok, tok, ";"); first = false) {
             if (!first)
@@ -1161,6 +1163,15 @@ static bool is_restrict_qualifiable_type(Type *ty) {
     return ty->kind == TY_PTR && ty->base && ty->base->kind != TY_FUNC;
 }
 
+static void note_storage_class(DeclAttrs *attrs, Token *tok) {
+    if (!attrs)
+        error_at(tok->loc,
+                 "storage class specifier is not allowed in this declaration context");
+    attrs->storage_class_count++;
+    if (attrs->storage_class_count > 1)
+        error_at(tok->loc, "multiple storage class specifiers in one declaration");
+}
+
 static Type *declspec_impl(Token **rest, Token *tok, DeclAttrs *attrs) {
     Type *ty = NULL;
     bool is_const = false;
@@ -1197,12 +1208,24 @@ static Type *declspec_impl(Token **rest, Token *tok, DeclAttrs *attrs) {
                 restrict_tok = qual_tok;
             continue;
         }
-        if (consume(&tok, tok, "register")) {
-            if (attrs) attrs->is_register = true;
+        Token *storage_tok = tok;
+        if (consume(&tok, tok, "auto")) {
+            note_storage_class(attrs, storage_tok);
+            attrs->is_auto = true;
             continue;
         }
+        storage_tok = tok;
+        if (consume(&tok, tok, "register")) {
+            note_storage_class(attrs, storage_tok);
+            attrs->is_register = true;
+            continue;
+        }
+        Token *inline_tok = tok;
         if (consume(&tok, tok, "inline")) {
-            if (attrs) attrs->is_inline = true;
+            if (!attrs)
+                error_at(inline_tok->loc,
+                         "inline is only allowed in a function declaration");
+            attrs->is_inline = true;
             continue;
         }
         Token *noreturn_tok = tok;
@@ -1213,12 +1236,16 @@ static Type *declspec_impl(Token **rest, Token *tok, DeclAttrs *attrs) {
             attrs->is_noreturn = true;
             continue;
         }
+        storage_tok = tok;
         if (consume(&tok, tok, "static")) {
-            if (attrs) attrs->is_static = true;
+            note_storage_class(attrs, storage_tok);
+            attrs->is_static = true;
             continue;
         }
+        storage_tok = tok;
         if (consume(&tok, tok, "extern")) {
-            if (attrs) attrs->is_extern = true;
+            note_storage_class(attrs, storage_tok);
+            attrs->is_extern = true;
             continue;
         }
 
@@ -1395,7 +1422,17 @@ static Type *func_params(Token **rest, Token *tok, Type *return_ty) {
             break;
         }
 
-        Type *basety = declspec(&tok, tok);
+        DeclAttrs param_attrs = {};
+        Token *param_spec = tok;
+        Type *basety = declspec_with_attrs(&tok, tok, &param_attrs);
+        if (param_attrs.storage_class_count && !param_attrs.is_register)
+            error_at(param_spec->loc,
+                     "only register storage class is allowed on a parameter");
+        if (param_attrs.is_inline || param_attrs.is_noreturn)
+            error_at(param_spec->loc,
+                     "function specifier is not allowed on a parameter");
+        if (param_attrs.align)
+            error_at(param_spec->loc, "_Alignas is not allowed on a parameter");
         Token *name = NULL;
         Type *param_ty = declarator_impl(&tok, tok, basety, &name, true, true);
         param_ty = adjust_param_type(param_ty);
@@ -3011,10 +3048,12 @@ static Node *declaration(Token **rest, Token *tok) {
     if (attrs.align && attrs.is_register)
         error_at(tok->loc, "_Alignas is not allowed on a register object");
     if (equal(tok, ";")) {
+        if (attrs.storage_class_count)
+            error_at(tok->loc, "storage class specifier requires a declarator");
         if (attrs.align)
             error_at(tok->loc, "_Alignas requires an object declarator");
-        if (attrs.is_noreturn)
-            error_at(tok->loc, "_Noreturn requires a function declarator");
+        if (attrs.is_inline || attrs.is_noreturn)
+            error_at(tok->loc, "function specifier requires a function declarator");
         *rest = tok->next;
         return new_node(ND_EXPR_STMT);
     }
@@ -3031,8 +3070,8 @@ static Node *declaration(Token **rest, Token *tok) {
         Type *ty = declarator(&tok, tok, basety, &ident);
         if (attrs.align && ty->kind == TY_FUNC)
             error_at(ident->loc, "_Alignas is not allowed on a function declaration");
-        if (attrs.is_noreturn && ty->kind != TY_FUNC)
-            error_at(ident->loc, "_Noreturn may only declare a function");
+        if ((attrs.is_inline || attrs.is_noreturn) && ty->kind != TY_FUNC)
+            error_at(ident->loc, "function specifier may only declare a function");
         bool inferable_array = is_unknown_bound_array_with_complete_element(ty) &&
                                equal(tok, "=");
         if (!is_extern && is_incomplete_object_type(ty) && !inferable_array)
@@ -3041,8 +3080,9 @@ static Node *declaration(Token **rest, Token *tok) {
         char *name = strndup(ident->loc, ident->len);
         Obj *var;
         if (ty->kind == TY_FUNC) {
-            if (is_static)
-                error_at(ident->loc, "block-scope function declaration cannot be static");
+            if (attrs.is_auto || attrs.is_register || is_static)
+                error_at(ident->loc,
+                         "block-scope function declaration may only use extern storage class");
             var = create_extern_ref(name, ty);
         } else if (is_static) {
             var = create_static_lvar(name);
@@ -4701,20 +4741,26 @@ Program *parse(Token *tok) {
         bool is_extern = attrs.is_extern;
         if (is_static && is_extern)
             error_at(tok->loc, "declaration cannot be both static and extern");
+        if (attrs.is_auto)
+            error_at(tok->loc, "auto storage class is not allowed at file scope");
         if (attrs.is_register)
             error_at(tok->loc, "register storage class is not allowed at file scope");
 
         // Standalone type declaration
         if (consume(&tok, tok, ";")) {
+            if (attrs.storage_class_count)
+                error_at(tok->loc, "storage class specifier requires a declarator");
             if (attrs.align)
                 error_at(tok->loc, "_Alignas requires an object declarator");
-            if (attrs.is_noreturn)
-                error_at(tok->loc, "_Noreturn requires a function declarator");
+            if (attrs.is_inline || attrs.is_noreturn)
+                error_at(tok->loc, "function specifier requires a function declarator");
             continue;
         }
 
         Token *ident;
         Type *ty = declarator(&tok, tok, basety, &ident);
+        if ((attrs.is_inline || attrs.is_noreturn) && ty->kind != TY_FUNC)
+            error_at(ident->loc, "function specifier may only declare a function");
 
         if (ty->kind == TY_FUNC) {
             if (attrs.align)
