@@ -3939,10 +3939,17 @@ static Node *stmt(Token **rest, Token *tok) {
         return node;
     }
 
-    // Labeled statement: ident ":"  stmt
+    // Labeled statement: ident ":"  stmt. Labels have function scope in C,
+    // so the same label name may not be defined twice anywhere in one function,
+    // even when the definitions occur in different nested compound statements.
     if (is_label(tok)) {
+        char *label_name = strndup(tok->loc, tok->len);
+        for (Node *label = current_labels; label; label = label->label_next)
+            if (!strcmp(label_name, label->label_name))
+                error_at(tok->loc, "duplicate label '%s'", label_name);
+
         Node *node = new_node(ND_LABEL);
-        node->label_name = strndup(tok->loc, tok->len);
+        node->label_name = label_name;
         node->unique_label = new_unique_name();
         node->label_next = current_labels;
         current_labels = node;

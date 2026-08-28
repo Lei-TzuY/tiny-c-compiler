@@ -43,11 +43,18 @@ assert_run 5 'int main(void){int x=0; switch(2){case 2:x=5;break;default:x=9;} r
 assert_run 46 'int main(void){int s=0; for(int i=0;i<5;i++){switch(i){case 1:continue;case 3:break;default:s+=i;} s+=10;} return s;}'
 assert_run 6 'int main(void){int s=0; for(int i=0;i<3;i++){for(int j=0;j<4;j++){if(j==2) break; s++;}} return s;}'
 assert_run 3 'int main(void){int i=0; while(i<3){switch(i){case 0:i++;continue;default:i++;break;}} return i;}'
+assert_run 5 'int main(void){goto done; return 1; done: return 5;}'
+assert_run 6 'int main(void){int L=6; goto L; L: return L;}'
+assert_run 7 'int f(void){same:return 3;} int g(void){same:return 4;} int main(void){return f()+g();}'
 
 assert_reject_msg 'break statement not within loop or switch' 'int main(void){break;}'
 assert_reject_msg 'continue statement not within loop' 'int main(void){continue;}'
 assert_reject_msg 'break statement not within loop or switch' 'int main(void){if(1){break;} return 0;}'
 assert_reject_msg 'continue statement not within loop' 'int main(void){switch(1){default:continue;} return 0;}'
 assert_reject_msg 'continue statement not within loop' 'int main(void){{{continue;}}}'
+assert_reject_msg "duplicate label 'L'" 'int main(void){L:; L:; return 0;}'
+assert_reject_msg "duplicate label 'L'" 'int main(void){L:; {L:;} return 0;}'
+assert_reject_msg "duplicate label 'done'" 'int main(void){goto done; done:; {done:;} return 0;}'
+assert_reject_msg 'undefined label: missing' 'int main(void){goto missing; return 0;}'
 
 echo 'All control-flow context tests passed!'
