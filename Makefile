@@ -47,6 +47,7 @@ test: minicc
 	bash ./test/control_flow_context.sh
 	bash ./test/arithmetic_conversions.sh
 	bash ./test/alignof.sh
+	bash ./test/alignas.sh
 	bash ./test/sizeof_alignof_size_t.sh
 	bash ./test/static_assert.sh
 	bash ./test/generic_selection.sh

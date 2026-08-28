@@ -246,7 +246,18 @@ static Node *mul(Token **rest, Token *tok);
 static Node *unary(Token **rest, Token *tok);
 static Node *postfix(Token **rest, Token *tok);
 static Node *primary(Token **rest, Token *tok);
+typedef struct {
+    bool is_static;
+    bool is_extern;
+    bool is_register;
+    bool is_inline;
+    int align;
+} DeclAttrs;
+
 static Type *declspec(Token **rest, Token *tok);
+static Type *declspec_with_attrs(Token **rest, Token *tok, DeclAttrs *attrs);
+static int validate_requested_alignment(Type *ty, int requested, Token *at);
+static void apply_object_alignment(Obj *var, Type *ty, int requested, Token *at);
 static Type *declarator_impl(Token **rest, Token *tok, Type *ty, Token **ident,
                              bool allow_abstract);
 static Type *type_suffix(Token **rest, Token *tok, Type *ty);
@@ -295,6 +306,7 @@ static bool is_decl_start(Token *tok) {
     if (equal(tok, "static") || equal(tok, "extern")) return true;
     if (equal(tok, "const") || equal(tok, "volatile")) return true;
     if (equal(tok, "register") || equal(tok, "inline")) return true;
+    if (equal(tok, "_Alignas")) return true;
     return false;
 }
 
@@ -730,7 +742,10 @@ static Type *record_decl(Token **rest, Token *tok, bool is_union) {
     Member *cur = &head;
     bool has_flexible_member = false;
     while (!equal(tok, "}")) {
-        Type *basety = declspec(&tok, tok);
+        DeclAttrs attrs = {};
+        Type *basety = declspec_with_attrs(&tok, tok, &attrs);
+        if (attrs.is_static || attrs.is_extern || attrs.is_register || attrs.is_inline)
+            error_at(tok->loc, "storage/function specifier is not allowed on a record member");
         for (bool first = true; !consume(&tok, tok, ";"); first = false) {
             if (!first)
                 tok = skip(tok, ",");
@@ -759,6 +774,7 @@ static Type *record_decl(Token **rest, Token *tok, bool is_union) {
             Member *m = calloc(1, sizeof(Member));
             m->name = strndup(ident->loc, ident->len);
             m->ty = mty;
+            m->align = validate_requested_alignment(mty, attrs.align, ident);
             cur = cur->next = m;
         }
     }
@@ -770,7 +786,7 @@ static Type *record_decl(Token **rest, Token *tok, bool is_union) {
         for (Member *m = head.next; m; m = m->next) {
             if (m->ty->size > size)
                 size = m->ty->size;
-            int ma = m->ty->align > 0 ? m->ty->align : 1;
+            int ma = m->align > 0 ? m->align : (m->ty->align > 0 ? m->ty->align : 1);
             if (ma > align)
                 align = ma;
             m->offset = 0;
@@ -779,7 +795,7 @@ static Type *record_decl(Token **rest, Token *tok, bool is_union) {
     } else {
         int offset = 0;
         for (Member *m = head.next; m; m = m->next) {
-            int ma = m->ty->align > 0 ? m->ty->align : 1;
+            int ma = m->align > 0 ? m->align : (m->ty->align > 0 ? m->ty->align : 1);
             offset = align_up(offset, ma);
             m->offset = offset;
             offset += m->ty->size;
@@ -1049,12 +1065,77 @@ static Type *enum_decl(Token **rest, Token *tok) {
     return ty_int;
 }
 
-static Type *declspec(Token **rest, Token *tok) {
+static int parse_alignment_specifier(Token **rest, Token *tok) {
+    Token *kw = tok;
+    tok = skip(tok->next, "(");
+    int align = 0;
+
+    if (is_typename(tok) || equal(tok, "const") || equal(tok, "volatile")) {
+        Type *aty = type_name(&tok, tok);
+        if (!aty || aty->kind == TY_VOID || aty->kind == TY_FUNC ||
+            is_incomplete_object_type(aty))
+            error_at(kw->loc, "_Alignas type must be a complete object type");
+        align = aty->align > 0 ? aty->align : 1;
+    } else {
+        Node *expr_node = ternary(&tok, tok);
+        add_type(expr_node);
+        if (!is_integer(expr_node->ty))
+            error_at(kw->loc, "_Alignas requires an integer constant expression or type name");
+        int64_t raw = eval_const_expr(expr_node);
+        if (expr_node->ty->is_unsigned) {
+            uint64_t value = (uint64_t)cast_const_integer(raw, expr_node->ty);
+            if (value > INT32_MAX)
+                error_at(kw->loc, "_Alignas value is out of range");
+            align = (int)value;
+        } else {
+            int64_t value = cast_const_integer(raw, expr_node->ty);
+            if (value < 0 || value > INT32_MAX)
+                error_at(kw->loc, "_Alignas value is out of range");
+            align = (int)value;
+        }
+    }
+
+    tok = skip(tok, ")");
+    if (align != 0 && ((align & (align - 1)) != 0 || align > 16))
+        error_at(kw->loc, "unsupported _Alignas value; expected 0 or a power of two up to 16");
+    *rest = tok;
+    return align;
+}
+
+static int validate_requested_alignment(Type *ty, int requested, Token *at) {
+    if (!requested)
+        return 0;
+    if (!ty || ty->kind == TY_VOID || ty->kind == TY_FUNC)
+        error_at(at->loc, "_Alignas may only be applied to an object type");
+    int natural = ty->align > 0 ? ty->align : 1;
+    if (requested < natural)
+        error_at(at->loc, "_Alignas cannot weaken the natural alignment");
+    return requested;
+}
+
+static void apply_object_alignment(Obj *var, Type *ty, int requested, Token *at) {
+    requested = validate_requested_alignment(ty, requested, at);
+    if (!requested)
+        return;
+    if (var->align && var->align != requested)
+        error_at(at->loc, "conflicting _Alignas requirements for '%s'", var->name);
+    var->align = requested;
+}
+
+static Type *declspec_impl(Token **rest, Token *tok, DeclAttrs *attrs) {
     Type *ty = NULL;
     bool is_const = false;
     bool is_volatile = false;
 
     while (is_decl_start(tok)) {
+        if (equal(tok, "_Alignas")) {
+            if (!attrs)
+                error_at(tok->loc, "_Alignas is not allowed in this declaration context");
+            int a = parse_alignment_specifier(&tok, tok);
+            if (a > attrs->align)
+                attrs->align = a;
+            continue;
+        }
         if (consume(&tok, tok, "const")) {
             is_const = true;
             continue;
@@ -1063,9 +1144,22 @@ static Type *declspec(Token **rest, Token *tok) {
             is_volatile = true;
             continue;
         }
-        if (consume(&tok, tok, "register") || consume(&tok, tok, "inline") ||
-            consume(&tok, tok, "static") || consume(&tok, tok, "extern"))
+        if (consume(&tok, tok, "register")) {
+            if (attrs) attrs->is_register = true;
             continue;
+        }
+        if (consume(&tok, tok, "inline")) {
+            if (attrs) attrs->is_inline = true;
+            continue;
+        }
+        if (consume(&tok, tok, "static")) {
+            if (attrs) attrs->is_static = true;
+            continue;
+        }
+        if (consume(&tok, tok, "extern")) {
+            if (attrs) attrs->is_extern = true;
+            continue;
+        }
 
         if (consume(&tok, tok, "_Bool"))  { ty = ty_bool; continue; }
         if (consume(&tok, tok, "float"))  { ty = ty_float; continue; }
@@ -1138,6 +1232,15 @@ static Type *declspec(Token **rest, Token *tok) {
     *rest = tok;
     ty = ty ? ty : ty_int;
     return qualify_type(ty, is_const, is_volatile);
+}
+
+static Type *declspec(Token **rest, Token *tok) {
+    return declspec_impl(rest, tok, NULL);
+}
+
+static Type *declspec_with_attrs(Token **rest, Token *tok, DeclAttrs *attrs) {
+    *attrs = (DeclAttrs){};
+    return declspec_impl(rest, tok, attrs);
 }
 
 static Type *adjust_param_type(Type *ty) {
@@ -2682,9 +2785,18 @@ static void parse_automatic_aggregate_subobject(Node **tail, Node *lhs, Type *ty
 
 // declaration = declspec (declarator ("=" (expr | "{" initializer "}"))?)
 //               ("," declarator ("=" (expr | "{" initializer "}"))?)* ";"
-static Node *declaration(Token **rest, Token *tok, bool is_static, bool is_extern) {
-    Type *basety = declspec(&tok, tok);
+static Node *declaration(Token **rest, Token *tok) {
+    DeclAttrs attrs = {};
+    Type *basety = declspec_with_attrs(&tok, tok, &attrs);
+    bool is_static = attrs.is_static;
+    bool is_extern = attrs.is_extern;
+    if (is_static && is_extern)
+        error_at(tok->loc, "declaration cannot be both static and extern");
+    if (attrs.align && attrs.is_register)
+        error_at(tok->loc, "_Alignas is not allowed on a register object");
     if (equal(tok, ";")) {
+        if (attrs.align)
+            error_at(tok->loc, "_Alignas requires an object declarator");
         *rest = tok->next;
         return new_node(ND_EXPR_STMT);
     }
@@ -2699,6 +2811,8 @@ static Node *declaration(Token **rest, Token *tok, bool is_static, bool is_exter
 
         Token *ident;
         Type *ty = declarator(&tok, tok, basety, &ident);
+        if (attrs.align && ty->kind == TY_FUNC)
+            error_at(ident->loc, "_Alignas is not allowed on a function declaration");
         bool inferable_array = is_unknown_bound_array_with_complete_element(ty) &&
                                equal(tok, "=");
         if (!is_extern && is_incomplete_object_type(ty) && !inferable_array)
@@ -2719,6 +2833,7 @@ static Node *declaration(Token **rest, Token *tok, bool is_static, bool is_exter
             var = create_lvar(name);
             var->ty = ty;
         }
+        apply_object_alignment(var, ty, attrs.align, ident);
 
         if (!equal(tok, "="))
             continue;
@@ -3165,11 +3280,7 @@ static Node *stmt(Token **rest, Token *tok) {
         if (equal(tok, ";")) {
             tok = skip(tok, ";");
         } else if (is_decl_start(tok)) {
-            bool is_s = consume(&tok, tok, "static");
-            bool is_e = consume(&tok, tok, "extern");
-            consume(&tok, tok, "register");
-            consume(&tok, tok, "inline");
-            node->init = declaration(&tok, tok, is_s, is_e);
+            node->init = declaration(&tok, tok);
         } else {
             node->init = new_node(ND_EXPR_STMT);
             node->init->lhs = expr(&tok, tok);
@@ -3236,14 +3347,10 @@ static Node *stmt(Token **rest, Token *tok) {
         return node;
     }
 
-    // Declaration (with optional static/extern)
-    if (is_decl_start(tok)) {
-        bool is_s = consume(&tok, tok, "static");
-        bool is_e = consume(&tok, tok, "extern");
-        consume(&tok, tok, "register");
-        consume(&tok, tok, "inline");
-        return declaration(rest, tok, is_s, is_e);
-    }
+    // Declaration (storage classes, qualifiers and alignment specifiers may
+    // appear in any declaration-specifier order).
+    if (is_decl_start(tok))
+        return declaration(rest, tok);
 
     Node *node = new_node(ND_EXPR_STMT);
     if (!equal(tok, ";"))
@@ -4353,21 +4460,28 @@ Program *parse(Token *tok) {
             continue;
         }
 
-        // Storage class specifiers
-        bool is_static = consume(&tok, tok, "static");
-        bool is_extern = consume(&tok, tok, "extern");
-        consume(&tok, tok, "inline");
-
-        Type *basety = declspec(&tok, tok);
+        DeclAttrs attrs = {};
+        Type *basety = declspec_with_attrs(&tok, tok, &attrs);
+        bool is_static = attrs.is_static;
+        bool is_extern = attrs.is_extern;
+        if (is_static && is_extern)
+            error_at(tok->loc, "declaration cannot be both static and extern");
+        if (attrs.is_register)
+            error_at(tok->loc, "register storage class is not allowed at file scope");
 
         // Standalone type declaration
-        if (consume(&tok, tok, ";"))
+        if (consume(&tok, tok, ";")) {
+            if (attrs.align)
+                error_at(tok->loc, "_Alignas requires an object declarator");
             continue;
+        }
 
         Token *ident;
         Type *ty = declarator(&tok, tok, basety, &ident);
 
         if (ty->kind == TY_FUNC) {
+            if (attrs.align)
+                error_at(ident->loc, "_Alignas is not allowed on a function declaration");
             char *name = strndup(ident->loc, ident->len);
             bool is_definition = !equal(tok, ";");
 
@@ -4437,6 +4551,7 @@ Program *parse(Token *tok) {
                     error_at(ident->loc, "variable has incomplete type");
 
                 Obj *var = register_global_symbol(ident, ty, is_static, is_extern);
+                apply_object_alignment(var, ty, attrs.align, ident);
                 ty = var->ty;
 
                 if (equal(tok, "=") && object_has_initializer(var))

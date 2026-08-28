@@ -1550,7 +1550,8 @@ static int align_up_cg(int n, int a) { return (n + a - 1) / a * a; }
 // location counter, so a one-byte object emitted immediately before a long,
 // pointer, double or record would otherwise leave the later symbol misaligned.
 static void emit_data_alignment(Obj *var) {
-    int align = var->ty && var->ty->align > 0 ? var->ty->align : 1;
+    int align = var->align > 0 ? var->align
+                               : (var->ty && var->ty->align > 0 ? var->ty->align : 1);
     if (align > 1)
         printf("  .balign %d\n", align);
 }
@@ -1573,7 +1574,8 @@ static void assign_lvar_offsets(Program *prog) {
         }
 
         for (Obj *var = fn->locals; var; var = var->next) {
-            int align = var->ty->align > 0 ? var->ty->align : 1;
+            int align = var->align > 0 ? var->align
+                                       : (var->ty->align > 0 ? var->ty->align : 1);
             offset += var->ty->size;
             offset = align_up_cg(offset, align);
             var->offset = -offset;
