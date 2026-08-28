@@ -32,6 +32,7 @@ test: minicc
 	bash ./test/semantic_assignments.sh
 	bash ./test/expression_operators.sh
 	bash ./test/unary_plus.sh
+	bash ./test/logical_scalar.sh
 	bash ./test/pointer_arithmetic.sh
 	bash ./test/lvalue_semantics.sh
 	bash ./test/type_qualifiers.sh
