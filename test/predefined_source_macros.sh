@@ -54,3 +54,43 @@ rm -f tmp-source-header.h tmp-source-macros.c tmp-source-macros.s tmp-source-mac
       tmp-line-if.c tmp-line-if.s tmp-line-if tmp-source-stdin.s tmp-source-stdin
 
 echo 'All predefined __LINE__/__FILE__ tests passed!'
+
+cat > tmp-line-remap-header.h <<'EOF'
+#line 40 "virtual-header.h"
+int remapped_header_line(void) { return __LINE__; }
+const char *remapped_header_file(void) { return __FILE__; }
+EOF
+
+cat > tmp-line-remap.c <<'EOF'
+#define TARGET_LINE 200
+#define TARGET_FILE "generated-input.c"
+#line TARGET_LINE TARGET_FILE
+int remapped_line = __LINE__;
+const char *remapped_file = __FILE__;
+#include "tmp-line-remap-header.h"
+int streq2(const char *a, const char *b) {
+  while (*a && *a == *b) { a++; b++; }
+  return *a == *b;
+}
+#line 700
+int second_line = __LINE__;
+#line 900
+#if __LINE__ != 900
+#error #line must affect __LINE__ in conditionals
+#endif
+int main(void) {
+  if (remapped_line != 200) return 1;
+  if (!streq2(remapped_file, "generated-input.c")) return 2;
+  if (remapped_header_line() != 40) return 3;
+  if (!streq2(remapped_header_file(), "virtual-header.h")) return 4;
+  if (second_line != 700) return 5;
+  if (!streq2(__FILE__, "generated-input.c")) return 6;
+  return 0;
+}
+EOF
+./minicc tmp-line-remap.c > tmp-line-remap.s
+cc -o tmp-line-remap tmp-line-remap.s
+./tmp-line-remap
+echo "OK(predefined source macros): #line remaps line/file and include context"
+rm -f tmp-line-remap-header.h tmp-line-remap.c tmp-line-remap.s tmp-line-remap
+echo 'All #line directive tests passed!'
