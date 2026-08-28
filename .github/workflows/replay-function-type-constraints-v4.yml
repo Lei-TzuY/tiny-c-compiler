@@ -1,0 +1,25 @@
+name: Replay function type constraints v4
+on:
+  push:
+    branches:
+      - agent/function-type-constraints-v4
+permissions:
+  contents: write
+jobs:
+  replay:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Replay validated permanent commit
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin agent/function-type-constraints
+          git cherry-pick 500a6bce07ed9d551c1ecf3e8948c267f92decf7
+      - name: Test
+        run: make clean && make test
+      - name: Push rebased implementation
+        run: git push origin HEAD:agent/function-type-constraints-v4
