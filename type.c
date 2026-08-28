@@ -255,6 +255,84 @@ static bool is_pointer_operand(Type *ty) {
     return ty && (ty->kind == TY_PTR || ty->kind == TY_ARRAY || ty->kind == TY_FUNC);
 }
 
+static Type *pointer_operand_target(Type *ty) {
+    if (!ty)
+        return NULL;
+    if (ty->kind == TY_PTR || ty->kind == TY_ARRAY)
+        return ty->base;
+    if (ty->kind == TY_FUNC)
+        return ty;
+    return NULL;
+}
+
+static Type *equality_type_identity(Type *ty) {
+    return ty && ty->origin ? ty->origin : ty;
+}
+
+static bool equality_type_compatible(Type *a, Type *b, bool ignore_top_qual) {
+    if (a == b)
+        return true;
+    if (!a || !b || a->kind != b->kind)
+        return false;
+    if (!ignore_top_qual &&
+        (a->is_const != b->is_const || a->is_volatile != b->is_volatile))
+        return false;
+
+    switch (a->kind) {
+    case TY_CHAR:
+    case TY_SHORT:
+    case TY_INT:
+    case TY_LONG:
+    case TY_LLONG:
+        return a->is_unsigned == b->is_unsigned;
+    case TY_BOOL:
+    case TY_VOID:
+    case TY_FLOAT:
+    case TY_DOUBLE:
+        return true;
+    case TY_PTR:
+        return equality_type_compatible(a->base, b->base, false);
+    case TY_ARRAY:
+        return equality_type_compatible(a->base, b->base, false) &&
+               (!a->array_len || !b->array_len || a->array_len == b->array_len);
+    case TY_STRUCT:
+        return equality_type_identity(a) == equality_type_identity(b);
+    case TY_FUNC: {
+        if (!equality_type_compatible(a->return_ty, b->return_ty, false))
+            return false;
+        if (!a->has_prototype || !b->has_prototype)
+            return true;
+        if (a->is_variadic != b->is_variadic)
+            return false;
+
+        Obj *pa = a->params;
+        Obj *pb = b->params;
+        while (pa && pb) {
+            if (!equality_type_compatible(pa->ty, pb->ty, true))
+                return false;
+            pa = pa->param_next;
+            pb = pb->param_next;
+        }
+        return !pa && !pb;
+    }
+    }
+    return false;
+}
+
+static bool pointer_equality_compatible(Type *lhs, Type *rhs) {
+    Type *a = pointer_operand_target(lhs);
+    Type *b = pointer_operand_target(rhs);
+    if (!a || !b)
+        return false;
+
+    if (a->kind == TY_VOID || b->kind == TY_VOID) {
+        Type *other = a->kind == TY_VOID ? b : a;
+        return other->kind != TY_FUNC;
+    }
+
+    return equality_type_compatible(a, b, true);
+}
+
 static bool is_null_pointer_constant(Node *node) {
     // Keep this deliberately narrow until the integer constant-expression
     // evaluator is available here: an integer literal 0 is the canonical null
@@ -383,7 +461,8 @@ void add_type(Node *node) {
     case ND_EQ:
     case ND_NE:
         if ((is_numeric(node->lhs->ty) && is_numeric(node->rhs->ty)) ||
-            (is_pointer_operand(node->lhs->ty) && is_pointer_operand(node->rhs->ty)) ||
+            (is_pointer_operand(node->lhs->ty) && is_pointer_operand(node->rhs->ty) &&
+             pointer_equality_compatible(node->lhs->ty, node->rhs->ty)) ||
             (is_pointer_operand(node->lhs->ty) && is_null_pointer_constant(node->rhs)) ||
             (is_null_pointer_constant(node->lhs) && is_pointer_operand(node->rhs->ty))) {
             node->ty = ty_int;

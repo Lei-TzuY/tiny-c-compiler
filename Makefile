@@ -34,6 +34,7 @@ test: minicc
 	bash ./test/unary_plus.sh
 	bash ./test/logical_scalar.sh
 	bash ./test/comparison_scalar.sh
+	bash ./test/pointer_equality.sh
 	bash ./test/pointer_arithmetic.sh
 	bash ./test/lvalue_semantics.sh
 	bash ./test/type_qualifiers.sh
