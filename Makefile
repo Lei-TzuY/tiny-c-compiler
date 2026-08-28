@@ -23,6 +23,7 @@ test: minicc
 	bash ./test/enum_scope.sh
 	bash ./test/ordinary_namespace.sh
 	bash ./test/enum_constexpr_tags.sh
+	bash ./test/enum_value_range.sh
 	bash ./test/abi_stack_args.sh
 	bash ./test/prototype_params.sh
 	bash ./test/parameter_array_qualifiers.sh

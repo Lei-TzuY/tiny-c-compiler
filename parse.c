@@ -1080,6 +1080,28 @@ int64_t eval_const_expr(Node *node) {
     }
 }
 
+// C11 enumerator identifiers have type int, and every enumerator value
+// must be representable as int. Evaluate using the expression's actual signedness
+// first so large unsigned constants cannot masquerade as negative int64_t values.
+static int64_t eval_enum_value(Node *node, Token *at) {
+    add_type(node);
+    if (!node->ty || !is_integer(node->ty))
+        error_at(at->loc, "enumerator value must be an integer constant expression");
+
+    int64_t raw = eval_const_expr(node);
+    if (node->ty->is_unsigned) {
+        uint64_t value = (uint64_t)cast_const_integer(raw, node->ty);
+        if (value > INT32_MAX)
+            error_at(at->loc, "enumerator value is not representable as int");
+        return (int64_t)value;
+    }
+
+    int64_t value = cast_const_integer(raw, node->ty);
+    if (value < INT32_MIN || value > INT32_MAX)
+        error_at(at->loc, "enumerator value is not representable as int");
+    return value;
+}
+
 static Type *enum_decl(Token **rest, Token *tok) {
     char *tag_name = NULL;
 
@@ -1113,7 +1135,8 @@ static Type *enum_decl(Token **rest, Token *tok) {
     }
 
     tok = skip(tok, "{");
-    int64_t val = 0;
+    int64_t next_val = 0;
+    bool implicit_value_valid = true;
 
     while (!equal(tok, "}")) {
         if (tok->kind != TK_IDENT)
@@ -1122,12 +1145,24 @@ static Type *enum_decl(Token **rest, Token *tok) {
         Token *enumerator = tok;
         tok = tok->next;
 
+        int64_t val;
         if (consume(&tok, tok, "=")) {
             Node *value = ternary(&tok, tok);
-            val = eval_const_expr(value);
+            val = eval_enum_value(value, enumerator);
+        } else {
+            if (!implicit_value_valid)
+                error_at(enumerator->loc,
+                         "implicit enumerator value is not representable as int");
+            val = next_val;
         }
 
-        push_enum_const(enumerator, val++);
+        push_enum_const(enumerator, val);
+        if (val == INT32_MAX) {
+            implicit_value_valid = false;
+        } else {
+            next_val = val + 1;
+            implicit_value_valid = true;
+        }
 
         if (consume(&tok, tok, ","))
             continue;
