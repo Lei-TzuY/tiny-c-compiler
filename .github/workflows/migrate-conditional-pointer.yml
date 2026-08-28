@@ -1,0 +1,214 @@
+name: Migrate conditional pointer typing
+
+on:
+  push:
+    branches:
+      - automation/assignment-compatibility
+
+permissions:
+  contents: write
+
+jobs:
+  migrate:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: automation/assignment-compatibility
+      - name: Apply conditional operator type fix
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path('type.c')
+          s = p.read_text()
+          anchor = '''static Type *pointer_operand_target(Type *ty) {
+              if (!ty)
+                  return NULL;
+              if (ty->kind == TY_PTR || ty->kind == TY_ARRAY)
+                  return ty->base;
+              if (ty->kind == TY_FUNC)
+                  return ty;
+              return NULL;
+          }
+          '''
+          helper = anchor + '''
+          static Type *decay_pointer_operand_type(Type *ty) {
+              if (!ty)
+                  return NULL;
+              if (ty->kind == TY_PTR)
+                  return ty;
+              if (ty->kind == TY_ARRAY)
+                  return pointer_to(ty->base);
+              if (ty->kind == TY_FUNC)
+                  return pointer_to(ty);
+              return NULL;
+          }
+          '''
+          if anchor not in s:
+              raise SystemExit('pointer operand anchor not found')
+          s = s.replace(anchor, helper, 1)
+
+          anchor2 = '''static bool pointer_equality_compatible(Type *lhs, Type *rhs) {
+              Type *a = pointer_operand_target(lhs);
+              Type *b = pointer_operand_target(rhs);
+              if (!a || !b)
+                  return false;
+
+              if (a->kind == TY_VOID || b->kind == TY_VOID) {
+                  Type *other = a->kind == TY_VOID ? b : a;
+                  return other->kind != TY_FUNC;
+              }
+
+              return equality_type_compatible(a, b, true);
+          }
+          '''
+          helper2 = anchor2 + '''
+          static Type *conditional_pointer_type(Type *lhs, Type *rhs) {
+              if (!pointer_equality_compatible(lhs, rhs))
+                  return NULL;
+
+              Type *lp = decay_pointer_operand_type(lhs);
+              Type *rp = decay_pointer_operand_type(rhs);
+              Type *a = lp->base;
+              Type *b = rp->base;
+
+              if (a->kind == TY_VOID || b->kind == TY_VOID) {
+                  Type *base = qualify_type(ty_void,
+                                            a->is_const || b->is_const,
+                                            a->is_volatile || b->is_volatile);
+                  return pointer_to(base);
+              }
+
+              Type *base = qualify_type(a, b->is_const, b->is_volatile);
+              return pointer_to(base);
+          }
+          '''
+          if anchor2 not in s:
+              raise SystemExit('pointer equality anchor not found')
+          s = s.replace(anchor2, helper2, 1)
+
+          old = '''    case ND_TERNARY:
+                  if (is_numeric(node->then->ty) && is_numeric(node->els->ty))
+                      node->ty = get_common_type(node->then->ty, node->els->ty);
+                  else
+                      node->ty = node->then->ty;
+                  return;
+          '''
+          new = '''    case ND_TERNARY:
+                  if (!is_scalar_operand(node->cond->ty))
+                      error("scalar condition required for conditional operator");
+
+                  if (is_numeric(node->then->ty) && is_numeric(node->els->ty)) {
+                      node->ty = get_common_type(node->then->ty, node->els->ty);
+                      return;
+                  }
+
+                  if (is_pointer_operand(node->then->ty) &&
+                      is_null_pointer_constant(node->els)) {
+                      node->ty = decay_pointer_operand_type(node->then->ty);
+                      return;
+                  }
+                  if (is_null_pointer_constant(node->then) &&
+                      is_pointer_operand(node->els->ty)) {
+                      node->ty = decay_pointer_operand_type(node->els->ty);
+                      return;
+                  }
+
+                  if (is_pointer_operand(node->then->ty) &&
+                      is_pointer_operand(node->els->ty)) {
+                      node->ty = conditional_pointer_type(node->then->ty, node->els->ty);
+                      if (!node->ty)
+                          error("incompatible pointer operands for conditional operator");
+                      return;
+                  }
+
+                  if (node->then->ty->kind == TY_VOID && node->els->ty->kind == TY_VOID) {
+                      node->ty = ty_void;
+                      return;
+                  }
+
+                  if (node->then->ty->kind == TY_STRUCT &&
+                      node->els->ty->kind == TY_STRUCT &&
+                      equality_type_compatible(node->then->ty, node->els->ty, true)) {
+                      node->ty = node->then->ty;
+                      return;
+                  }
+
+                  error("invalid operands for conditional operator");
+                  return;
+          '''
+          if old not in s:
+              raise SystemExit('ternary anchor not found')
+          p.write_text(s.replace(old, new, 1))
+
+          t = Path('test/conditional_operator.sh')
+          t.write_text(r'''#!/bin/bash
+          set -eu
+
+          assert_run() {
+            expected="$1"
+            input="$2"
+            printf "%s\n" "$input" > tmp-cond.c
+            ./minicc tmp-cond.c > tmp-cond.s
+            cc -o tmp-cond tmp-cond.s
+            set +e
+            ./tmp-cond
+            actual="$?"
+            set -e
+            if [ "$actual" != "$expected" ]; then
+              echo "conditional operator failed: expected $expected, got $actual"
+              echo "$input"
+              exit 1
+            fi
+            echo "OK(conditional operator): $actual"
+          }
+
+          assert_fail() {
+            input="$1"
+            printf "%s\n" "$input" > tmp-cond-bad.c
+            if ./minicc tmp-cond-bad.c > tmp-cond-bad.s 2>/dev/null; then
+              echo "conditional operator unexpectedly accepted invalid program"
+              echo "$input"
+              exit 1
+            fi
+            echo "OK(conditional operator): rejected invalid program"
+          }
+
+          # A null pointer constant in either arm produces the pointer type.
+          assert_run 7 'int main(){int x=7; int *p=&x; int *q=0 ? 0 : p; return *q;}'
+          assert_run 5 'int main(){int x=5; int *p=1 ? &x : 0; return *p;}'
+
+          # Array and function designators decay in conditional value context.
+          assert_run 4 'int main(){int a[2];a[1]=4;int *p=1 ? a : 0;return p[1];}'
+          assert_run 6 'int f(int x){return x+1;} int main(){int (*p)(int)=0 ? 0 : f;return p(5);}'
+
+          # Compatible object pointers combine pointed-to qualifiers; void* wins
+          # when mixed with an object pointer.
+          assert_run 3 'int main(){int x=3; int *p=&x; const int *cp=&x; const int *q=1?p:cp; return *q;}'
+          assert_run 1 'int main(){int x=1; int *p=&x; void *v=0; void *q=1?p:v; return q!=0;}'
+
+          # The first operand must be scalar, and pointer arms must be compatible.
+          assert_fail 'struct S{int x;}; int main(){struct S s; return s ? 1 : 2;}'
+          assert_fail 'int main(){int *p=0; double *q=0; return (1 ? p : q)!=0;}'
+          assert_fail 'int f(int x){return x;} double g(double x){return x;} int main(){return (1 ? f : g)!=0;}'
+
+          echo 'All conditional-operator tests passed!'
+          ''')
+
+          m = Path('Makefile')
+          ms = m.read_text()
+          anchor3 = '\tbash ./test/pointer_equality.sh\n'
+          if anchor3 not in ms:
+              raise SystemExit('Makefile anchor not found')
+          m.write_text(ms.replace(anchor3, anchor3 + '\tbash ./test/conditional_operator.sh\n', 1))
+          PY
+
+          make test
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add type.c Makefile test/conditional_operator.sh
+          git commit -m 'Fix conditional operator pointer typing'
+          git push origin HEAD:automation/assignment-compatibility
