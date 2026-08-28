@@ -128,4 +128,32 @@ int main() { return 0; }'
 assert_pp_fail '#define TWO(a,b) ((a)+(b))
 int main() { return TWO(1); }'
 
+# #if logical operators must short-circuit unevaluated operands.
+assert_pp_adv 21 '#if 0 && (1 / 0)
+int main() { return 0; }
+#else
+int main() { return 21; }
+#endif'
+
+assert_pp_adv 22 '#if 1 || (1 / 0)
+int main() { return 22; }
+#else
+int main() { return 0; }
+#endif'
+
+# Nested skipped operands are still parsed while remaining unevaluated.
+assert_pp_adv 23 '#define ZERO 0
+#if ZERO && (1 || (7 % 0))
+int main() { return 0; }
+#elif 1 || (0 && (9 / 0))
+int main() { return 23; }
+#else
+int main() { return 0; }
+#endif'
+
+# A zero divisor in an actually evaluated operand remains an error.
+assert_pp_fail '#if 1 && (1 / 0)
+int main() { return 0; }
+#endif'
+
 echo "All advanced preprocessor tests passed!"

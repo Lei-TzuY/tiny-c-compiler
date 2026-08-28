@@ -282,6 +282,7 @@ static void handle_endif(void) {
 typedef struct {
     const char *p;
     int depth;
+    bool suppress_eval;
 } PPExpr;
 
 static int64_t pp_logor(PPExpr *e);
@@ -378,12 +379,16 @@ static int64_t pp_mul(PPExpr *e) {
         if (pp_consume(e, "*")) val *= pp_unary(e);
         else if (pp_consume(e, "/")) {
             int64_t rhs = pp_unary(e);
-            if (!rhs) error("division by zero in #if expression");
-            val /= rhs;
+            if (!e->suppress_eval) {
+                if (!rhs) error("division by zero in #if expression");
+                val /= rhs;
+            }
         } else if (pp_consume(e, "%")) {
             int64_t rhs = pp_unary(e);
-            if (!rhs) error("division by zero in #if expression");
-            val %= rhs;
+            if (!e->suppress_eval) {
+                if (!rhs) error("division by zero in #if expression");
+                val %= rhs;
+            }
         } else return val;
     }
 }
@@ -458,8 +463,13 @@ static int64_t pp_bitor(PPExpr *e) {
 static int64_t pp_logand(PPExpr *e) {
     int64_t val = pp_bitor(e);
     while (pp_consume(e, "&&")) {
+        bool saved = e->suppress_eval;
+        if (!saved && !val)
+            e->suppress_eval = true;
         int64_t rhs = pp_bitor(e);
-        val = val && rhs;
+        e->suppress_eval = saved;
+        if (!saved)
+            val = val && rhs;
     }
     return val;
 }
@@ -467,8 +477,13 @@ static int64_t pp_logand(PPExpr *e) {
 static int64_t pp_logor(PPExpr *e) {
     int64_t val = pp_logand(e);
     while (pp_consume(e, "||")) {
+        bool saved = e->suppress_eval;
+        if (!saved && val)
+            e->suppress_eval = true;
         int64_t rhs = pp_logand(e);
-        val = val || rhs;
+        e->suppress_eval = saved;
+        if (!saved)
+            val = val || rhs;
     }
     return val;
 }
