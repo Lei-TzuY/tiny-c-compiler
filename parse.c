@@ -4657,22 +4657,24 @@ static Node *primary(Token **rest, Token *tok) {
             return new_num(ec->val);
         }
 
-        // Direct function calls keep a named callee for codegen. A variable
-        // of function-pointer type falls through to ND_VAR and is handled by
-        // the ordinary postfix-call path, sharing the same argument parser.
+        // Direct function calls keep a named callee for codegen. C99 and
+        // later require a visible declaration at the call site; a definition or
+        // declaration appearing later in the translation unit cannot retroactively
+        // supply the old implicit-function declaration. A function-pointer object
+        // falls through to ND_VAR and the ordinary postfix-call path.
         if (equal(tok->next, "(")) {
             Obj *fn = find_var(tok);
-            if (!fn && find_typedef(tok))
-                error_at(tok->loc, "typedef name is not callable");
-            if (!fn || fn->is_function) {
+            if (!fn) {
+                if (find_typedef(tok))
+                    error_at(tok->loc, "typedef name is not callable");
+                error_at(tok->loc, "call to undeclared function");
+            }
+            if (fn->is_function) {
                 Node *node = new_node(ND_FUNCALL);
                 node->funcname = strndup(tok->loc, tok->len);
 
-                Type *fty = NULL;
-                if (fn && fn->ty && fn->ty->kind == TY_FUNC) {
-                    fty = fn->ty;
-                    node->ty = fty->return_ty;
-                }
+                Type *fty = fn->ty;
+                node->ty = fty->return_ty;
                 check_supported_function_abi(fty, tok);
 
                 tok = skip(tok->next, "(");
