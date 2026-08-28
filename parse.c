@@ -3144,15 +3144,20 @@ static void parse_automatic_aggregate_subobject(Node **tail, Node *lhs, Type *ty
                                                  Token *where) {
     if (!is_initializer_aggregate(ty))
         error_at(where->loc, "internal error: automatic aggregate initializer expected");
-    if (ty->kind == TY_ARRAY && ty->array_len == 0)
+
+    bool infer_array = ty->kind == TY_ARRAY && ty->array_len == 0;
+    if (infer_array && (lhs->kind != ND_VAR || !lhs->var))
         error_at(where->loc, "nested incomplete arrays are not supported");
 
-    // Automatic aggregates are zero-initialized before their explicit
-    // initializer-list entries are applied.  This is especially important for
-    // repeated nested designators: later writes must preserve earlier siblings
-    // rather than re-zeroing the whole enclosing subobject.
-    append_zero_initializer(tail, lhs, ty, where);
+    // Automatic aggregates are normally zero-initialized before explicit
+    // writes. An outermost unknown-bound array has no size yet, so defer its
+    // zero-fill until the initializer determines the completed array type.
+    Node *before_init = *tail;
+    if (!infer_array)
+        append_zero_initializer(tail, lhs, ty, where);
     bool braced = consume(&tok, tok, "{");
+    if (infer_array && !braced)
+        error_at(where->loc, "unknown-bound array initializer requires braces");
 
     // A braced nested initializer is a real initializer-list, so it may contain
     // designators at any entry.  Reuse the same designator-path parser used by
@@ -3161,6 +3166,7 @@ static void parse_automatic_aggregate_subobject(Node **tail, Node *lhs, Type *ty
     if (braced) {
         if (ty->kind == TY_ARRAY) {
             int next_index = 0;
+            int max_index = -1;
             bool first = true;
 
             while (!equal(tok, "}")) {
@@ -3186,14 +3192,18 @@ static void parse_automatic_aggregate_subobject(Node **tail, Node *lhs, Type *ty
                     parse_automatic_designated_initializer(tail, target.lhs,
                                                             target.ty, &tok, tok,
                                                             where);
+                    if (index > max_index)
+                        max_index = index;
                     next_index = index + 1;
                     continue;
                 }
 
-                if (next_index >= ty->array_len)
+                if (ty->array_len > 0 && next_index >= ty->array_len)
                     error_at(tok->loc, "excess elements in array initializer");
 
                 int index = next_index++;
+                if (index > max_index)
+                    max_index = index;
                 Node *child = new_unary(ND_DEREF,
                                         new_add(lhs, new_num(index)));
                 if (append_automatic_string_array_initializer(tail, child,
@@ -3209,6 +3219,20 @@ static void parse_automatic_aggregate_subobject(Node **tail, Node *lhs, Type *ty
                 Node *rhs = assign(&tok, tok);
                 Node *a = new_initializer_assign(child, rhs, where);
                 *tail = (*tail)->next = new_unary(ND_EXPR_STMT, a);
+            }
+
+            if (infer_array) {
+                if (max_index < 0)
+                    error_at(where->loc, "cannot infer array size from empty initializer");
+                ty = array_of(ty->base, max_index + 1);
+                lhs->var->ty = ty;
+                lhs->ty = ty;
+
+                Node zero_head = {};
+                Node *zero_cur = &zero_head;
+                append_zero_initializer(&zero_cur, lhs, ty, where);
+                zero_cur->next = before_init->next;
+                before_init->next = zero_head.next;
             }
         } else {
             Member *next_member = ty->members;
@@ -4407,9 +4431,10 @@ static Node *compound_literal(Token **rest, Token *tok, Type *ty,
                               Token *type_tok) {
     if (!ty || ty->kind == TY_VOID || ty->kind == TY_FUNC)
         error_at(type_tok->loc, "compound literal requires an object type");
-    if (is_incomplete_object_type(ty))
+    if (is_incomplete_object_type(ty) &&
+        !is_unknown_bound_array_with_complete_element(ty))
         error_at(type_tok->loc,
-                 "compound literal currently requires a complete object type");
+                 "compound literal requires a complete object type or an unknown-bound array with complete element type");
     if (!equal(tok, "{"))
         error_at(tok->loc, "expected '{' after compound literal type name");
 
@@ -4427,10 +4452,12 @@ static Node *compound_literal(Token **rest, Token *tok, Type *ty,
         Token *after_string = NULL;
         Token *string_tok = string_initializer_token(tok, &after_string);
         if (string_tok && is_character_array(ty)) {
+            prepare_string_array_type(var, &ty, string_tok);
             append_automatic_string_array_initializer(&tail, root, ty, &tok, tok);
         } else if (ty->kind == TY_ARRAY || ty->kind == TY_STRUCT) {
             parse_automatic_aggregate_subobject(&tail, root, ty, &tok, tok,
                                                 type_tok);
+            ty = var->ty;
         } else {
             tok = skip(tok, "{");
             if (equal(tok, "}"))
@@ -4466,14 +4493,12 @@ static Node *compound_literal(Token **rest, Token *tok, Type *ty,
         Token *after_string = NULL;
         Token *string_tok = string_initializer_token(tok, &after_string);
         if (string_tok && is_character_array(ty)) {
-            validate_string_array_initializer(ty, string_tok);
+            prepare_string_array_type(var, &ty, string_tok);
             var->init_data = build_string_array_image(ty, string_tok);
             tok = after_string;
         } else if (ty->kind == TY_ARRAY || ty->kind == TY_STRUCT) {
-            Type *parsed = parse_static_image_initializer(var, &tok, tok, ty, 0);
-            if (parsed != ty)
-                error_at(type_tok->loc,
-                         "compound literal array bound inference is not yet supported");
+            ty = parse_static_image_initializer(var, &tok, tok, ty, 0);
+            var->ty = ty;
         } else {
             tok = skip(tok, "{");
             if (equal(tok, "}"))
