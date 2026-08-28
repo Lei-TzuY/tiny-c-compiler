@@ -37,6 +37,8 @@ assert_run 0 'struct S { char tag; double values[]; }; int main(void){ return si
 assert_run 0 'struct S { int n, data[]; }; int main(void){ return sizeof(struct S)!=4; }'
 # Pointers to flexible-array records and pointers to incomplete arrays remain valid.
 assert_run 0 'struct S { int n; int data[]; }; struct S *p; int (*q)[]; int main(void){ return sizeof(p)!=8 || sizeof(q)!=8; }'
+# Qualified clones of an incomplete tagged record observe its later FAM completion.
+assert_run 0 'struct S; typedef const struct S CS; struct S { int n; int data[]; }; CS *p; int main(void){ return sizeof(p)!=8; }'
 
 # Unknown outer bounds are still inferred from ordinary automatic/static/global initializers.
 assert_run 0 'int main(void){ int a[]={1,2,3}; return sizeof(a)!=12 || a[2]!=3; }'
@@ -78,6 +80,8 @@ assert_reject 'union U { int n; int data[]; }; int main(void){ return 0; }'
 # A record containing a flexible array member cannot itself be embedded or arrayed.
 assert_reject 'struct S { int n; int data[]; }; struct T { struct S s; }; int main(void){ return 0; }'
 assert_reject 'struct S { int n; int data[]; }; struct S a[2]; int main(void){ return 0; }'
+# Qualified forward-declaration clones carry the same FAM restriction after completion.
+assert_reject 'struct S; typedef const struct S CS; struct S { int n; int data[]; }; struct T { CS s; }; int main(void){ return 0; }'
 
 # Existing positive-bound/constant-expression constraints remain enforced.
 assert_reject 'int a[0]; int main(void){ return 0; }'
