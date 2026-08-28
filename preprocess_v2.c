@@ -311,7 +311,8 @@ static char *pp_read_ident(PPExpr *e) {
     return strndup(start, (size_t)(e->p - start));
 }
 
-static int64_t eval_pp_expr_depth(const char *text, int depth);
+static int64_t eval_pp_expr_depth(const char *text, int depth, bool suppress_eval);
+static int64_t pp_eval_function_macro(PPExpr *e, Macro *m);
 
 static int64_t pp_primary(PPExpr *e) {
     pp_skip_space(e);
@@ -337,7 +338,9 @@ static int64_t pp_primary(PPExpr *e) {
         } else if (m && m->builtin == BUILTIN_MACRO_FILE) {
             error("__FILE__ expands to a string and is not valid in #if arithmetic");
         } else if (m && m->is_objlike && e->depth < 64) {
-            result = eval_pp_expr_depth(m->body, e->depth + 1);
+            result = eval_pp_expr_depth(m->body, e->depth + 1, e->suppress_eval);
+        } else if (m && !m->is_objlike && e->depth < 64) {
+            result = pp_eval_function_macro(e, m);
         }
         free(ident);
         return result;
@@ -512,17 +515,17 @@ static int64_t pp_conditional(PPExpr *e) {
     return cond ? then_val : else_val;
 }
 
-static int64_t eval_pp_expr_depth(const char *text, int depth) {
-    PPExpr e = {.p = text, .depth = depth};
+static int64_t eval_pp_expr_depth(const char *text, int depth, bool suppress_eval) {
+    PPExpr e = {.p = text, .depth = depth, .suppress_eval = suppress_eval};
     int64_t val = pp_conditional(&e);
     pp_skip_space(&e);
     if (*e.p)
         error("unexpected token in #if expression near '%s'", e.p);
-    return val;
+    return suppress_eval ? 0 : val;
 }
 
 static int64_t eval_pp_expr(const char *text) {
-    return eval_pp_expr_depth(text, 0);
+    return eval_pp_expr_depth(text, 0, false);
 }
 
 // ---- Macro expansion ---------------------------------------------------------
@@ -781,6 +784,55 @@ static char **parse_macro_args(const char **pp, int *argc_out) {
     *pp = p;
     *argc_out = argc;
     return args;
+}
+
+static int64_t pp_eval_function_macro(PPExpr *e, Macro *m) {
+    const char *call = e->p;
+    while (*call == ' ' || *call == '\t')
+        call++;
+    if (*call != '(')
+        return 0;
+
+    int argc = 0;
+    const char *after_call = call;
+    char **args = parse_macro_args(&after_call, &argc);
+    if ((!m->is_variadic && argc != m->num_params) ||
+        (m->is_variadic && argc < m->num_params))
+        error("macro '%s' argument count mismatch", m->name);
+
+    int slots = m->num_params + (m->is_variadic ? 1 : 0);
+    char **raw = calloc(slots ? slots : 1, sizeof(char *));
+    char **expanded = calloc(slots ? slots : 1, sizeof(char *));
+
+    for (int i = 0; i < m->num_params; i++)
+        raw[i] = strdup(args[i]);
+    if (m->is_variadic)
+        raw[m->num_params] = join_variadic_args(args, m->num_params, argc);
+
+    for (int i = 0; i < slots; i++) {
+        bool arg_comment = false;
+        expanded[i] = expand_text(raw[i], NULL, &arg_comment);
+    }
+
+    char *subst = substitute_func_macro(m, raw, expanded);
+    Expansion frame = {.macro = m};
+    bool nested_comment = false;
+    char *rescanned = expand_text(subst, &frame, &nested_comment);
+    int64_t result = eval_pp_expr_depth(rescanned, e->depth + 1, e->suppress_eval);
+
+    for (int i = 0; i < argc; i++)
+        free(args[i]);
+    free(args);
+    for (int i = 0; i < slots; i++) {
+        free(raw[i]);
+        free(expanded[i]);
+    }
+    free(raw);
+    free(expanded);
+    free(subst);
+    free(rescanned);
+    e->p = after_call;
+    return result;
 }
 
 static char *expand_text(const char *text, Expansion *stack, bool *in_block_comment) {

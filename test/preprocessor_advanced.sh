@@ -193,4 +193,56 @@ assert_pp_fail '#if 1 ? 2
 int main() { return 0; }
 #endif'
 
+# Function-like macros are expanded in #if expressions, including nested calls.
+assert_pp_adv 28 '#define ID(x) (x)
+#if ID(1)
+int main() { return 28; }
+#else
+int main() { return 0; }
+#endif'
+
+assert_pp_adv 29 '#define ADD(a,b) ((a) + (b))
+#define TWICE(x) ADD((x), (x))
+#if TWICE(3) == 6
+int main() { return 29; }
+#else
+int main() { return 0; }
+#endif'
+
+# Arguments are macro-expanded before ordinary substitution.
+assert_pp_adv 30 '#define ONE 1
+#define ID(x) (x)
+#if ID(ONE)
+int main() { return 30; }
+#else
+int main() { return 0; }
+#endif'
+
+# Short-circuited macro expansions are parsed without evaluating zero divisors.
+assert_pp_adv 31 '#define BAD() (1 / 0)
+#if 0 && BAD()
+int main() { return 0; }
+#else
+int main() { return 31; }
+#endif'
+
+assert_pp_adv 32 '#define BAD (1 / 0)
+#if 1 || BAD
+int main() { return 32; }
+#else
+int main() { return 0; }
+#endif'
+
+# A selected function-like macro arm still diagnoses division by zero.
+assert_pp_fail '#define BAD() (1 / 0)
+#if BAD()
+int main() { return 0; }
+#endif'
+
+# Function-like macro argument count is validated in #if expressions.
+assert_pp_fail '#define PICK(x) (x)
+#if PICK(1, 2)
+int main() { return 0; }
+#endif'
+
 echo "All advanced preprocessor tests passed!"
