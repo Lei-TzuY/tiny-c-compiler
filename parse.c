@@ -1592,13 +1592,17 @@ static Type *declarator_impl(Token **rest, Token *tok, Type *ty, Token **ident,
     if (equal(tok, "(")) {
         Token *start = tok;
         Type dummy = {};
-        declarator_impl(&tok, start->next, &dummy, ident, allow_abstract,
-                        parameter_declarator);
+        Type *shape = declarator_impl(&tok, start->next, &dummy, ident,
+                                      allow_abstract, parameter_declarator);
         tok = skip(tok, ")");
-        // A suffix outside a parenthesized declarator is not the direct
-        // outermost array derivation of the parameter identifier. Parameter
-        // array qualifiers/static are therefore forbidden at this level.
-        ty = type_suffix(rest, tok, ty, false);
+
+        // Redundant grouping around the identifier does not stop a following
+        // array suffix from being the parameter's outermost array derivation:
+        // `int (a)[const 3]` adjusts just like `int a[const 3]`. If the grouped
+        // declarator introduced any real derived type (`(*a)`, `(a[2])`, ...),
+        // the following array is nested and may not carry parameter-only syntax.
+        bool direct_parameter_array = parameter_declarator && shape == &dummy;
+        ty = type_suffix(rest, tok, ty, direct_parameter_array);
         return declarator_impl(&tok, start->next, ty, ident, allow_abstract,
                                parameter_declarator);
     }

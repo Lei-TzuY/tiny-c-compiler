@@ -51,9 +51,12 @@ assert_reject 'int f(int a[const 3]){a=0;return 0;} int main(void){return 0;}'
 # Only the direct outermost array derivation may carry the special syntax.
 assert_run 18 'int f(int a[static 2][3]){return a[1][2];} int main(void){int a[2][3]={{0},{0,0,18}};return f(a);}'
 assert_run 19 'int f(int *a[static 2]){return *a[1];} int main(void){int x=0,y=19;int *a[2]={&x,&y};return f(a);}'
+assert_run 20 'int f(int (a)[const 3]){return a[0];} int main(void){int a[3]={20};return f(a);}'
+assert_run 21 'int f(int ((a))[restrict static 3]){return a[0];} int main(void){int a[3]={21};return f(a);}'
 assert_reject 'int f(int a[3][const 4]){return 0;} int main(void){return 0;}'
 assert_reject 'int f(int a[3][static 4]){return 0;} int main(void){return 0;}'
 assert_reject 'int f(int (*a)[static 3]){return 0;} int main(void){return 0;}'
+assert_reject 'int f(int (*a)[const 3]){return 0;} int main(void){return 0;}'
 
 # Parameter-only syntax must not leak into ordinary array declarators/type names.
 assert_reject 'int a[const 3]; int main(void){return 0;}'
