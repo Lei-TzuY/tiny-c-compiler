@@ -5,6 +5,8 @@ on:
     paths:
       - apply-alignas.py
       - .github/workflows/apply-alignas.yml
+permissions:
+  contents: write
 jobs:
   apply:
     runs-on: ubuntu-latest
