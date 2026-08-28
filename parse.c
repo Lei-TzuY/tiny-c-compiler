@@ -434,6 +434,25 @@ static bool is_addressable_expr(Node *node) {
     return is_lvalue(node);
 }
 
+// The controlling expression of a C11 generic selection is not
+// evaluated, but it is still in an ordinary value context. Array and function
+// designators therefore decay to pointers, and top-level object qualifiers are
+// removed by value conversion. Qualifiers nested below a pointer remain part of
+// the controlling type and must still participate in association matching.
+static Type *generic_control_type(Node *node) {
+    add_type(node);
+    Type *ty = node->ty;
+    if (!ty)
+        return NULL;
+    if (ty->kind == TY_ARRAY)
+        return pointer_to(ty->base);
+    if (ty->kind == TY_FUNC)
+        return pointer_to(ty);
+    if (ty->is_const || ty->is_volatile || ty->is_restrict)
+        return ty->origin ? ty->origin : ty;
+    return ty;
+}
+
 static Node *new_checked_addr(Node *operand, Token *op) {
     if (!is_addressable_expr(operand))
         error_at(op->loc, "address-of operand is not an lvalue or function designator");
@@ -4451,7 +4470,7 @@ static Node *primary(Token **rest, Token *tok) {
         Token *op = tok;
         tok = skip(tok->next, "(");
         Node *control = assign(&tok, tok);
-        add_type(control);
+        Type *control_ty = generic_control_type(control);
         tok = skip(tok, ",");
 
         typedef struct GenericType GenericType;
@@ -4494,7 +4513,7 @@ static Node *primary(Token **rest, Token *tok) {
 
                 tok = skip(tok, ":");
                 Node *expr_node = assign(&tok, tok);
-                if (type_compatible(control->ty, assoc_ty)) {
+                if (type_compatible(control_ty, assoc_ty)) {
                     if (selected)
                         error_at(type_tok->loc,
                                  "controlling type matches multiple generic associations");
