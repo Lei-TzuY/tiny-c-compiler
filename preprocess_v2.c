@@ -1,12 +1,19 @@
 #include "minicc.h"
 #include "preprocess_v2.h"
 
+typedef enum {
+    BUILTIN_MACRO_NONE,
+    BUILTIN_MACRO_LINE,
+    BUILTIN_MACRO_FILE,
+} BuiltinMacroKind;
+
 typedef struct Macro Macro;
 struct Macro {
     Macro *next;
     char *name;
     bool is_objlike;
     bool is_variadic;
+    BuiltinMacroKind builtin;
     char **params;
     int num_params;
     char *body;
@@ -36,6 +43,8 @@ typedef struct {
 static Macro *macros;
 static CondStack *cond_stack;
 static int preprocess_depth;
+static const char *current_pp_file;
+static int current_pp_line;
 
 static void sb_init(StrBuf *sb, size_t cap) {
     sb->cap = cap < 64 ? 64 : cap;
@@ -143,6 +152,17 @@ static void add_macro(char *name, bool is_objlike, bool is_variadic,
     m->params = params;
     m->num_params = num_params;
     m->body = body;
+    m->next = macros;
+    macros = m;
+}
+
+static void add_builtin_macro(const char *name, BuiltinMacroKind builtin) {
+    undef_macro(name);
+    Macro *m = calloc(1, sizeof(Macro));
+    m->name = strdup(name);
+    m->is_objlike = true;
+    m->builtin = builtin;
+    m->body = strdup("");
     m->next = macros;
     macros = m;
 }
@@ -308,8 +328,13 @@ static int64_t pp_primary(PPExpr *e) {
     if (ident) {
         Macro *m = find_macro(ident);
         int64_t result = 0;
-        if (m && m->is_objlike && e->depth < 64)
+        if (m && m->builtin == BUILTIN_MACRO_LINE) {
+            result = current_pp_line;
+        } else if (m && m->builtin == BUILTIN_MACRO_FILE) {
+            error("__FILE__ expands to a string and is not valid in #if arithmetic");
+        } else if (m && m->is_objlike && e->depth < 64) {
             result = eval_pp_expr_depth(m->body, e->depth + 1);
+        }
         free(ident);
         return result;
     }
@@ -609,6 +634,19 @@ static char *substitute_func_macro(Macro *m, char **raw_args, char **expanded_ar
     return pasted;
 }
 
+static char *quote_pp_string(const char *text) {
+    StrBuf out;
+    sb_init(&out, strlen(text) + 8);
+    sb_putc(&out, '"');
+    for (const char *p = text; *p; p++) {
+        if (*p == '\\' || *p == '"')
+            sb_putc(&out, '\\');
+        sb_putc(&out, *p);
+    }
+    sb_putc(&out, '"');
+    return out.data;
+}
+
 static void copy_quoted(StrBuf *out, const char **pp, char quote) {
     const char *p = *pp;
     sb_putc(out, *p++);
@@ -751,6 +789,21 @@ static char *expand_text(const char *text, Expansion *stack, bool *in_block_comm
             continue;
         }
 
+        if (m->builtin == BUILTIN_MACRO_LINE) {
+            char buf[32];
+            snprintf(buf, sizeof(buf), "%d", current_pp_line);
+            sb_puts(&out, buf);
+            free(ident);
+            continue;
+        }
+        if (m->builtin == BUILTIN_MACRO_FILE) {
+            char *quoted = quote_pp_string(current_pp_file ? current_pp_file : "<stdin>");
+            sb_puts(&out, quoted);
+            free(quoted);
+            free(ident);
+            continue;
+        }
+
         Expansion frame = {.next = stack, .macro = m};
         if (m->is_objlike) {
             bool nested_comment = false;
@@ -878,12 +931,16 @@ static void parse_define(char *start) {
     add_macro(name, is_objlike, is_variadic, params, num_params, strdup(start));
 }
 
-char *preprocess_v2(char *input) {
+char *preprocess_v2_source(char *input, const char *source_name) {
+    const char *saved_file = current_pp_file;
+    int saved_line = current_pp_line;
     bool outermost = preprocess_depth++ == 0;
     if (outermost) {
         add_macro(strdup("__STDC__"), true, false, NULL, 0, strdup("1"));
         add_macro(strdup("__STDC_VERSION__"), true, false, NULL, 0, strdup("201112L"));
         add_macro(strdup("__STDC_HOSTED__"), true, false, NULL, 0, strdup("1"));
+        add_builtin_macro("__LINE__", BUILTIN_MACRO_LINE);
+        add_builtin_macro("__FILE__", BUILTIN_MACRO_FILE);
     }
 
     CondStack *base_cond = cond_stack;
@@ -893,7 +950,11 @@ char *preprocess_v2(char *input) {
     bool in_block_comment = false;
 
     char *p = spliced;
+    int line_no = 0;
     while (*p) {
+        line_no++;
+        current_pp_file = source_name ? source_name : "<stdin>";
+        current_pp_line = line_no;
         char *line_start = p;
         while (*p && *p != '\n') p++;
         size_t line_len = (size_t)(p - line_start);
@@ -955,7 +1016,7 @@ char *preprocess_v2(char *input) {
                     content = owned ? owned : get_builtin_header(hname);
                     if (!content)
                         error("cannot include %s", hname);
-                    char *sub = preprocess_v2((char *)content);
+                    char *sub = preprocess_v2_source((char *)content, hname);
                     sb_puts(&out, sub);
                     if (out.len && out.data[out.len - 1] != '\n')
                         sb_putc(&out, '\n');
@@ -984,5 +1045,11 @@ char *preprocess_v2(char *input) {
     if (cond_stack != base_cond)
         error("unterminated conditional directive");
     preprocess_depth--;
+    current_pp_file = saved_file;
+    current_pp_line = saved_line;
     return out.data;
+}
+
+char *preprocess_v2(char *input) {
+    return preprocess_v2_source(input, "<stdin>");
 }

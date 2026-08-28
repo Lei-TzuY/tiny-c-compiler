@@ -50,7 +50,8 @@ int main(int argc, char **argv) {
         error("%s: invalid number of arguments", argv[0]);
 
     char *user_input = read_file(argv[1]);
-    char *preprocessed = preprocess_v2(user_input);
+    const char *source_name = !strcmp(argv[1], "-") ? "<stdin>" : argv[1];
+    char *preprocessed = preprocess_v2_source(user_input, source_name);
     Token *tok = tokenize(preprocessed);
     Program *prog = parse(tok);
 
