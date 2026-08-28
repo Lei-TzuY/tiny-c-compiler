@@ -216,6 +216,9 @@ static char *get_builtin_header(char *name) {
                "#define false 0\n"
                "#define __bool_true_false_are_defined 1\n";
     }
+    if (!strcmp(name, "stdnoreturn.h")) {
+        return "#define noreturn _Noreturn\n";
+    }
     if (!strcmp(name, "stdarg.h")) {
         return "typedef struct __minicc_va_list {\n"
                "  unsigned int gp_offset;\n"

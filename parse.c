@@ -251,6 +251,7 @@ typedef struct {
     bool is_extern;
     bool is_register;
     bool is_inline;
+    bool is_noreturn;
     int align;
 } DeclAttrs;
 
@@ -308,7 +309,7 @@ static bool is_decl_start(Token *tok) {
     if (equal(tok, "static") || equal(tok, "extern")) return true;
     if (equal(tok, "const") || equal(tok, "volatile")) return true;
     if (equal(tok, "register") || equal(tok, "inline")) return true;
-    if (equal(tok, "_Alignas")) return true;
+    if (equal(tok, "_Alignas") || equal(tok, "_Noreturn")) return true;
     return false;
 }
 
@@ -746,7 +747,8 @@ static Type *record_decl(Token **rest, Token *tok, bool is_union) {
     while (!equal(tok, "}")) {
         DeclAttrs attrs = {};
         Type *basety = declspec_with_attrs(&tok, tok, &attrs);
-        if (attrs.is_static || attrs.is_extern || attrs.is_register || attrs.is_inline)
+        if (attrs.is_static || attrs.is_extern || attrs.is_register || attrs.is_inline ||
+            attrs.is_noreturn)
             error_at(tok->loc, "storage/function specifier is not allowed on a record member");
         for (bool first = true; !consume(&tok, tok, ";"); first = false) {
             if (!first)
@@ -1157,6 +1159,14 @@ static Type *declspec_impl(Token **rest, Token *tok, DeclAttrs *attrs) {
         }
         if (consume(&tok, tok, "inline")) {
             if (attrs) attrs->is_inline = true;
+            continue;
+        }
+        Token *noreturn_tok = tok;
+        if (consume(&tok, tok, "_Noreturn")) {
+            if (!attrs)
+                error_at(noreturn_tok->loc,
+                         "_Noreturn is only allowed in a function declaration");
+            attrs->is_noreturn = true;
             continue;
         }
         if (consume(&tok, tok, "static")) {
@@ -2871,6 +2881,8 @@ static Node *declaration(Token **rest, Token *tok) {
     if (equal(tok, ";")) {
         if (attrs.align)
             error_at(tok->loc, "_Alignas requires an object declarator");
+        if (attrs.is_noreturn)
+            error_at(tok->loc, "_Noreturn requires a function declarator");
         *rest = tok->next;
         return new_node(ND_EXPR_STMT);
     }
@@ -2887,6 +2899,8 @@ static Node *declaration(Token **rest, Token *tok) {
         Type *ty = declarator(&tok, tok, basety, &ident);
         if (attrs.align && ty->kind == TY_FUNC)
             error_at(ident->loc, "_Alignas is not allowed on a function declaration");
+        if (attrs.is_noreturn && ty->kind != TY_FUNC)
+            error_at(ident->loc, "_Noreturn may only declare a function");
         bool inferable_array = is_unknown_bound_array_with_complete_element(ty) &&
                                equal(tok, "=");
         if (!is_extern && is_incomplete_object_type(ty) && !inferable_array)
@@ -4564,6 +4578,8 @@ Program *parse(Token *tok) {
         if (consume(&tok, tok, ";")) {
             if (attrs.align)
                 error_at(tok->loc, "_Alignas requires an object declarator");
+            if (attrs.is_noreturn)
+                error_at(tok->loc, "_Noreturn requires a function declarator");
             continue;
         }
 
@@ -4643,6 +4659,8 @@ Program *parse(Token *tok) {
             leave_scope();
             cur = cur->next = fn;
         } else {
+            if (attrs.is_noreturn)
+                error_at(ident->loc, "_Noreturn may only declare a function");
             // Global variable(s) (possibly with initializer)
             for (;;) {
                 if (!is_extern && is_incomplete_object_type(ty) &&

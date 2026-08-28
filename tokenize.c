@@ -176,7 +176,7 @@ static bool is_keyword(Token *tok) {
                          "short", "long", "signed", "unsigned", "goto",
                          "static", "extern", "const", "volatile",
                          "inline", "register", "_Bool", "float", "double",
-                         "_Alignas"};
+                         "_Alignas", "_Noreturn"};
 
     for (int i = 0; i < sizeof(kw) / sizeof(*kw); i++)
         if (equal(tok, kw[i]))
