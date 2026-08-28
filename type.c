@@ -251,6 +251,17 @@ static bool is_scalar_operand(Type *ty) {
     return ty->kind == TY_ARRAY || ty->kind == TY_FUNC;
 }
 
+static bool is_pointer_operand(Type *ty) {
+    return ty && (ty->kind == TY_PTR || ty->kind == TY_ARRAY || ty->kind == TY_FUNC);
+}
+
+static bool is_null_pointer_constant(Node *node) {
+    // Keep this deliberately narrow until the integer constant-expression
+    // evaluator is available here: an integer literal 0 is the canonical null
+    // pointer constant and covers the compiler's existing pointer idioms.
+    return node && node->kind == ND_NUM && is_integer(node->ty) && node->val == 0;
+}
+
 static bool is_object_pointer_operand(Type *ty) {
     if (!ty)
         return false;
@@ -371,9 +382,14 @@ void add_type(Node *node) {
 
     case ND_EQ:
     case ND_NE:
-        if (!is_scalar_operand(node->lhs->ty) || !is_scalar_operand(node->rhs->ty))
-            error("scalar operands required for comparison operator");
-        node->ty = ty_int;
+        if ((is_numeric(node->lhs->ty) && is_numeric(node->rhs->ty)) ||
+            (is_pointer_operand(node->lhs->ty) && is_pointer_operand(node->rhs->ty)) ||
+            (is_pointer_operand(node->lhs->ty) && is_null_pointer_constant(node->rhs)) ||
+            (is_null_pointer_constant(node->lhs) && is_pointer_operand(node->rhs->ty))) {
+            node->ty = ty_int;
+            return;
+        }
+        error("invalid operands for equality comparison");
         return;
 
     case ND_LT:
