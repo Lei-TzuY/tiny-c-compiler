@@ -294,7 +294,8 @@ static int current_loop_depth;
 static bool is_typename(Token *tok) {
     if (equal(tok, "int") || equal(tok, "char") || equal(tok, "void") ||
         equal(tok, "enum") || equal(tok, "struct") || equal(tok, "union") ||
-        equal(tok, "short") || equal(tok, "long") || equal(tok, "unsigned") ||
+        equal(tok, "short") || equal(tok, "long") || equal(tok, "signed") ||
+        equal(tok, "unsigned") ||
         equal(tok, "_Bool") || equal(tok, "float") || equal(tok, "double"))
         return true;
     return find_typedef(tok) != NULL;
@@ -1127,6 +1128,11 @@ static Type *declspec_impl(Token **rest, Token *tok, DeclAttrs *attrs) {
     Type *ty = NULL;
     bool is_const = false;
     bool is_volatile = false;
+    bool saw_signed = false;
+    bool saw_unsigned = false;
+    bool saw_non_signable_type = false;
+    bool saw_typedef_type = false;
+    Token *sign_spec = NULL;
 
     while (is_decl_start(tok)) {
         if (equal(tok, "_Alignas")) {
@@ -1162,11 +1168,11 @@ static Type *declspec_impl(Token **rest, Token *tok, DeclAttrs *attrs) {
             continue;
         }
 
-        if (consume(&tok, tok, "_Bool"))  { ty = ty_bool; continue; }
-        if (consume(&tok, tok, "float"))  { ty = ty_float; continue; }
-        if (consume(&tok, tok, "double")) { ty = ty_double; continue; }
+        if (consume(&tok, tok, "_Bool"))  { saw_non_signable_type = true; ty = ty_bool; continue; }
+        if (consume(&tok, tok, "float"))  { saw_non_signable_type = true; ty = ty_float; continue; }
+        if (consume(&tok, tok, "double")) { saw_non_signable_type = true; ty = ty_double; continue; }
         if (consume(&tok, tok, "char"))   { ty = (ty && ty->is_unsigned) ? ty_uchar : ty_char; continue; }
-        if (consume(&tok, tok, "void"))   { ty = ty_void; continue; }
+        if (consume(&tok, tok, "void"))   { saw_non_signable_type = true; ty = ty_void; continue; }
         if (consume(&tok, tok, "short"))  { ty = (ty && ty->is_unsigned) ? ty_ushort : ty_short; continue; }
 
         if (consume(&tok, tok, "long")) {
@@ -1183,12 +1189,40 @@ static Type *declspec_impl(Token **rest, Token *tok, DeclAttrs *attrs) {
             continue;
         }
 
+        Token *sign_tok = tok;
+        if (consume(&tok, tok, "signed")) {
+            if (saw_signed)
+                error_at(sign_tok->loc, "duplicate 'signed' type specifier");
+            if (saw_unsigned)
+                error_at(sign_tok->loc, "cannot combine 'signed' and 'unsigned'");
+            if (saw_non_signable_type || saw_typedef_type)
+                error_at(sign_tok->loc, "invalid type specifier combination with 'signed'");
+            saw_signed = true;
+            sign_spec = sign_tok;
+            if (!ty)
+                ty = ty_int;
+            else if (ty != ty_int && ty != ty_char && ty != ty_short &&
+                     ty != ty_long && ty != ty_llong)
+                error_at(sign_tok->loc, "invalid type specifier combination with 'signed'");
+            continue;
+        }
+
+        sign_tok = tok;
         if (consume(&tok, tok, "unsigned")) {
+            if (saw_unsigned)
+                error_at(sign_tok->loc, "duplicate 'unsigned' type specifier");
+            if (saw_signed)
+                error_at(sign_tok->loc, "cannot combine 'signed' and 'unsigned'");
+            if (saw_non_signable_type || saw_typedef_type)
+                error_at(sign_tok->loc, "invalid type specifier combination with 'unsigned'");
+            saw_unsigned = true;
+            sign_spec = sign_tok;
             if (ty == ty_char) ty = ty_uchar;
             else if (ty == ty_short) ty = ty_ushort;
             else if (ty == ty_long) ty = ty_ulong;
             else if (ty == ty_llong) ty = ty_ullong;
-            else ty = ty_uint;
+            else if (!ty || ty == ty_int) ty = ty_uint;
+            else error_at(sign_tok->loc, "invalid type specifier combination with 'unsigned'");
             continue;
         }
 
@@ -1198,16 +1232,19 @@ static Type *declspec_impl(Token **rest, Token *tok, DeclAttrs *attrs) {
         }
 
         if (equal(tok, "union")) {
+            saw_non_signable_type = true;
             ty = record_decl(&tok, tok->next, true);
             continue;
         }
 
         if (equal(tok, "struct")) {
+            saw_non_signable_type = true;
             ty = record_decl(&tok, tok->next, false);
             continue;
         }
 
         if (equal(tok, "enum")) {
+            saw_non_signable_type = true;
             ty = enum_decl(&tok, tok->next);
             continue;
         }
@@ -1223,6 +1260,7 @@ static Type *declspec_impl(Token **rest, Token *tok, DeclAttrs *attrs) {
             if (td) {
                 tok = tok->next;
                 ty = td->ty;
+                saw_typedef_type = true;
                 continue;
             }
         }
@@ -1232,6 +1270,8 @@ static Type *declspec_impl(Token **rest, Token *tok, DeclAttrs *attrs) {
 
     *rest = tok;
     ty = ty ? ty : ty_int;
+    if ((saw_signed || saw_unsigned) && saw_non_signable_type)
+        error_at(sign_spec->loc, "signed/unsigned type specifier requires an integer base type");
     return qualify_type(ty, is_const, is_volatile);
 }
 
