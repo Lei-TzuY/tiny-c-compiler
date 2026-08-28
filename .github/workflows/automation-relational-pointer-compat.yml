@@ -2,8 +2,7 @@ name: Automation relational pointer compatibility
 
 on:
   push:
-    branches:
-      - fix/relational-pointer-compatibility
+    branches: [fix/relational-pointer-compatibility]
 
 permissions:
   contents: write
@@ -15,60 +14,13 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Apply focused correctness patch
-        shell: bash
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-
-          p = Path('type.c')
-          s = p.read_text()
-          old = '''        if ((is_numeric(node->lhs->ty) && is_numeric(node->rhs->ty)) ||
-            (is_object_pointer_operand(node->lhs->ty) &&
-             is_object_pointer_operand(node->rhs->ty))) {
-'''
-          new = '''        if ((is_numeric(node->lhs->ty) && is_numeric(node->rhs->ty)) ||
-            (is_object_pointer_operand(node->lhs->ty) &&
-             is_object_pointer_operand(node->rhs->ty) &&
-             pointer_equality_compatible(node->lhs->ty, node->rhs->ty))) {
-'''
-          if old not in s:
-              raise SystemExit('type.c relational comparison block did not match expected main')
-          p.write_text(s.replace(old, new, 1))
-
-          p = Path('test/comparison_scalar.sh')
-          s = p.read_text()
-          old = '''  if ((p != 0) != 1) return 10;
-  return 0;
-'''
-          new = '''  if ((p != 0) != 1) return 10;
-  const int *cp = &a[1];
-  if ((&a[0] < cp) != 1) return 11;
-  return 0;
-'''
-          if old not in s:
-              raise SystemExit('comparison runtime block did not match expected main')
-          s = s.replace(old, new, 1)
-
-          old = '''  'int f(void){return 0;} int main(void){int (*p)(void)=f; return p<=p;}' \\
-  'int main(void){void *p=0; void *q=0; return p<q;}'
-'''
-          new = '''  'int f(void){return 0;} int main(void){int (*p)(void)=f; return p<=p;}' \\
-  'int main(void){void *p=0; void *q=0; return p<q;}' \\
-  'int main(void){int x=0; double y=0; return &x<&y;}' \\
-  'int main(void){struct A{int x;} a; struct B{int x;} b; return &a<=&b;}' \\
-  'int main(void){int x=0; int *p=&x; const int *cp=&x; int **pp=&p; const int **cpp=&cp; return pp<cpp;}'
-'''
-          if old not in s:
-              raise SystemExit('comparison rejection block did not match expected main')
-          p.write_text(s.replace(old, new, 1))
-          PY
+      - name: Apply patch
+        run: python3 automation_patch.py
       - name: Run full test suite
         run: make test
       - name: Commit verified patch
-        shell: bash
         run: |
-          rm -f .github/workflows/automation-relational-pointer-compat.yml
+          rm -f automation_patch.py .github/workflows/automation-relational-pointer-compat.yml
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add -A
