@@ -13,6 +13,7 @@ test: minicc
 	bash ./test/preprocessor.sh
 	bash ./test/preprocessor_advanced.sh
 	bash ./test/predefined_macros.sh
+	bash ./test/predefined_source_macros.sh
 	bash ./test/float.sh
 	bash ./test/float_abi.sh
 	bash ./test/incomplete_tags.sh
