@@ -3727,6 +3727,11 @@ static void require_scalar_condition(Node *cond, Token *keyword,
         error_at(keyword->loc, "%s condition must have scalar type", construct);
 }
 
+static void require_statement_after_label(Token *tok) {
+    if (equal(tok, "_Static_assert") || is_decl_start(tok))
+        error_at(tok->loc, "label must be followed by a statement, not a declaration");
+}
+
 static Node *stmt(Token **rest, Token *tok) {
     if (equal(tok, "_Static_assert")) {
         *rest = parse_static_assertion(tok);
@@ -3839,6 +3844,7 @@ static Node *stmt(Token **rest, Token *tok) {
         current_switch->cases = cv;
 
         tok = skip(tok, ":");
+        require_statement_after_label(tok);
         Node *node = new_node(ND_CASE);
         node->val = val;
         node->unique_label = new_unique_name();
@@ -3855,6 +3861,7 @@ static Node *stmt(Token **rest, Token *tok) {
         current_switch->has_default = true;
 
         tok = skip(tok->next, ":");
+        require_statement_after_label(tok);
         Node *node = new_node(ND_DEFAULT);
         node->unique_label = new_unique_name();
         node->lhs = stmt(rest, tok);
@@ -3954,6 +3961,7 @@ static Node *stmt(Token **rest, Token *tok) {
         node->label_next = current_labels;
         current_labels = node;
         tok = skip(tok->next, ":");
+        require_statement_after_label(tok);
         node->lhs = stmt(rest, tok);
         return node;
     }
