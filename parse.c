@@ -4888,7 +4888,9 @@ static Obj *register_global_symbol(Token *ident, Type *ty, bool is_static,
 // Register a function symbol as a global Obj so it can be used as a value
 // (e.g. function pointer assignment: fp = add;). Redeclarations are checked
 // against the complete recursive function type before metadata is refreshed.
-static void register_function_symbol(char *name, Type *return_ty, bool is_static,
+// Return the canonical symbol so a definition can inherit the effective linkage
+// established by an earlier declaration.
+static Obj *register_function_symbol(char *name, Type *return_ty, bool is_static,
                                      Obj *params, bool is_variadic,
                                      bool has_prototype, bool is_definition) {
     Type *fty = func_type(return_ty);
@@ -4912,7 +4914,7 @@ static void register_function_symbol(char *name, Type *return_ty, bool is_static
         var->is_static = var->is_static || is_static;
         var->is_defined = var->is_defined || is_definition;
         bind_var_in_current_scope(var->name, var, true);
-        return;
+        return var;
     }
 
     Obj *fn_obj = calloc(1, sizeof(Obj));
@@ -4925,6 +4927,7 @@ static void register_function_symbol(char *name, Type *return_ty, bool is_static
     fn_obj->next = globals;
     globals = fn_obj;
     bind_var_in_current_scope(fn_obj->name, fn_obj, false);
+    return fn_obj;
 }
 
 // C99 defines __func__ inside every function as if the implementation inserted
@@ -5015,9 +5018,9 @@ Program *parse(Token *tok) {
 
             // Register the declaration before parsing a body so recursion and
             // function-address expressions inside the definition see it.
-            register_function_symbol(name, ty->return_ty, is_static,
-                                     ty->params, ty->is_variadic, ty->has_prototype,
-                                     is_definition);
+            Obj *fn_symbol = register_function_symbol(
+                name, ty->return_ty, is_static, ty->params, ty->is_variadic,
+                ty->has_prototype, is_definition);
 
             // Prototype only: the recursive declarator has already consumed
             // the complete parameter list.
@@ -5047,7 +5050,7 @@ Program *parse(Token *tok) {
             fn->name = name;
             fn->params = param_head.param_next;
             fn->return_ty = ty->return_ty;
-            fn->is_static = is_static;
+            fn->is_static = fn_symbol->is_static;
             fn->is_variadic = ty->is_variadic;
 
             Type *saved_return_ty = current_return_ty;

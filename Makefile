@@ -50,6 +50,7 @@ test: minicc
 	bash ./test/typedef_storage_class.sh
 	bash ./test/implicit_int_constraints.sh
 	bash ./test/object_linkage_redeclarations.sh
+	bash ./test/function_linkage_emission.sh
 	bash ./test/unresolved_function_calls.sh
 	bash ./test/cast_constraints.sh
 	bash ./test/switch_constraints.sh
