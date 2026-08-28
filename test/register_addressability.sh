@@ -43,6 +43,10 @@ assert_run 0 'int main(void){int x=8;register int *p=&x;return &*p==p?0:1;}'
 assert_run 0 'struct S{int x;};int main(void){struct S s={9};register struct S *p=&s;return &p->x==&s.x?0:1;}'
 assert_run 0 'int f(register int *p){return &*p==p?0:1;}int main(void){int x=1;return f(&x);}'
 
+# register is not part of function type compatibility. A register spelling in
+# a prototype does not make a later non-register definition parameter unaddressable.
+assert_run 0 'int f(register int);int f(int x){return *&x==x?0:1;}int main(void){return f(3);}'
+
 # Unary & may not be applied to an object declared with register storage class.
 assert_reject 'int main(void){register int x=1;int *p=&x;return *p;}'
 assert_reject 'int main(void){register const int x=1;const int *p=&(x);return *p;}'
@@ -53,6 +57,7 @@ assert_reject 'struct I{int x;};struct S{struct I i;};int main(void){register st
 assert_reject 'union U{int x;long y;};int main(void){register union U u={1};int *p=&u.x;return *p;}'
 assert_reject 'int f(register int x){int *p=&x;return *p;}int main(void){return f(1);}'
 assert_reject 'int f(register int *p){int **q=&p;return q!=0;}int main(void){int x;return f(&x);}'
+assert_reject 'int f(int);int f(register int x){int *p=&x;return *p;}int main(void){return f(1);}'
 
 rm -f tmp-register-address.c tmp-register-address.s tmp-register-address \
       tmp-register-address-bad.c tmp-register-address.err
