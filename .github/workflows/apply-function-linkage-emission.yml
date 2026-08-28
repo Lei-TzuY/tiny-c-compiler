@@ -1,0 +1,36 @@
+name: Apply function linkage emission migration
+
+on:
+  push:
+    branches:
+      - agent/function-linkage-emission
+
+permissions:
+  contents: write
+
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/function-linkage-emission
+          fetch-depth: 0
+      - name: Apply function linkage emission migration
+        run: python3 tools/apply_function_linkage_emission.py
+      - name: Audit effective function linkage propagation
+        run: |
+          grep -nE 'register_function_symbol|fn_symbol|fn->is_static' parse.c | head -n 140
+      - name: Validate full suite
+        run: make clean && make test
+      - name: Commit generated source changes
+        run: |
+          if git diff --quiet; then
+            echo "No migration changes to commit"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add parse.c README.md Makefile test/function_linkage_emission.sh
+          git commit -m "Preserve effective function linkage in codegen"
+          git push origin HEAD:agent/function-linkage-emission
