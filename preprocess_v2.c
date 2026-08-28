@@ -285,7 +285,7 @@ typedef struct {
     bool suppress_eval;
 } PPExpr;
 
-static int64_t pp_logor(PPExpr *e);
+static int64_t pp_conditional(PPExpr *e);
 
 static void pp_skip_space(PPExpr *e) {
     while (isspace((unsigned char)*e->p))
@@ -345,7 +345,7 @@ static int64_t pp_primary(PPExpr *e) {
     e->p = saved;
 
     if (pp_consume(e, "(")) {
-        int64_t val = pp_logor(e);
+        int64_t val = pp_conditional(e);
         if (!pp_consume(e, ")"))
             error("expected ')' in #if expression");
         return val;
@@ -488,9 +488,33 @@ static int64_t pp_logor(PPExpr *e) {
     return val;
 }
 
+static int64_t pp_conditional(PPExpr *e) {
+    int64_t cond = pp_logor(e);
+    if (!pp_consume(e, "?"))
+        return cond;
+
+    bool saved = e->suppress_eval;
+    if (!saved && !cond)
+        e->suppress_eval = true;
+    int64_t then_val = pp_conditional(e);
+    e->suppress_eval = saved;
+
+    if (!pp_consume(e, ":"))
+        error("expected ':' in #if conditional expression");
+
+    if (!saved && cond)
+        e->suppress_eval = true;
+    int64_t else_val = pp_conditional(e);
+    e->suppress_eval = saved;
+
+    if (saved)
+        return 0;
+    return cond ? then_val : else_val;
+}
+
 static int64_t eval_pp_expr_depth(const char *text, int depth) {
     PPExpr e = {.p = text, .depth = depth};
-    int64_t val = pp_logor(&e);
+    int64_t val = pp_conditional(&e);
     pp_skip_space(&e);
     if (*e.p)
         error("unexpected token in #if expression near '%s'", e.p);

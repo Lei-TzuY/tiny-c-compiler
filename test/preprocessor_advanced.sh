@@ -156,4 +156,41 @@ assert_pp_fail '#if 1 && (1 / 0)
 int main() { return 0; }
 #endif'
 
+# #if supports the conditional operator and evaluates only the selected arm.
+assert_pp_adv 24 '#if 1 ? 7 : 0
+int main() { return 24; }
+#else
+int main() { return 0; }
+#endif'
+
+assert_pp_adv 25 '#define PICK 0
+#if PICK ? (1 / 0) : 9
+int main() { return 25; }
+#else
+int main() { return 0; }
+#endif'
+
+assert_pp_adv 26 '#if 1 ? 1 : (7 % 0)
+int main() { return 26; }
+#else
+int main() { return 0; }
+#endif'
+
+# Conditional expressions associate to the right and nest in either arm.
+assert_pp_adv 27 '#if 0 ? 0 : 1 ? 3 : 0
+int main() { return 27; }
+#else
+int main() { return 0; }
+#endif'
+
+# The selected arm is still evaluated normally.
+assert_pp_fail '#if 1 ? (1 / 0) : 1
+int main() { return 0; }
+#endif'
+
+# Malformed conditional expressions are diagnosed.
+assert_pp_fail '#if 1 ? 2
+int main() { return 0; }
+#endif'
+
 echo "All advanced preprocessor tests passed!"
