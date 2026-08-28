@@ -16,6 +16,7 @@ test: minicc
 	bash ./test/predefined_macros.sh
 	bash ./test/predefined_source_macros.sh
 	bash ./test/float.sh
+	bash ./test/floating_literals.sh
 	bash ./test/float_abi.sh
 	bash ./test/incomplete_tags.sh
 	bash ./test/incomplete_flexible_arrays.sh
