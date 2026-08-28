@@ -1,0 +1,28 @@
+name: Apply floating literal grammar
+on:
+  push:
+    branches:
+      - agent/floating-literal-grammar
+permissions:
+  contents: write
+jobs:
+  migrate:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Apply migration
+        run: python3 tools/apply_floating_literal_grammar.py
+      - name: Test
+        run: |
+          make clean
+          make test
+      - name: Commit permanent changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add tokenize.c Makefile README.md test/floating_literals.sh
+          git commit -m "Validate C99 floating literal grammar"
+          git push
