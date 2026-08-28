@@ -657,8 +657,13 @@ static bool is_incomplete_object_type(Type *ty) {
     if (ty->kind == TY_STRUCT)
         return ty->is_incomplete;
     if (ty->kind == TY_ARRAY)
-        return is_incomplete_object_type(ty->base);
+        return ty->array_len == 0 || is_incomplete_object_type(ty->base);
     return false;
+}
+
+static bool is_unknown_bound_array_with_complete_element(Type *ty) {
+    return ty && ty->kind == TY_ARRAY && ty->array_len == 0 &&
+           !is_incomplete_object_type(ty->base);
 }
 
 static Type *new_record_type(bool is_union) {
@@ -722,6 +727,7 @@ static Type *record_decl(Token **rest, Token *tok, bool is_union) {
 
     Member head = {};
     Member *cur = &head;
+    bool has_flexible_member = false;
     while (!equal(tok, "}")) {
         Type *basety = declspec(&tok, tok);
         for (bool first = true; !consume(&tok, tok, ";"); first = false) {
@@ -730,8 +736,24 @@ static Type *record_decl(Token **rest, Token *tok, bool is_union) {
 
             Token *ident;
             Type *mty = declarator(&tok, tok, basety, &ident);
-            if (is_incomplete_object_type(mty))
-                error_at(ident->loc, "field has incomplete type");
+            bool flexible = mty->kind == TY_ARRAY && mty->array_len == 0;
+
+            if (flexible) {
+                if (is_union)
+                    error_at(ident->loc, "flexible array member is not allowed in a union");
+                if (!head.next)
+                    error_at(ident->loc,
+                             "flexible array member requires a preceding named member");
+                if (!equal(tok, ";") || !equal(tok->next, "}"))
+                    error_at(ident->loc, "flexible array member must be the last member");
+                has_flexible_member = true;
+            } else {
+                if (is_incomplete_object_type(mty))
+                    error_at(ident->loc, "field has incomplete type");
+                if (mty->kind == TY_STRUCT && mty->has_flexible_array_member)
+                    error_at(ident->loc,
+                             "record containing a flexible array member cannot be embedded");
+            }
 
             Member *m = calloc(1, sizeof(Member));
             m->name = strndup(ident->loc, ident->len);
@@ -769,12 +791,14 @@ static Type *record_decl(Token **rest, Token *tok, bool is_union) {
     ty->align = align;
     ty->members = head.next;
     ty->is_union = is_union;
+    ty->has_flexible_array_member = has_flexible_member;
     ty->is_incomplete = false;
     for (Type *q = ty->qual_next; q; q = q->qual_next) {
         q->size = ty->size;
         q->align = ty->align;
         q->members = ty->members;
         q->is_union = ty->is_union;
+        q->has_flexible_array_member = ty->has_flexible_array_member;
         q->is_incomplete = false;
     }
     *rest = tok;
@@ -1208,7 +1232,14 @@ static Type *type_suffix(Token **rest, Token *tok, Type *ty) {
         tok = skip(tok, "]");
         ty = type_suffix(rest, tok, ty);
         if (ty->kind == TY_FUNC)
-            error_at(tok->loc, "array element type cannot be a function");
+            error_at(bracket->loc, "array element type cannot be a function");
+        if (ty->kind == TY_VOID)
+            error_at(bracket->loc, "array element type cannot be void");
+        if (is_incomplete_object_type(ty))
+            error_at(bracket->loc, "array element type is incomplete");
+        if (ty->kind == TY_STRUCT && ty->has_flexible_array_member)
+            error_at(bracket->loc,
+                     "array element type contains a flexible array member");
         return array_of(ty, len);
     }
 
@@ -2667,7 +2698,9 @@ static Node *declaration(Token **rest, Token *tok, bool is_static, bool is_exter
 
         Token *ident;
         Type *ty = declarator(&tok, tok, basety, &ident);
-        if (!is_extern && is_incomplete_object_type(ty))
+        bool inferable_array = is_unknown_bound_array_with_complete_element(ty) &&
+                               equal(tok, "=");
+        if (!is_extern && is_incomplete_object_type(ty) && !inferable_array)
             error_at(ident->loc, "variable has incomplete type");
 
         char *name = strndup(ident->loc, ident->len);
@@ -3971,7 +4004,7 @@ static Node *primary(Token **rest, Token *tok) {
             error_at(op->loc, "_Alignof requires a type name");
         Type *ty = type_name(&tok, tok);
         if (!ty || ty->kind == TY_VOID || ty->kind == TY_FUNC ||
-            ty->is_incomplete)
+            is_incomplete_object_type(ty))
             error_at(op->loc, "invalid type for _Alignof");
         *rest = skip(tok, ")");
         return new_size_t_num(ty->align);
@@ -4387,7 +4420,8 @@ Program *parse(Token *tok) {
         } else {
             // Global variable(s) (possibly with initializer)
             for (;;) {
-                if (!is_extern && is_incomplete_object_type(ty))
+                if (!is_extern && is_incomplete_object_type(ty) &&
+                    !is_unknown_bound_array_with_complete_element(ty))
                     error_at(ident->loc, "variable has incomplete type");
 
                 Obj *var = register_global_symbol(ident, ty, is_static, is_extern);
@@ -4420,6 +4454,16 @@ Program *parse(Token *tok) {
             }
             tok = skip(tok, ";");
         }
+    }
+
+    // A file-scope tentative definition with incomplete array type is
+    // completed as a one-element array if no later declaration supplied a
+    // bound. Pure extern declarations remain incomplete and allocate nothing.
+    for (Obj *var = globals; var; var = var->next) {
+        if (var->is_function || var->is_extern)
+            continue;
+        if (is_unknown_bound_array_with_complete_element(var->ty))
+            var->ty = array_of(var->ty->base, 1);
     }
 
     Program *prog = calloc(1, sizeof(Program));

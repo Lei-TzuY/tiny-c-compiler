@@ -61,3 +61,6 @@ Designated aggregate initializers support nested designator lists such as `[1][2
 Nested braced aggregate initializer-lists accept member/array designators at every level, including positional continuation after a designator for automatic objects.
 
 Ordinary identifiers (objects/functions, typedef names, and enumerators) now obey one lexical namespace with same-scope conflict diagnostics and correct cross-kind shadowing.
+
+
+- Incomplete array types are tracked explicitly. Local/static objects without an inferred bound are rejected; file-scope `extern T a[]` remains incomplete, tentative definitions are completed to one element at translation-unit end, and initializer-based bound inference remains supported. Flexible array members are accepted only as the final member of a non-union struct with at least one preceding named member, and such structs cannot be embedded or used as array element types.
