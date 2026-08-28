@@ -277,6 +277,7 @@ struct SwitchContext {
 };
 
 static SwitchContext *current_switch;
+static int current_loop_depth;
 
 static bool is_typename(Token *tok) {
     if (equal(tok, "int") || equal(tok, "char") || equal(tok, "void") ||
@@ -2992,11 +2993,15 @@ static Node *stmt(Token **rest, Token *tok) {
     }
 
     if (equal(tok, "break")) {
+        if (current_loop_depth == 0 && !current_switch)
+            error_at(tok->loc, "break statement not within loop or switch");
         *rest = skip(tok->next, ";");
         return new_node(ND_BREAK);
     }
 
     if (equal(tok, "continue")) {
+        if (current_loop_depth == 0)
+            error_at(tok->loc, "continue statement not within loop");
         *rest = skip(tok->next, ";");
         return new_node(ND_CONTINUE);
     }
@@ -3015,7 +3020,9 @@ static Node *stmt(Token **rest, Token *tok) {
 
     if (equal(tok, "do")) {
         Node *node = new_node(ND_DO);
+        current_loop_depth++;
         node->then = stmt(&tok, tok->next);
+        current_loop_depth--;
         tok = skip(tok, "while");
         tok = skip(tok, "(");
         node->cond = expr(&tok, tok);
@@ -3110,7 +3117,9 @@ static Node *stmt(Token **rest, Token *tok) {
         tok = skip(tok->next, "(");
         node->cond = expr(&tok, tok);
         tok = skip(tok, ")");
+        current_loop_depth++;
         node->then = stmt(&tok, tok);
+        current_loop_depth--;
         *rest = tok;
         return node;
     }
@@ -3142,7 +3151,9 @@ static Node *stmt(Token **rest, Token *tok) {
             node->inc = expr(&tok, tok);
         tok = skip(tok, ")");
 
+        current_loop_depth++;
         node->then = stmt(rest, tok);
+        current_loop_depth--;
         leave_scope();
         return node;
     }
@@ -4284,6 +4295,7 @@ Program *parse(Token *tok) {
     Function *cur = &head;
 
     current_scope = calloc(1, sizeof(Scope));
+    current_loop_depth = 0;
 
     while (tok->kind != TK_EOF) {
         if (equal(tok, "_Static_assert")) {
