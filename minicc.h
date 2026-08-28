@@ -107,6 +107,7 @@ struct Member {
     Member *next;
     char *name;
     Type *ty;
+    int align;      // explicit _Alignas requirement, 0 = natural type alignment
     int offset;
 };
 
@@ -257,6 +258,7 @@ struct Obj {
     Obj *param_next;
     char *name;    // Variable name
     Type *ty;      // Variable type
+    int align;     // explicit _Alignas requirement, 0 = natural type alignment
     bool is_local; // local or global/constant
 
     // Local variable
