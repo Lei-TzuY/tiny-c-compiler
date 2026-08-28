@@ -1,0 +1,33 @@
+name: Apply distinct signed-char migration
+
+on:
+  push:
+    branches:
+      - agent/distinct-signed-char
+
+permissions:
+  contents: write
+
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/distinct-signed-char
+          fetch-depth: 0
+      - name: Apply distinct signed-char migration
+        run: python3 tools/apply_distinct_signed_char.py
+      - name: Validate full suite
+        run: make clean && make test
+      - name: Commit generated source changes
+        run: |
+          if git diff --quiet; then
+            echo "No migration changes to commit"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add minicc.h type.c parse.c README.md Makefile test/char_type_identity.sh
+          git commit -m "Distinguish plain char from signed char"
+          git push origin HEAD:agent/distinct-signed-char
