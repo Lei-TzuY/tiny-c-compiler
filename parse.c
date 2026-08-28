@@ -3239,6 +3239,9 @@ static Node *declaration(Token **rest, Token *tok) {
 
         if (!equal(tok, "="))
             continue;
+        if (is_extern)
+            error_at(tok->loc,
+                     "block-scope extern declaration cannot have an initializer");
         tok = tok->next; // skip '='
 
         Token *after_string = NULL;
@@ -4995,6 +4998,9 @@ Program *parse(Token *tok) {
                     error_at(ident->loc, "redefinition of global '%s'", var->name);
 
                 if (consume(&tok, tok, "=")) {
+                    // A file-scope declaration with an initializer is a
+                    // definition even when it is spelled with `extern`.
+                    var->is_extern = false;
                     Token *after_string = NULL;
                     Token *string_tok = string_initializer_token(tok, &after_string);
                     if (string_tok && ty->kind == TY_ARRAY) {
