@@ -1171,7 +1171,15 @@ static Type *declspec_impl(Token **rest, Token *tok, DeclAttrs *attrs) {
         if (consume(&tok, tok, "_Bool"))  { saw_non_signable_type = true; ty = ty_bool; continue; }
         if (consume(&tok, tok, "float"))  { saw_non_signable_type = true; ty = ty_float; continue; }
         if (consume(&tok, tok, "double")) { saw_non_signable_type = true; ty = ty_double; continue; }
-        if (consume(&tok, tok, "char"))   { ty = (ty && ty->is_unsigned) ? ty_uchar : ty_char; continue; }
+        if (consume(&tok, tok, "char")) {
+            if (saw_unsigned || (ty && ty->is_unsigned))
+                ty = ty_uchar;
+            else if (saw_signed)
+                ty = ty_schar;
+            else
+                ty = ty_char;
+            continue;
+        }
         if (consume(&tok, tok, "void"))   { saw_non_signable_type = true; ty = ty_void; continue; }
         if (consume(&tok, tok, "short"))  { ty = (ty && ty->is_unsigned) ? ty_ushort : ty_short; continue; }
 
@@ -1201,7 +1209,9 @@ static Type *declspec_impl(Token **rest, Token *tok, DeclAttrs *attrs) {
             sign_spec = sign_tok;
             if (!ty)
                 ty = ty_int;
-            else if (ty != ty_int && ty != ty_char && ty != ty_short &&
+            else if (ty == ty_char)
+                ty = ty_schar;
+            else if (ty != ty_int && ty != ty_schar && ty != ty_short &&
                      ty != ty_long && ty != ty_llong)
                 error_at(sign_tok->loc, "invalid type specifier combination with 'signed'");
             continue;
@@ -4323,6 +4333,8 @@ static bool type_compatible_impl(Type *a, Type *b, bool ignore_top_qual) {
 
     switch (a->kind) {
     case TY_CHAR:
+        return a->is_unsigned == b->is_unsigned &&
+               a->is_plain_char == b->is_plain_char;
     case TY_SHORT:
     case TY_INT:
     case TY_LONG:

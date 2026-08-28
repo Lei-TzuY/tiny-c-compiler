@@ -83,6 +83,7 @@ struct Type {
     int size;         // sizeof() value
     int align;        // alignment requirement
     bool is_unsigned; // true for unsigned integer types
+    bool is_plain_char; // distinguish plain char from signed/unsigned char
     bool is_incomplete; // forward-declared struct/union with no body yet
     bool is_union;      // TY_STRUCT represents both records; true for union
     bool has_flexible_array_member; // complete struct ends in a flexible array member
@@ -115,6 +116,7 @@ extern Type *ty_int;
 extern Type *ty_long;
 extern Type *ty_llong;
 extern Type *ty_char;
+extern Type *ty_schar;
 extern Type *ty_short;
 extern Type *ty_void;
 extern Type *ty_bool;

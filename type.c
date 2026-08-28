@@ -3,7 +3,8 @@
 Type *ty_int    = &(Type){TY_INT,    4, 4, false};
 Type *ty_long   = &(Type){TY_LONG,   8, 8, false};
 Type *ty_llong  = &(Type){TY_LLONG,  8, 8, false};
-Type *ty_char   = &(Type){TY_CHAR,   1, 1, false};
+Type *ty_char   = &(Type){.kind=TY_CHAR, .size=1, .align=1, .is_plain_char=true};
+Type *ty_schar  = &(Type){TY_CHAR,   1, 1, false};
 Type *ty_short  = &(Type){TY_SHORT,  2, 2, false};
 Type *ty_void   = &(Type){TY_VOID,   1, 1, false};
 Type *ty_bool   = &(Type){TY_BOOL,   1, 1, false};
@@ -292,6 +293,8 @@ static bool equality_type_compatible(Type *a, Type *b, bool ignore_top_qual) {
 
     switch (a->kind) {
     case TY_CHAR:
+        return a->is_unsigned == b->is_unsigned &&
+               a->is_plain_char == b->is_plain_char;
     case TY_SHORT:
     case TY_INT:
     case TY_LONG:

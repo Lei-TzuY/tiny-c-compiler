@@ -59,6 +59,7 @@ test: minicc
 	bash ./test/uint64_fp_conversions.sh
 	bash ./test/integer_literals.sh
 	bash ./test/signed_specifiers.sh
+	bash ./test/char_type_identity.sh
 	bash ./test/escape_sequences.sh
 	bash ./test/constant_expressions.sh
 	bash ./test/static_integer_initializers.sh
