@@ -78,6 +78,7 @@ test: minicc
 	bash ./test/char_type_identity.sh
 	bash ./test/escape_sequences.sh
 	bash ./test/constant_expressions.sh
+	bash ./test/compound_literals.sh
 	bash ./test/static_integer_initializers.sh
 	bash ./test/static_floating_initializers.sh
 	bash ./test/static_address_initializers.sh

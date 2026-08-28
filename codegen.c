@@ -267,6 +267,17 @@ static void cast_value(Type *from, Type *to) {
 }
 
 static void gen_addr(Node *node) {
+    if (node->kind == ND_COMPOUND_LITERAL) {
+        if (node->lhs)
+            gen_expr(node->lhs);
+        if (!node->var)
+            error("compound literal missing backing object");
+        if (node->var->is_local)
+            printf("  lea %d(%%rbp), %%rax\n", node->var->offset);
+        else
+            printf("  lea %s(%%rip), %%rax\n", node->var->name);
+        return;
+    }
     if (node->kind == ND_VAR) {
         if (node->var->is_local)
             printf("  lea %d(%%rbp), %%rax\n", node->var->offset);
@@ -965,7 +976,7 @@ static void gen_expr(Node *node) {
         return;
     }
 
-    if (node->kind == ND_VAR) {
+    if (node->kind == ND_VAR || node->kind == ND_COMPOUND_LITERAL) {
         gen_addr(node);
         if (node->ty->kind != TY_ARRAY && node->ty->kind != TY_STRUCT &&
             node->ty->kind != TY_FUNC)

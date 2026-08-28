@@ -393,6 +393,8 @@ static bool is_lvalue(Node *node) {
         return node->ty->kind != TY_FUNC && node->ty->kind != TY_VOID;
     case ND_MEMBER:
         return is_lvalue(node->lhs);
+    case ND_COMPOUND_LITERAL:
+        return node->ty && node->ty->kind != TY_FUNC && node->ty->kind != TY_VOID;
     default:
         return false;
     }
@@ -2233,6 +2235,10 @@ static StaticAddress eval_static_lvalue_address(Node *node) {
         addr.addend += node->member->offset;
         return addr;
     }
+    case ND_COMPOUND_LITERAL:
+        if (!node->var || node->var->is_local || node->lhs)
+            error("automatic compound literal is not a static address constant");
+        return (StaticAddress){node->var->name, 0};
     default:
         error("unsupported lvalue in static address initializer");
     }
@@ -2261,6 +2267,14 @@ static StaticAddress eval_static_address(Node *node) {
 
     case ND_ADDR:
         return eval_static_lvalue_address(node->lhs);
+
+    case ND_COMPOUND_LITERAL:
+        // An array compound literal at file scope undergoes the ordinary
+        // array-to-pointer conversion and denotes its anonymous static object.
+        if (!node->var || node->var->is_local || node->lhs ||
+            node->ty->kind != TY_ARRAY)
+            error("compound literal value is not a static address constant");
+        return (StaticAddress){node->var->name, 0};
 
     case ND_ADD:
     case ND_SUB: {
@@ -4389,15 +4403,109 @@ static Node *mul(Token **rest, Token *tok) {
     }
 }
 
+static Node *compound_literal(Token **rest, Token *tok, Type *ty,
+                              Token *type_tok) {
+    if (!ty || ty->kind == TY_VOID || ty->kind == TY_FUNC)
+        error_at(type_tok->loc, "compound literal requires an object type");
+    if (is_incomplete_object_type(ty))
+        error_at(type_tok->loc,
+                 "compound literal currently requires a complete object type");
+    if (!equal(tok, "{"))
+        error_at(tok->loc, "expected '{' after compound literal type name");
+
+    Obj *var;
+    Node *init_expr = NULL;
+
+    if (current_return_ty) {
+        var = create_lvar(new_unique_name());
+        var->ty = ty;
+
+        Node head = {};
+        Node *tail = &head;
+        Node *root = new_var_node(var);
+
+        Token *after_string = NULL;
+        Token *string_tok = string_initializer_token(tok, &after_string);
+        if (string_tok && is_character_array(ty)) {
+            append_automatic_string_array_initializer(&tail, root, ty, &tok, tok);
+        } else if (ty->kind == TY_ARRAY || ty->kind == TY_STRUCT) {
+            parse_automatic_aggregate_subobject(&tail, root, ty, &tok, tok,
+                                                type_tok);
+        } else {
+            tok = skip(tok, "{");
+            if (equal(tok, "}"))
+                error_at(tok->loc, "scalar compound literal requires an initializer");
+            Node *rhs = assign(&tok, tok);
+            Node *assign_node = new_initializer_assign(root, rhs, type_tok);
+            tail = tail->next = new_unary(ND_EXPR_STMT, assign_node);
+            if (equal(tok, ","))
+                tok = tok->next;
+            if (!equal(tok, "}"))
+                error_at(tok->loc, "excess elements in scalar compound literal");
+            tok = tok->next;
+        }
+
+        for (Node *stmt = head.next; stmt; stmt = stmt->next) {
+            if (stmt->kind != ND_EXPR_STMT || !stmt->lhs)
+                error("invalid automatic compound literal initializer node");
+            init_expr = init_expr ? new_binary(ND_COMMA, init_expr, stmt->lhs)
+                                  : stmt->lhs;
+        }
+    } else {
+        // File-scope compound literals have static storage duration. Keep the
+        // anonymous object out of the ordinary identifier namespace but emit it
+        // through the normal static-data path.
+        var = calloc(1, sizeof(Obj));
+        var->name = new_unique_name();
+        var->ty = ty;
+        var->is_local = false;
+        var->is_static = true;
+        var->next = globals;
+        globals = var;
+
+        Token *after_string = NULL;
+        Token *string_tok = string_initializer_token(tok, &after_string);
+        if (string_tok && is_character_array(ty)) {
+            validate_string_array_initializer(ty, string_tok);
+            var->init_data = build_string_array_image(ty, string_tok);
+            tok = after_string;
+        } else if (ty->kind == TY_ARRAY || ty->kind == TY_STRUCT) {
+            Type *parsed = parse_static_image_initializer(var, &tok, tok, ty, 0);
+            if (parsed != ty)
+                error_at(type_tok->loc,
+                         "compound literal array bound inference is not yet supported");
+        } else {
+            tok = skip(tok, "{");
+            if (equal(tok, "}"))
+                error_at(tok->loc, "scalar compound literal requires an initializer");
+            parse_static_scalar_initializer(var, &tok, tok, ty);
+            if (equal(tok, ","))
+                tok = tok->next;
+            if (!equal(tok, "}"))
+                error_at(tok->loc, "excess elements in scalar compound literal");
+            tok = tok->next;
+        }
+    }
+
+    Node *node = new_node(ND_COMPOUND_LITERAL);
+    node->var = var;
+    node->lhs = init_expr;
+    node->ty = ty;
+    *rest = tok;
+    return node;
+}
+
 static Node *unary(Token **rest, Token *tok) {
     if (equal(tok, "(") && is_typename(tok->next)) {
         Token *cast_tok = tok;
         tok = tok->next;
         Type *ty = type_name(&tok, tok);
+        tok = skip(tok, ")");
+        if (equal(tok, "{"))
+            return postfix(rest, cast_tok);
         if (ty->kind == TY_ARRAY || ty->kind == TY_FUNC ||
             (ty->kind != TY_VOID && !is_numeric(ty) && ty->kind != TY_PTR))
             error_at(cast_tok->loc, "cast specifies non-scalar type");
-        tok = skip(tok, ")");
         Node *operand = unary(rest, tok);
         if (!cast_compatible(ty, operand))
             error_at(cast_tok->loc, "invalid cast operand type");
@@ -4535,7 +4643,18 @@ static Node *indirect_funcall(Token **rest, Token *tok, Node *callee) {
 }
 
 static Node *postfix(Token **rest, Token *tok) {
-    Node *node = primary(&tok, tok);
+    Node *node;
+    if (equal(tok, "(") && is_typename(tok->next)) {
+        Token *type_tok = tok;
+        Token *cur = tok->next;
+        Type *ty = type_name(&cur, cur);
+        cur = skip(cur, ")");
+        if (!equal(cur, "{"))
+            error_at(type_tok->loc, "expected compound literal initializer");
+        node = compound_literal(&tok, cur, ty, type_tok);
+    } else {
+        node = primary(&tok, tok);
+    }
 
     for (;;) {
         // A call is a postfix operator in C, so the callee may be any
