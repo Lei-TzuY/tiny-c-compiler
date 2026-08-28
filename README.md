@@ -42,6 +42,8 @@ The compiler is designed as an educational systems-programming project rather th
 
 - Static/global integer scalar and array initializers accept type-aware integer constant expressions, including enum constants, casts, shifts, short-circuit logic, and ternary expressions. Signed integer constant-expression arithmetic diagnoses overflow and invalid signed left shifts instead of wrapping, while unsigned arithmetic retains modulo semantics.
 
+- C99 compound literals are supported for complete object types. Block-scope literals use anonymous automatic objects and remain modifiable lvalues (subject to qualifiers), while file-scope literals use anonymous static storage; scalar, fixed-size array, struct/union, nested, designated, string-array, address-taking, member/index, and by-value record uses share the ordinary initializer and ABI machinery. Unknown-bound array compound literals are diagnosed until reusable bound-inference support is added.
+
 - C11 `_Static_assert` reuses that integer constant-expression machinery at file and block scope, including enum, `sizeof`, and `_Alignof` queries, and reports the supplied string on assertion failure.
 
 - Static pointer initializers support linker-relocatable address constants such as global/object addresses, array offsets, function addresses, member addresses, and string literals.

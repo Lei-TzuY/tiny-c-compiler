@@ -217,6 +217,7 @@ typedef enum {
     ND_DEFAULT,   // "default"
     ND_MEMBER,    // struct member (. and ->)
     ND_COMMA,     // , (comma operator)
+    ND_COMPOUND_LITERAL, // (type-name){ initializer-list }
     ND_GOTO,      // "goto"
     ND_LABEL,     // labeled statement
 } NodeKind;
