@@ -55,7 +55,7 @@ text = text.replace(needle, addition, 1)
 positive_anchor = "assert_run 4 'extern int f(void);int f(void){return 4;}int main(void){return f();}'\n"
 positive_add = positive_anchor + \
     "assert_run 3 'int f(int n){if(n==0)return 3;return f(n-1);}int main(void){return f(2);}'\n" + \
-    "assert_run 7 'int g(int);int f(int n){return n?g(n-1):3;}int g(int n){return n?f(n-1)+1:4;}int main(void){return f(2);}'\n" + \
+    "assert_run 4 'int g(int);int f(int n){return n?g(n-1):3;}int g(int n){return n?f(n-1)+1:4;}int main(void){return f(2);}'\n" + \
     "assert_run 8 'int main(void){extern int f(void);return f();}int f(void){return 8;}'\n"
 if text.count(positive_anchor) != 1:
     raise SystemExit("unresolved call positive insertion point not unique")
