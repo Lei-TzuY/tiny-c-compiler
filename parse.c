@@ -3732,6 +3732,11 @@ static void require_statement_after_label(Token *tok) {
         error_at(tok->loc, "label must be followed by a statement, not a declaration");
 }
 
+static void require_control_substatement(Token *tok, const char *construct) {
+    if (equal(tok, "_Static_assert") || is_decl_start(tok))
+        error_at(tok->loc, "%s body must be a statement, not a declaration", construct);
+}
+
 static Node *stmt(Token **rest, Token *tok) {
     if (equal(tok, "_Static_assert")) {
         *rest = parse_static_assertion(tok);
@@ -3785,8 +3790,10 @@ static Node *stmt(Token **rest, Token *tok) {
     if (equal(tok, "do")) {
         Token *do_tok = tok;
         Node *node = new_node(ND_DO);
+        Token *body_tok = tok->next;
+        require_control_substatement(body_tok, "do");
         current_loop_depth++;
-        node->then = stmt(&tok, tok->next);
+        node->then = stmt(&tok, body_tok);
         current_loop_depth--;
         tok = skip(tok, "while");
         tok = skip(tok, "(");
@@ -3811,6 +3818,7 @@ static Node *stmt(Token **rest, Token *tok) {
         // integer types supported by this LP64 target.
         node->ty = get_common_type(node->cond->ty, ty_int);
         tok = skip(tok, ")");
+        require_control_substatement(tok, "switch");
 
         SwitchContext ctx = {};
         ctx.ty = node->ty;
@@ -3875,9 +3883,12 @@ static Node *stmt(Token **rest, Token *tok) {
         node->cond = expr(&tok, tok);
         require_scalar_condition(node->cond, if_tok, "if");
         tok = skip(tok, ")");
+        require_control_substatement(tok, "if");
         node->then = stmt(&tok, tok);
-        if (equal(tok, "else"))
+        if (equal(tok, "else")) {
+            require_control_substatement(tok->next, "else");
             node->els = stmt(&tok, tok->next);
+        }
         *rest = tok;
         return node;
     }
@@ -3889,6 +3900,7 @@ static Node *stmt(Token **rest, Token *tok) {
         node->cond = expr(&tok, tok);
         require_scalar_condition(node->cond, while_tok, "while");
         tok = skip(tok, ")");
+        require_control_substatement(tok, "while");
         current_loop_depth++;
         node->then = stmt(&tok, tok);
         current_loop_depth--;
@@ -3921,6 +3933,7 @@ static Node *stmt(Token **rest, Token *tok) {
         if (!equal(tok, ")"))
             node->inc = expr(&tok, tok);
         tok = skip(tok, ")");
+        require_control_substatement(tok, "for");
 
         current_loop_depth++;
         node->then = stmt(rest, tok);
