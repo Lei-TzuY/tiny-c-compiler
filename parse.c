@@ -296,7 +296,8 @@ static bool is_typename(Token *tok) {
     if (equal(tok, "int") || equal(tok, "char") || equal(tok, "void") ||
         equal(tok, "enum") || equal(tok, "struct") || equal(tok, "union") ||
         equal(tok, "short") || equal(tok, "long") || equal(tok, "signed") ||
-        equal(tok, "unsigned") ||
+        equal(tok, "unsigned") || equal(tok, "const") ||
+        equal(tok, "volatile") || equal(tok, "restrict") ||
         equal(tok, "_Bool") || equal(tok, "float") || equal(tok, "double"))
         return true;
     return find_typedef(tok) != NULL;
@@ -307,7 +308,7 @@ static bool is_typename(Token *tok) {
 static bool is_decl_start(Token *tok) {
     if (is_typename(tok)) return true;
     if (equal(tok, "static") || equal(tok, "extern")) return true;
-    if (equal(tok, "const") || equal(tok, "volatile")) return true;
+    if (equal(tok, "const") || equal(tok, "volatile") || equal(tok, "restrict")) return true;
     if (equal(tok, "register") || equal(tok, "inline")) return true;
     if (equal(tok, "_Alignas") || equal(tok, "_Noreturn")) return true;
     return false;
@@ -1074,7 +1075,8 @@ static int parse_alignment_specifier(Token **rest, Token *tok) {
     tok = skip(tok->next, "(");
     int align = 0;
 
-    if (is_typename(tok) || equal(tok, "const") || equal(tok, "volatile")) {
+    if (is_typename(tok) || equal(tok, "const") || equal(tok, "volatile") ||
+        equal(tok, "restrict")) {
         Type *aty = type_name(&tok, tok);
         if (!aty || aty->kind == TY_VOID || aty->kind == TY_FUNC ||
             is_incomplete_object_type(aty))
@@ -1126,10 +1128,20 @@ static void apply_object_alignment(Obj *var, Type *ty, int requested, Token *at)
     var->align = requested;
 }
 
+static bool is_restrict_qualifiable_type(Type *ty) {
+    if (!ty)
+        return false;
+    if (ty->kind == TY_ARRAY)
+        return is_restrict_qualifiable_type(ty->base);
+    return ty->kind == TY_PTR && ty->base && ty->base->kind != TY_FUNC;
+}
+
 static Type *declspec_impl(Token **rest, Token *tok, DeclAttrs *attrs) {
     Type *ty = NULL;
     bool is_const = false;
     bool is_volatile = false;
+    bool is_restrict = false;
+    Token *restrict_tok = NULL;
     bool saw_signed = false;
     bool saw_unsigned = false;
     bool saw_non_signable_type = false;
@@ -1151,6 +1163,13 @@ static Type *declspec_impl(Token **rest, Token *tok, DeclAttrs *attrs) {
         }
         if (consume(&tok, tok, "volatile")) {
             is_volatile = true;
+            continue;
+        }
+        Token *qual_tok = tok;
+        if (consume(&tok, tok, "restrict")) {
+            is_restrict = true;
+            if (!restrict_tok)
+                restrict_tok = qual_tok;
             continue;
         }
         if (consume(&tok, tok, "register")) {
@@ -1292,7 +1311,10 @@ static Type *declspec_impl(Token **rest, Token *tok, DeclAttrs *attrs) {
     ty = ty ? ty : ty_int;
     if ((saw_signed || saw_unsigned) && saw_non_signable_type)
         error_at(sign_spec->loc, "signed/unsigned type specifier requires an integer base type");
-    return qualify_type(ty, is_const, is_volatile);
+    if (is_restrict && !is_restrict_qualifiable_type(ty))
+        error_at(restrict_tok->loc,
+                 "restrict qualifier requires a pointer to object or incomplete type");
+    return qualify_type(ty, is_const, is_volatile, is_restrict);
 }
 
 static Type *declspec(Token **rest, Token *tok) {
@@ -1355,6 +1377,7 @@ static Type *func_params(Token **rest, Token *tok, Type *return_ty) {
         if (param_ty->kind == TY_VOID) {
             Token *at = name ? name : tok;
             if (name || param_ty->is_const || param_ty->is_volatile ||
+                param_ty->is_restrict ||
                 cur != &head || !equal(tok, ")"))
                 error_at(at->loc,
                          "void parameter must be the only unqualified unnamed parameter");
@@ -1448,13 +1471,24 @@ static Type *declarator_impl(Token **rest, Token *tok, Type *ty, Token **ident,
         ty = pointer_to(ty);
         bool ptr_const = false;
         bool ptr_volatile = false;
-        while (equal(tok, "const") || equal(tok, "volatile")) {
+        bool ptr_restrict = false;
+        Token *ptr_restrict_tok = NULL;
+        while (equal(tok, "const") || equal(tok, "volatile") ||
+               equal(tok, "restrict")) {
             if (consume(&tok, tok, "const"))
                 ptr_const = true;
             else if (consume(&tok, tok, "volatile"))
                 ptr_volatile = true;
+            else {
+                ptr_restrict_tok = tok;
+                consume(&tok, tok, "restrict");
+                ptr_restrict = true;
+            }
         }
-        ty = qualify_type(ty, ptr_const, ptr_volatile);
+        if (ptr_restrict && !is_restrict_qualifiable_type(ty))
+            error_at(ptr_restrict_tok->loc,
+                     "restrict qualifier requires a pointer to object or incomplete type");
+        ty = qualify_type(ty, ptr_const, ptr_volatile, ptr_restrict);
     }
 
     // In an abstract declarator, a leading parameter list is a function
@@ -1463,7 +1497,7 @@ static Type *declarator_impl(Token **rest, Token *tok, Type *ty, Token **ident,
     if (allow_abstract && equal(tok, "(") &&
         (equal(tok->next, ")") || is_typename(tok->next) ||
          equal(tok->next, "const") || equal(tok->next, "volatile") ||
-         equal(tok->next, "register")))
+         equal(tok->next, "restrict") || equal(tok->next, "register")))
         return type_suffix(rest, tok, ty);
 
     if (equal(tok, "(")) {
@@ -3675,14 +3709,14 @@ static Type *conditional_result_type(Node *then, Node *els, Token *question) {
         bool merged_volatile = tt->base->is_volatile || et->base->is_volatile;
 
         if (type_compatible_ignoring_top_qual(tt->base, et->base))
-            return pointer_to(qualify_type(tt->base, merged_const, merged_volatile));
+            return pointer_to(qualify_type(tt->base, merged_const, merged_volatile, false));
 
         bool t_void = tt->base && tt->base->kind == TY_VOID;
         bool e_void = et->base && et->base->kind == TY_VOID;
         bool t_func = tt->base && tt->base->kind == TY_FUNC;
         bool e_func = et->base && et->base->kind == TY_FUNC;
         if (!t_func && !e_func && (t_void || e_void))
-            return pointer_to(qualify_type(ty_void, merged_const, merged_volatile));
+            return pointer_to(qualify_type(ty_void, merged_const, merged_volatile, false));
     }
 
     error_at(question->loc, "incompatible conditional operands");
@@ -4365,7 +4399,8 @@ static bool type_compatible_impl(Type *a, Type *b, bool ignore_top_qual) {
     if (!a || !b || a->kind != b->kind)
         return false;
     if (!ignore_top_qual &&
-        (a->is_const != b->is_const || a->is_volatile != b->is_volatile))
+        (a->is_const != b->is_const || a->is_volatile != b->is_volatile ||
+         a->is_restrict != b->is_restrict))
         return false;
 
     switch (a->kind) {
@@ -4523,7 +4558,7 @@ static void register_function_symbol(char *name, Type *return_ty, bool is_static
 static void bind_predefined_func_name(const char *name) {
     Obj *var = calloc(1, sizeof(Obj));
     var->name = new_unique_name();
-    var->ty = array_of(qualify_type(ty_char, true, false), strlen(name) + 1);
+    var->ty = array_of(qualify_type(ty_char, true, false, false), strlen(name) + 1);
     var->is_local = false;
     var->is_static = true;
     var->is_string_literal = true;

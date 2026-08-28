@@ -174,7 +174,7 @@ static bool is_keyword(Token *tok) {
                          "switch", "case", "default", "enum",
                          "struct", "typedef", "union",
                          "short", "long", "signed", "unsigned", "goto",
-                         "static", "extern", "const", "volatile",
+                         "static", "extern", "const", "volatile", "restrict",
                          "inline", "register", "_Bool", "float", "double",
                          "_Alignas", "_Noreturn"};
 

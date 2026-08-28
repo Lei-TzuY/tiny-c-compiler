@@ -100,6 +100,7 @@ struct Type {
     // sync when the canonical tag is completed later.
     bool is_const;
     bool is_volatile;
+    bool is_restrict;
     Type *origin;
     Type *qual_next;
 };
@@ -143,7 +144,7 @@ bool sysv_record_is_memory(Type *ty);
 Type *pointer_to(Type *base);
 Type *array_of(Type *base, int size);
 Type *func_type(Type *return_ty);
-Type *qualify_type(Type *ty, bool is_const, bool is_volatile);
+Type *qualify_type(Type *ty, bool is_const, bool is_volatile, bool is_restrict);
 Type *get_common_type(Type *ty1, Type *ty2);
 int64_t eval_const_expr(Node *node);
 bool is_null_pointer_constant(Node *node);

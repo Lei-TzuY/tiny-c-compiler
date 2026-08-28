@@ -107,8 +107,8 @@ bool sysv_record_is_memory(Type *ty) {
     return ty && ty->kind == TY_STRUCT && !ty->is_incomplete && ty->size > 16;
 }
 
-Type *qualify_type(Type *ty, bool is_const, bool is_volatile) {
-    if (!ty || (!is_const && !is_volatile))
+Type *qualify_type(Type *ty, bool is_const, bool is_volatile, bool is_restrict) {
+    if (!ty || (!is_const && !is_volatile && !is_restrict))
         return ty;
 
     // Qualifying an array type through a typedef qualifies its element type.
@@ -117,7 +117,7 @@ Type *qualify_type(Type *ty, bool is_const, bool is_volatile) {
     if (ty->kind == TY_ARRAY) {
         Type *copy = calloc(1, sizeof(Type));
         *copy = *ty;
-        copy->base = qualify_type(ty->base, is_const, is_volatile);
+        copy->base = qualify_type(ty->base, is_const, is_volatile, is_restrict);
         copy->origin = ty->origin ? ty->origin : ty;
         copy->qual_next = NULL;
         return copy;
@@ -133,6 +133,7 @@ Type *qualify_type(Type *ty, bool is_const, bool is_volatile) {
     copy->origin = ty->origin ? ty->origin : ty;
     copy->is_const = copy->is_const || is_const;
     copy->is_volatile = copy->is_volatile || is_volatile;
+    copy->is_restrict = copy->is_restrict || is_restrict;
     copy->qual_next = NULL;
 
     // A qualified clone of a forward-declared record must observe completion
@@ -288,7 +289,8 @@ static bool equality_type_compatible(Type *a, Type *b, bool ignore_top_qual) {
     if (!a || !b || a->kind != b->kind)
         return false;
     if (!ignore_top_qual &&
-        (a->is_const != b->is_const || a->is_volatile != b->is_volatile))
+        (a->is_const != b->is_const || a->is_volatile != b->is_volatile ||
+         a->is_restrict != b->is_restrict))
         return false;
 
     switch (a->kind) {
@@ -360,11 +362,11 @@ static Type *conditional_pointer_type(Type *lhs, Type *rhs) {
     if (a->kind == TY_VOID || b->kind == TY_VOID) {
         Type *base = qualify_type(ty_void,
                                   a->is_const || b->is_const,
-                                  a->is_volatile || b->is_volatile);
+                                  a->is_volatile || b->is_volatile, false);
         return pointer_to(base);
     }
 
-    Type *base = qualify_type(a, b->is_const, b->is_volatile);
+    Type *base = qualify_type(a, b->is_const, b->is_volatile, b->is_restrict);
     return pointer_to(base);
 }
 
@@ -604,7 +606,7 @@ void add_type(Node *node) {
         // `p->x` honor a qualified struct/union object.
         node->ty = qualify_type(node->member->ty,
                                 node->lhs->ty && node->lhs->ty->is_const,
-                                node->lhs->ty && node->lhs->ty->is_volatile);
+                                node->lhs->ty && node->lhs->ty->is_volatile, false);
         return;
     case ND_ADDR:
         node->ty = pointer_to(node->lhs->ty);
