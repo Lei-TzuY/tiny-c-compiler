@@ -18,9 +18,11 @@ jobs:
           fetch-depth: 0
       - name: Apply block extern initializer migration
         run: python3 tools/apply_block_extern_initializer.py
-      - name: Audit block extern initializer path
+      - name: Fix file-scope extern definitions
+        run: python3 tools/fix_file_scope_extern_definition.py
+      - name: Audit extern initializer paths
         run: |
-          grep -nE 'block-scope extern declaration cannot have an initializer|is_extern|parse_static_.*initializer' parse.c | head -n 220
+          grep -nE 'block-scope extern declaration cannot have an initializer|file-scope declaration with an initializer|is_extern|parse_static_.*initializer' parse.c | head -n 240
       - name: Validate full suite
         run: make clean && make test
       - name: Commit generated source changes
@@ -32,5 +34,5 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add parse.c README.md Makefile test/block_extern_initializer.sh
-          git commit -m "Reject block-scope extern initializers"
+          git commit -m "Enforce extern initializer scope constraints"
           git push origin HEAD:agent/block-extern-initializer
