@@ -54,10 +54,16 @@ assert_run 1 'union U{char *p; long x;}; union U u={.p="ok"}; int main(){return 
 # Union metadata survives qualifiers/forward completion.
 assert_run 23 'union U; typedef const union U CU; union U{int x; long y;}; int main(){union U u={.y=23}; CU *p=&u; return p->y;}'
 
-# A union initializer contains at most one initializer element. The previous
-# struct-like implementation silently accepted these and overwrote offset zero.
+# C designated initializers may override an earlier union member selection;
+# the last designated initializer determines the resulting stored value.
+assert_run 2 'int main(){union U{int x; int y;}; union U u={.x=1,.y=2}; return u.y;}'
+assert_run 7 'int main(){union U{int x; int y;}; union U u={.x=3,.x=7}; return u.x;}'
+assert_run 5 'union U{int x; long y;}; union U u={.y=99,.x=5}; int main(){return u.x;}'
+assert_run 8 'int main(){union U{struct {int a; int b;} s; long y;}; union U u={.s.a=3,.s.b=5}; return u.s.a+u.s.b;}'
+assert_run 6 'int main(){union U{struct {int a; int b;} s; long y;}; union U u={.s.a=9,.y=4,.s.b=6}; return u.s.a+u.s.b;}'
+
+# Positional elements after the selected union member remain excess elements.
 assert_fail 'int main(){union U{int x; int y;}; union U u={1,2}; return u.x;}'
-assert_fail 'union U{int x; int y;}; union U u={.x=1,.y=2}; int main(){return 0;}'
 assert_fail 'int main(){union U{int x; int y;}; union U u={.y=1,2}; return 0;}'
 assert_fail 'union U{int x; int y;}; static union U u={1,2}; int main(){return 0;}'
 
