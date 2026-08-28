@@ -40,7 +40,7 @@ The compiler is designed as an educational systems-programming project rather th
 
 - `sizeof` and C11 `_Alignof` are integer constant expressions typed as LP64 `size_t` (`unsigned long`), so their signed/unsigned arithmetic follows the normal usual arithmetic conversions.
 
-- Static/global integer scalar and array initializers accept type-aware integer constant expressions, including enum constants, casts, shifts, short-circuit logic, and ternary expressions.
+- Static/global integer scalar and array initializers accept type-aware integer constant expressions, including enum constants, casts, shifts, short-circuit logic, and ternary expressions. Signed integer constant-expression arithmetic diagnoses overflow and invalid signed left shifts instead of wrapping, while unsigned arithmetic retains modulo semantics.
 
 - C11 `_Static_assert` reuses that integer constant-expression machinery at file and block scope, including enum, `sizeof`, and `_Alignof` queries, and reports the supplied string on assertion failure.
 
