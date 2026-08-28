@@ -1319,10 +1319,15 @@ static Type *func_params(Token **rest, Token *tok, Type *return_ty) {
     }
 
     while (!equal(tok, ")")) {
-        if (cur != &head)
+        if (cur != &head) {
             tok = skip(tok, ",");
+            if (equal(tok, ")"))
+                error_at(tok->loc, "trailing comma in parameter list");
+        }
 
         if (equal(tok, "...")) {
+            if (cur == &head)
+                error_at(tok->loc, "ellipsis requires a preceding fixed parameter");
             tok = tok->next;
             fty->is_variadic = true;
             break;
@@ -1333,8 +1338,21 @@ static Type *func_params(Token **rest, Token *tok, Type *return_ty) {
         Type *param_ty = declarator_impl(&tok, tok, basety, &name, true);
         param_ty = adjust_param_type(param_ty);
 
-        if (is_incomplete_object_type(param_ty))
-            error_at(name ? name->loc : tok->loc, "parameter has incomplete type");
+        // The only valid non-pointer use of void in a parameter-type-list is
+        // one unqualified, unnamed parameter denoting an empty parameter list.
+        // Handle the semantic type as well as the literal spelling so a
+        // `typedef void V; int f(V);` prototype is equivalent to `f(void)`.
+        if (param_ty->kind == TY_VOID) {
+            Token *at = name ? name : tok;
+            if (name || param_ty->is_const || param_ty->is_volatile ||
+                cur != &head || !equal(tok, ")"))
+                error_at(at->loc,
+                         "void parameter must be the only unqualified unnamed parameter");
+            fty->params = NULL;
+            fty->has_prototype = true;
+            *rest = skip(tok, ")");
+            return fty;
+        }
 
         if (name) {
             for (Obj *prev = head.param_next; prev; prev = prev->param_next)
@@ -1358,8 +1376,13 @@ static Type *func_params(Token **rest, Token *tok, Type *return_ty) {
 // `int a[2][3]` becomes array(2, array(3, int)); function suffixes retain the
 // complete prototype on TY_FUNC.
 static Type *type_suffix(Token **rest, Token *tok, Type *ty) {
-    if (equal(tok, "("))
+    if (equal(tok, "(")) {
+        if (ty->kind == TY_ARRAY)
+            error_at(tok->loc, "function cannot return an array type");
+        if (ty->kind == TY_FUNC)
+            error_at(tok->loc, "function cannot return a function type");
         return func_params(rest, tok->next, ty);
+    }
 
     if (equal(tok, "[")) {
         Token *bracket = tok;
@@ -4556,8 +4579,16 @@ Program *parse(Token *tok) {
             // Prototypes may describe ABI shapes the educational backend does
             // not lower yet, but a definition would immediately require the
             // callee side of that ABI and must therefore be diagnosed.
-            if (is_definition)
+            if (is_definition) {
+                if (is_incomplete_object_type(ty->return_ty))
+                    error_at(ident->loc,
+                             "function definition has incomplete return type");
+                for (Obj *meta = ty->params; meta; meta = meta->param_next)
+                    if (is_incomplete_object_type(meta->ty))
+                        error_at(ident->loc,
+                                 "function definition has incomplete parameter type");
                 check_supported_function_abi(ty, ident);
+            }
 
             // Register the declaration before parsing a body so recursion and
             // function-address expressions inside the definition see it.
