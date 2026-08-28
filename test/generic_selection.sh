@@ -58,6 +58,84 @@ int main(void) {
 }
 EOF
 
+
+# The controlling expression is in a value context even though it is not
+# evaluated: arrays and function designators decay to pointers.
+compile_and_run <<'EOF'
+int main(void) {
+  int a[2]={1,2};
+  return _Generic(a, int *: 0, default: 1);
+}
+EOF
+
+compile_and_run <<'EOF'
+int main(void) {
+  const int a[2]={1,2};
+  return _Generic(a, const int *: 0, int *: 1, default: 2);
+}
+EOF
+
+compile_and_run <<'EOF'
+int main(void) {
+  return _Generic("abc", char *: 0, default: 1);
+}
+EOF
+
+compile_and_run <<'EOF'
+int f(void){return 1;}
+int main(void) {
+  return _Generic(f, int (*)(void): 0, default: 1);
+}
+EOF
+
+compile_and_run <<'EOF'
+int f(void){return 1;}
+int main(void) {
+  int (*fp)(void)=f;
+  return _Generic(*fp, int (*)(void): 0, default: 1);
+}
+EOF
+
+# Value conversion removes only top-level qualifiers from the controlling
+# expression. Qualified pointed-to types remain distinct.
+compile_and_run <<'EOF'
+int main(void) {
+  const int x=0;
+  return _Generic(x, int: 0, const int: 1, default: 2);
+}
+EOF
+
+compile_and_run <<'EOF'
+int main(void) {
+  volatile long x=0;
+  return _Generic(x, long: 0, volatile long: 1, default: 2);
+}
+EOF
+
+compile_and_run <<'EOF'
+int main(void) {
+  int x=0;
+  int *const p=&x;
+  return _Generic(p, int *: 0, int *const: 1, default: 2);
+}
+EOF
+
+compile_and_run <<'EOF'
+int main(void) {
+  int x=0;
+  int *restrict p=&x;
+  return _Generic(p, int *: 0, int *restrict: 1, default: 2);
+}
+EOF
+
+compile_and_run <<'EOF'
+int main(void) {
+  const int x=0;
+  const int *p=&x;
+  return _Generic(p, const int *: 0, int *: 1, default: 2);
+}
+EOF
+
 reject() {
   name=$1
   shift
