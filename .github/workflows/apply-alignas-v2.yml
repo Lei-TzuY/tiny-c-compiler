@@ -1,0 +1,31 @@
+name: Apply Alignas migration v2
+on:
+  push:
+    branches: [agent/c11-alignas-v2]
+    paths:
+      - .github/workflows/apply-alignas-v2.yml
+permissions:
+  contents: write
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/c11-alignas-v2
+          fetch-depth: 0
+      - name: Recover and apply verified migration
+        run: |
+          git fetch origin agent/c11-alignas
+          git show ef06fc01956161a1dfd61dd7db9ae62a013e19d7:apply-alignas.py > /tmp/apply-alignas.py
+          python3 /tmp/apply-alignas.py
+      - name: Test compiler
+        run: make clean && make test
+      - name: Commit verified implementation
+        run: |
+          rm .github/workflows/apply-alignas-v2.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'Support C11 _Alignas declarations'
+          git push origin HEAD:agent/c11-alignas-v2
