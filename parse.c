@@ -811,7 +811,7 @@ static Type *const_binary_type(Node *node) {
     return get_common_type(node->lhs->ty, node->rhs->ty);
 }
 
-static int64_t eval_const_expr(Node *node) {
+int64_t eval_const_expr(Node *node) {
     if (!node)
         error("expected integer constant expression");
 
@@ -3217,11 +3217,6 @@ static Node *expr(Token **rest, Token *tok) {
 
     *rest = tok;
     return node;
-}
-
-static bool is_null_pointer_constant(Node *node) {
-    add_type(node);
-    return is_integer(node->ty) && node->kind == ND_NUM && node->val == 0;
 }
 
 static bool qualifier_superset(Type *dst, Type *src) {

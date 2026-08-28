@@ -1,51 +1,4 @@
-from pathlib import Path
-
-p = Path('parse.c')
-s = p.read_text()
-
-# Export the existing typed integer constant-expression evaluator so type.c and
-# parser semantic checks share one definition of a zero-valued ICE.
-old = 'static int64_t eval_const_expr(Node *node) {'
-if old not in s:
-    raise RuntimeError('eval_const_expr anchor not found')
-s = s.replace(old, 'int64_t eval_const_expr(Node *node) {', 1)
-
-old_null = '''static bool is_null_pointer_constant(Node *node) {\n    add_type(node);\n    return is_integer(node->ty) && node->kind == ND_NUM && node->val == 0;\n}\n\n'''
-if old_null not in s:
-    raise RuntimeError('parse null helper anchor not found')
-s = s.replace(old_null, '', 1)
-p.write_text(s)
-
-p = Path('type.c')
-s = p.read_text()
-old_type_null = '''static bool is_null_pointer_constant(Node *node) {\n    // Keep this deliberately narrow until the integer constant-expression\n    // evaluator is available here: an integer literal 0 is the canonical null\n    // pointer constant and covers the compiler's existing pointer idioms.\n    return node && node->kind == ND_NUM && is_integer(node->ty) && node->val == 0;\n}\n'''
-new_type_null = '''bool is_null_pointer_constant(Node *node) {\n    if (!node)\n        return false;\n    add_type(node);\n    if (!node->ty || !is_integer(node->ty))\n        return false;\n    return eval_const_expr(node) == 0;\n}\n'''
-if old_type_null not in s:
-    raise RuntimeError('type null helper anchor not found')
-s = s.replace(old_type_null, new_type_null, 1)
-p.write_text(s)
-
-p = Path('minicc.h')
-s = p.read_text()
-anchor = 'Type *get_common_type(Type *ty1, Type *ty2);\nvoid add_type(Node *node);\n'
-replacement = ('Type *get_common_type(Type *ty1, Type *ty2);\n'
-               'int64_t eval_const_expr(Node *node);\n'
-               'bool is_null_pointer_constant(Node *node);\n'
-               'void add_type(Node *node);\n')
-if anchor not in s:
-    raise RuntimeError('header anchor not found')
-s = s.replace(anchor, replacement, 1)
-p.write_text(s)
-
-p = Path('Makefile')
-s = p.read_text()
-anchor = '\tbash ./test/conditional_operator.sh\n'
-if anchor not in s:
-    raise RuntimeError('Makefile anchor not found')
-s = s.replace(anchor, anchor + '\tbash ./test/null_pointer_constants.sh\n', 1)
-p.write_text(s)
-
-Path('test/null_pointer_constants.sh').write_text(r'''#!/bin/bash
+#!/bin/bash
 set -eu
 
 assert_run() {
@@ -120,4 +73,3 @@ assert_reject 'int main(void){ int *p=1/0; return 0; }'
 assert_reject 'int main(void){ int *p=1<<64; return 0; }'
 
 echo "All null pointer constant tests passed!"
-''')

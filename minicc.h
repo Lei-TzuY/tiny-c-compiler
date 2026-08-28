@@ -141,6 +141,8 @@ Type *array_of(Type *base, int size);
 Type *func_type(Type *return_ty);
 Type *qualify_type(Type *ty, bool is_const, bool is_volatile);
 Type *get_common_type(Type *ty1, Type *ty2);
+int64_t eval_const_expr(Node *node);
+bool is_null_pointer_constant(Node *node);
 void add_type(Node *node);
 
 typedef enum {

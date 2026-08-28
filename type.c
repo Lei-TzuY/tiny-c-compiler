@@ -365,11 +365,13 @@ static Type *conditional_pointer_type(Type *lhs, Type *rhs) {
     return pointer_to(base);
 }
 
-static bool is_null_pointer_constant(Node *node) {
-    // Keep this deliberately narrow until the integer constant-expression
-    // evaluator is available here: an integer literal 0 is the canonical null
-    // pointer constant and covers the compiler's existing pointer idioms.
-    return node && node->kind == ND_NUM && is_integer(node->ty) && node->val == 0;
+bool is_null_pointer_constant(Node *node) {
+    if (!node)
+        return false;
+    add_type(node);
+    if (!node->ty || !is_integer(node->ty))
+        return false;
+    return eval_const_expr(node) == 0;
 }
 
 static bool is_object_pointer_operand(Type *ty) {
