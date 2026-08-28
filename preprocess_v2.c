@@ -35,6 +35,7 @@ typedef struct {
 
 static Macro *macros;
 static CondStack *cond_stack;
+static int preprocess_depth;
 
 static void sb_init(StrBuf *sb, size_t cap) {
     sb->cap = cap < 64 ? 64 : cap;
@@ -878,6 +879,13 @@ static void parse_define(char *start) {
 }
 
 char *preprocess_v2(char *input) {
+    bool outermost = preprocess_depth++ == 0;
+    if (outermost) {
+        add_macro(strdup("__STDC__"), true, false, NULL, 0, strdup("1"));
+        add_macro(strdup("__STDC_VERSION__"), true, false, NULL, 0, strdup("201112L"));
+        add_macro(strdup("__STDC_HOSTED__"), true, false, NULL, 0, strdup("1"));
+    }
+
     CondStack *base_cond = cond_stack;
     char *spliced = splice_lines(input);
     StrBuf out;
@@ -975,5 +983,6 @@ char *preprocess_v2(char *input) {
     free(spliced);
     if (cond_stack != base_cond)
         error("unterminated conditional directive");
+    preprocess_depth--;
     return out.data;
 }
