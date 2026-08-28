@@ -66,6 +66,7 @@ test: minicc
 	bash ./test/integer_literals.sh
 	bash ./test/signed_specifiers.sh
 	bash ./test/type_specifier_combinations.sh
+	bash ./test/void_object_constraints.sh
 	bash ./test/char_type_identity.sh
 	bash ./test/escape_sequences.sh
 	bash ./test/constant_expressions.sh

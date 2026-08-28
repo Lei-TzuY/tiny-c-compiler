@@ -784,6 +784,10 @@ static Type *record_decl(Token **rest, Token *tok, bool is_union) {
 
             Token *ident;
             Type *mty = declarator(&tok, tok, basety, &ident);
+            if (mty->kind == TY_VOID)
+                error_at(ident->loc, "record member cannot have void type");
+            if (mty->kind == TY_FUNC)
+                error_at(ident->loc, "record member cannot have function type");
             bool flexible = mty->kind == TY_ARRAY && mty->array_len == 0;
 
             if (flexible) {
@@ -3208,6 +3212,8 @@ static Node *declaration(Token **rest, Token *tok) {
             error_at(ident->loc, "_Alignas is not allowed on a function declaration");
         if ((attrs.is_inline || attrs.is_noreturn) && ty->kind != TY_FUNC)
             error_at(ident->loc, "function specifier may only declare a function");
+        if (ty->kind == TY_VOID)
+            error_at(ident->loc, "object cannot have void type");
         bool inferable_array = is_unknown_bound_array_with_complete_element(ty) &&
                                equal(tok, "=");
         if (!is_extern && is_incomplete_object_type(ty) && !inferable_array)
@@ -4897,6 +4903,8 @@ Program *parse(Token *tok) {
         Type *ty = declarator(&tok, tok, basety, &ident);
         if ((attrs.is_inline || attrs.is_noreturn) && ty->kind != TY_FUNC)
             error_at(ident->loc, "function specifier may only declare a function");
+        if (ty->kind == TY_VOID)
+            error_at(ident->loc, "object cannot have void type");
 
         if (ty->kind == TY_FUNC) {
             if (attrs.align)
