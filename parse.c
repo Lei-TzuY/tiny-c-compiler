@@ -352,6 +352,15 @@ static Node *new_long(int64_t val) {
     return node;
 }
 
+static Node *new_size_t_num(int64_t val) {
+    Node *node = new_node(ND_NUM);
+    node->val = val;
+    // The x86-64 SysV target uses the LP64 data model, so size_t is
+    // represented by unsigned long.
+    node->ty = ty_ulong;
+    return node;
+}
+
 static bool is_lvalue(Node *node) {
     add_type(node);
 
@@ -3970,7 +3979,7 @@ static Node *primary(Token **rest, Token *tok) {
             ty->is_incomplete)
             error_at(op->loc, "invalid type for _Alignof");
         *rest = skip(tok, ")");
-        return new_num(ty->align);
+        return new_size_t_num(ty->align);
     }
 
     if (equal(tok, "sizeof")) {
@@ -3981,13 +3990,13 @@ static Node *primary(Token **rest, Token *tok) {
             if (invalid_sizeof_type(ty))
                 error_at(tok->loc, "invalid operand type for sizeof");
             *rest = skip(tok, ")");
-            return new_num(ty->size);
+            return new_size_t_num(ty->size);
         }
         Node *n = unary(rest, tok);
         add_type(n);
         if (invalid_sizeof_type(n->ty))
             error_at(tok->loc, "invalid operand type for sizeof");
-        return new_num(n->ty->size);
+        return new_size_t_num(n->ty->size);
     }
 
     if (tok->kind == TK_IDENT) {
