@@ -1,0 +1,36 @@
+name: Apply block extern initializer migration
+
+on:
+  push:
+    branches:
+      - agent/block-extern-initializer
+
+permissions:
+  contents: write
+
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/block-extern-initializer
+          fetch-depth: 0
+      - name: Apply block extern initializer migration
+        run: python3 tools/apply_block_extern_initializer.py
+      - name: Audit block extern initializer path
+        run: |
+          grep -nE 'block-scope extern declaration cannot have an initializer|is_extern|parse_static_.*initializer' parse.c | head -n 220
+      - name: Validate full suite
+        run: make clean && make test
+      - name: Commit generated source changes
+        run: |
+          if git diff --quiet; then
+            echo "No migration changes to commit"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add parse.c README.md Makefile test/block_extern_initializer.sh
+          git commit -m "Reject block-scope extern initializers"
+          git push origin HEAD:agent/block-extern-initializer
