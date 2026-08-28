@@ -1172,12 +1172,101 @@ static void note_storage_class(DeclAttrs *attrs, Token *tok) {
         error_at(tok->loc, "multiple storage class specifiers in one declaration");
 }
 
+typedef struct {
+    Token *first;
+    int n_bool;
+    int n_float;
+    int n_double;
+    int n_char;
+    int n_void;
+    int n_short;
+    int n_int;
+    int n_long;
+    int n_named;
+} TypeSpecState;
+
+static void mark_type_specifier(TypeSpecState *state, Token *tok) {
+    if (!state->first)
+        state->first = tok;
+}
+
+static void note_type_specifier(TypeSpecState *state, Token *tok, int *counter) {
+    mark_type_specifier(state, tok);
+    (*counter)++;
+}
+
+static void invalid_type_specifier_set(TypeSpecState *state) {
+    error_at(state->first->loc, "invalid type specifier combination");
+}
+
+static void validate_type_specifier_set(TypeSpecState *state,
+                                        bool saw_signed, bool saw_unsigned) {
+    if (!state->first)
+        return; // Preserve this compiler's existing implicit-int behavior.
+
+    if (state->n_bool > 1 || state->n_float > 1 || state->n_double > 1 ||
+        state->n_char > 1 || state->n_void > 1 || state->n_short > 1 ||
+        state->n_int > 1 || state->n_long > 2 || state->n_named > 1)
+        invalid_type_specifier_set(state);
+
+    bool has_sign = saw_signed || saw_unsigned;
+    int integer_specs = state->n_short + state->n_int + state->n_long;
+    int primitive_specs = state->n_bool + state->n_float + state->n_double +
+                          state->n_char + state->n_void + integer_specs;
+
+    if (state->n_named) {
+        if (primitive_specs || has_sign)
+            invalid_type_specifier_set(state);
+        return;
+    }
+
+    if (state->n_void) {
+        if (primitive_specs != 1 || has_sign)
+            invalid_type_specifier_set(state);
+        return;
+    }
+
+    if (state->n_bool) {
+        if (primitive_specs != 1 || has_sign)
+            invalid_type_specifier_set(state);
+        return;
+    }
+
+    if (state->n_char) {
+        if (state->n_float || state->n_double || state->n_void || state->n_bool ||
+            integer_specs)
+            invalid_type_specifier_set(state);
+        return;
+    }
+
+    if (state->n_float) {
+        if (primitive_specs != 1 || has_sign)
+            invalid_type_specifier_set(state);
+        return;
+    }
+
+    if (state->n_double) {
+        if (state->n_bool || state->n_float || state->n_char || state->n_void ||
+            state->n_short || state->n_int || has_sign || state->n_long > 1)
+            invalid_type_specifier_set(state);
+        if (state->n_long == 1)
+            error_at(state->first->loc, "long double is not supported by this target");
+        return;
+    }
+
+    // Remaining legal spellings are the signed/unsigned integer family:
+    // [signed|unsigned] [short|long|long long] [int], in any order.
+    if (state->n_short && state->n_long)
+        invalid_type_specifier_set(state);
+}
+
 static Type *declspec_impl(Token **rest, Token *tok, DeclAttrs *attrs) {
     Type *ty = NULL;
     bool is_const = false;
     bool is_volatile = false;
     bool is_restrict = false;
     Token *restrict_tok = NULL;
+    TypeSpecState specs = {};
     bool saw_signed = false;
     bool saw_unsigned = false;
     bool saw_non_signable_type = false;
@@ -1249,10 +1338,30 @@ static Type *declspec_impl(Token **rest, Token *tok, DeclAttrs *attrs) {
             continue;
         }
 
-        if (consume(&tok, tok, "_Bool"))  { saw_non_signable_type = true; ty = ty_bool; continue; }
-        if (consume(&tok, tok, "float"))  { saw_non_signable_type = true; ty = ty_float; continue; }
-        if (consume(&tok, tok, "double")) { saw_non_signable_type = true; ty = ty_double; continue; }
+        Token *base_tok = tok;
+        if (consume(&tok, tok, "_Bool")) {
+            note_type_specifier(&specs, base_tok, &specs.n_bool);
+            saw_non_signable_type = true;
+            ty = ty_bool;
+            continue;
+        }
+        base_tok = tok;
+        if (consume(&tok, tok, "float")) {
+            note_type_specifier(&specs, base_tok, &specs.n_float);
+            saw_non_signable_type = true;
+            ty = ty_float;
+            continue;
+        }
+        base_tok = tok;
+        if (consume(&tok, tok, "double")) {
+            note_type_specifier(&specs, base_tok, &specs.n_double);
+            saw_non_signable_type = true;
+            ty = ty_double;
+            continue;
+        }
+        base_tok = tok;
         if (consume(&tok, tok, "char")) {
+            note_type_specifier(&specs, base_tok, &specs.n_char);
             if (saw_unsigned || (ty && ty->is_unsigned))
                 ty = ty_uchar;
             else if (saw_signed)
@@ -1261,16 +1370,34 @@ static Type *declspec_impl(Token **rest, Token *tok, DeclAttrs *attrs) {
                 ty = ty_char;
             continue;
         }
-        if (consume(&tok, tok, "void"))   { saw_non_signable_type = true; ty = ty_void; continue; }
-        if (consume(&tok, tok, "short"))  { ty = (ty && ty->is_unsigned) ? ty_ushort : ty_short; continue; }
+        base_tok = tok;
+        if (consume(&tok, tok, "void")) {
+            note_type_specifier(&specs, base_tok, &specs.n_void);
+            saw_non_signable_type = true;
+            ty = ty_void;
+            continue;
+        }
+        base_tok = tok;
+        if (consume(&tok, tok, "short")) {
+            note_type_specifier(&specs, base_tok, &specs.n_short);
+            ty = (ty && ty->is_unsigned) ? ty_ushort : ty_short;
+            continue;
+        }
 
+        Token *long_tok = tok;
         if (consume(&tok, tok, "long")) {
+            note_type_specifier(&specs, long_tok, &specs.n_long);
             bool already_long = ty == ty_long || ty == ty_ulong;
             bool already_llong = ty == ty_llong || ty == ty_ullong;
+            Token *second_long_tok = tok;
             bool adjacent_long = consume(&tok, tok, "long");
+            if (adjacent_long)
+                note_type_specifier(&specs, second_long_tok, &specs.n_long);
             if (already_llong)
                 error_at(tok->loc, "too many 'long' specifiers");
-            consume(&tok, tok, "int");
+            Token *long_int_tok = tok;
+            if (consume(&tok, tok, "int"))
+                note_type_specifier(&specs, long_int_tok, &specs.n_int);
             bool is_unsigned = ty && ty->is_unsigned;
             bool is_llong = already_long || adjacent_long;
             ty = is_llong ? (is_unsigned ? ty_ullong : ty_llong)
@@ -1280,6 +1407,7 @@ static Type *declspec_impl(Token **rest, Token *tok, DeclAttrs *attrs) {
 
         Token *sign_tok = tok;
         if (consume(&tok, tok, "signed")) {
+            mark_type_specifier(&specs, sign_tok);
             if (saw_signed)
                 error_at(sign_tok->loc, "duplicate 'signed' type specifier");
             if (saw_unsigned)
@@ -1300,6 +1428,7 @@ static Type *declspec_impl(Token **rest, Token *tok, DeclAttrs *attrs) {
 
         sign_tok = tok;
         if (consume(&tok, tok, "unsigned")) {
+            mark_type_specifier(&specs, sign_tok);
             if (saw_unsigned)
                 error_at(sign_tok->loc, "duplicate 'unsigned' type specifier");
             if (saw_signed)
@@ -1317,24 +1446,29 @@ static Type *declspec_impl(Token **rest, Token *tok, DeclAttrs *attrs) {
             continue;
         }
 
+        Token *int_tok = tok;
         if (consume(&tok, tok, "int")) {
+            note_type_specifier(&specs, int_tok, &specs.n_int);
             if (!ty) ty = ty_int;
             continue;
         }
 
         if (equal(tok, "union")) {
+            note_type_specifier(&specs, tok, &specs.n_named);
             saw_non_signable_type = true;
             ty = record_decl(&tok, tok->next, true);
             continue;
         }
 
         if (equal(tok, "struct")) {
+            note_type_specifier(&specs, tok, &specs.n_named);
             saw_non_signable_type = true;
             ty = record_decl(&tok, tok->next, false);
             continue;
         }
 
         if (equal(tok, "enum")) {
+            note_type_specifier(&specs, tok, &specs.n_named);
             saw_non_signable_type = true;
             ty = enum_decl(&tok, tok->next);
             continue;
@@ -1349,6 +1483,7 @@ static Type *declspec_impl(Token **rest, Token *tok, DeclAttrs *attrs) {
                 break;
             TypeDef *td = find_typedef(tok);
             if (td) {
+                note_type_specifier(&specs, tok, &specs.n_named);
                 tok = tok->next;
                 ty = td->ty;
                 saw_typedef_type = true;
@@ -1363,6 +1498,7 @@ static Type *declspec_impl(Token **rest, Token *tok, DeclAttrs *attrs) {
     ty = ty ? ty : ty_int;
     if ((saw_signed || saw_unsigned) && saw_non_signable_type)
         error_at(sign_spec->loc, "signed/unsigned type specifier requires an integer base type");
+    validate_type_specifier_set(&specs, saw_signed, saw_unsigned);
     if (is_restrict && !is_restrict_qualifiable_type(ty))
         error_at(restrict_tok->loc,
                  "restrict qualifier requires a pointer to object or incomplete type");
