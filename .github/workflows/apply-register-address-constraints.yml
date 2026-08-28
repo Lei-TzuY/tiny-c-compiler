@@ -1,0 +1,36 @@
+name: Apply register address constraint migration
+
+on:
+  push:
+    branches:
+      - agent/register-address-constraints
+
+permissions:
+  contents: write
+
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/register-address-constraints
+          fetch-depth: 0
+      - name: Apply register address constraint migration
+        run: python3 tools/apply_register_address_constraints.py
+      - name: Audit register metadata and address checks
+        run: |
+          grep -nE 'is_register|address_designates_register_object|cannot take address of register object' minicc.h parse.c | head -n 220
+      - name: Validate full suite
+        run: make clean && make test
+      - name: Commit generated source changes
+        run: |
+          if git diff --quiet; then
+            echo "No migration changes to commit"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add minicc.h parse.c README.md Makefile test/register_address_constraints.sh
+          git commit -m "Enforce register address constraints"
+          git push origin HEAD:agent/register-address-constraints
