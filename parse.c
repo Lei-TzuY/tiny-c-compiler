@@ -251,6 +251,7 @@ typedef struct {
     bool is_static;
     bool is_extern;
     bool is_register;
+    bool is_typedef;
     bool is_inline;
     bool is_noreturn;
     int storage_class_count;
@@ -310,7 +311,8 @@ static bool is_typename(Token *tok) {
 // (storage-class-specifier | type-qualifier | type-name)
 static bool is_decl_start(Token *tok) {
     if (is_typename(tok)) return true;
-    if (equal(tok, "auto") || equal(tok, "static") || equal(tok, "extern")) return true;
+    if (equal(tok, "auto") || equal(tok, "static") || equal(tok, "extern") ||
+        equal(tok, "typedef")) return true;
     if (equal(tok, "const") || equal(tok, "volatile") || equal(tok, "restrict")) return true;
     if (equal(tok, "register") || equal(tok, "inline")) return true;
     if (equal(tok, "_Alignas") || equal(tok, "_Noreturn")) return true;
@@ -812,7 +814,7 @@ static Type *record_decl(Token **rest, Token *tok, bool is_union) {
         DeclAttrs attrs = {};
         Type *basety = declspec_with_attrs(&tok, tok, &attrs);
         if (attrs.is_auto || attrs.is_static || attrs.is_extern || attrs.is_register ||
-            attrs.is_inline || attrs.is_noreturn)
+            attrs.is_typedef || attrs.is_inline || attrs.is_noreturn)
             error_at(tok->loc, "storage/function specifier is not allowed on a record member");
         for (bool first = true; !consume(&tok, tok, ";"); first = false) {
             if (!first)
@@ -1375,6 +1377,12 @@ static Type *declspec_impl(Token **rest, Token *tok, DeclAttrs *attrs) {
         if (consume(&tok, tok, "extern")) {
             note_storage_class(attrs, storage_tok);
             attrs->is_extern = true;
+            continue;
+        }
+        storage_tok = tok;
+        if (consume(&tok, tok, "typedef")) {
+            note_storage_class(attrs, storage_tok);
+            attrs->is_typedef = true;
             continue;
         }
 
@@ -3213,11 +3221,36 @@ static void parse_automatic_aggregate_subobject(Node **tail, Node *lhs, Type *ty
 }
 
 
+static Token *parse_typedef_declaration(Token *tok, Type *basety,
+                                        DeclAttrs *attrs) {
+    if (attrs->align)
+        error_at(tok->loc, "_Alignas is not allowed on a typedef declaration");
+    if (attrs->is_inline || attrs->is_noreturn)
+        error_at(tok->loc, "function specifier is not allowed on a typedef declaration");
+    if (equal(tok, ";"))
+        error_at(tok->loc, "typedef declaration requires a declarator");
+
+    for (;;) {
+        Token *ident;
+        Type *ty = declarator(&tok, tok, basety, &ident);
+        if (equal(tok, "="))
+            error_at(tok->loc, "typedef declaration cannot have an initializer");
+        push_typedef(ident, ty);
+        if (!consume(&tok, tok, ","))
+            break;
+    }
+    return skip(tok, ";");
+}
+
 // declaration = declspec (declarator ("=" (expr | "{" initializer "}"))?)
 //               ("," declarator ("=" (expr | "{" initializer "}"))?)* ";"
 static Node *declaration(Token **rest, Token *tok) {
     DeclAttrs attrs = {};
     Type *basety = declspec_with_attrs(&tok, tok, &attrs);
+    if (attrs.is_typedef) {
+        *rest = parse_typedef_declaration(tok, basety, &attrs);
+        return new_node(ND_EXPR_STMT);
+    }
     bool is_static = attrs.is_static;
     bool is_extern = attrs.is_extern;
     if (is_static && is_extern)
@@ -3775,22 +3808,6 @@ static Node *stmt(Token **rest, Token *tok) {
         node->body = head.next;
         leave_scope();
         return node;
-    }
-
-    if (equal(tok, "typedef")) {
-        tok = tok->next;
-        Type *basety = declspec(&tok, tok);
-        if (!equal(tok, ";")) {
-            for (;;) {
-                Token *ident;
-                Type *ty = declarator(&tok, tok, basety, &ident);
-                push_typedef(ident, ty);
-                if (!consume(&tok, tok, ","))
-                    break;
-            }
-        }
-        *rest = skip(tok, ";");
-        return new_node(ND_EXPR_STMT);
     }
 
     // Labeled statement: ident ":"  stmt
@@ -4901,25 +4918,12 @@ Program *parse(Token *tok) {
             continue;
         }
 
-        // Top-level typedef
-        if (equal(tok, "typedef")) {
-            tok = tok->next;
-            Type *basety = declspec(&tok, tok);
-            if (!equal(tok, ";")) {
-                for (;;) {
-                    Token *ident;
-                    Type *ty = declarator(&tok, tok, basety, &ident);
-                    push_typedef(ident, ty);
-                    if (!consume(&tok, tok, ","))
-                        break;
-                }
-            }
-            tok = skip(tok, ";");
-            continue;
-        }
-
         DeclAttrs attrs = {};
         Type *basety = declspec_with_attrs(&tok, tok, &attrs);
+        if (attrs.is_typedef) {
+            tok = parse_typedef_declaration(tok, basety, &attrs);
+            continue;
+        }
         bool is_static = attrs.is_static;
         bool is_extern = attrs.is_extern;
         if (is_static && is_extern)
