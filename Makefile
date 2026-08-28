@@ -25,6 +25,7 @@ test: minicc
 	bash ./test/enum_constexpr_tags.sh
 	bash ./test/abi_stack_args.sh
 	bash ./test/prototype_params.sh
+	bash ./test/parameter_array_qualifiers.sh
 	bash ./test/function_pointer_prototype.sh
 	bash ./test/callable_declarators.sh
 	bash ./test/prototype_arity.sh

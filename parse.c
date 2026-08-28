@@ -260,8 +260,9 @@ static Type *declspec_with_attrs(Token **rest, Token *tok, DeclAttrs *attrs);
 static int validate_requested_alignment(Type *ty, int requested, Token *at);
 static void apply_object_alignment(Obj *var, Type *ty, int requested, Token *at);
 static Type *declarator_impl(Token **rest, Token *tok, Type *ty, Token **ident,
-                             bool allow_abstract);
-static Type *type_suffix(Token **rest, Token *tok, Type *ty);
+                             bool allow_abstract, bool parameter_declarator);
+static Type *type_suffix(Token **rest, Token *tok, Type *ty,
+                         bool allow_parameter_array_syntax);
 static Type *declarator(Token **rest, Token *tok, Type *ty, Token **ident);
 static Type *abstract_declarator(Token **rest, Token *tok, Type *ty, Token **ident);
 static Type *type_name(Token **rest, Token *tok);
@@ -1351,9 +1352,14 @@ static Type *declspec_with_attrs(Token **rest, Token *tok, DeclAttrs *attrs) {
 }
 
 static Type *adjust_param_type(Type *ty) {
-    // C adjusts array and function parameter declarations to pointers.
-    if (ty->kind == TY_ARRAY)
-        return pointer_to(ty->base);
+    // C adjusts array and function parameter declarations to pointers. Type
+    // qualifiers written inside the outermost parameter-array brackets qualify
+    // the adjusted pointer itself, not the element type.
+    if (ty->kind == TY_ARRAY) {
+        Type *ptr = pointer_to(ty->base);
+        return qualify_type(ptr, ty->param_array_const, ty->param_array_volatile,
+                            ty->param_array_restrict);
+    }
     if (ty->kind == TY_FUNC)
         return pointer_to(ty);
     return ty;
@@ -1391,7 +1397,7 @@ static Type *func_params(Token **rest, Token *tok, Type *return_ty) {
 
         Type *basety = declspec(&tok, tok);
         Token *name = NULL;
-        Type *param_ty = declarator_impl(&tok, tok, basety, &name, true);
+        Type *param_ty = declarator_impl(&tok, tok, basety, &name, true, true);
         param_ty = adjust_param_type(param_ty);
 
         // The only valid non-pointer use of void in a parameter-type-list is
@@ -1432,7 +1438,8 @@ static Type *func_params(Token **rest, Token *tok, Type *return_ty) {
 // Parse postfix type constructors. Arrays associate from the inside out, so
 // `int a[2][3]` becomes array(2, array(3, int)); function suffixes retain the
 // complete prototype on TY_FUNC.
-static Type *type_suffix(Token **rest, Token *tok, Type *ty) {
+static Type *type_suffix(Token **rest, Token *tok, Type *ty,
+                         bool allow_parameter_array_syntax) {
     if (equal(tok, "(")) {
         if (ty->kind == TY_ARRAY)
             error_at(tok->loc, "function cannot return an array type");
@@ -1444,6 +1451,56 @@ static Type *type_suffix(Token **rest, Token *tok, Type *ty) {
     if (equal(tok, "[")) {
         Token *bracket = tok;
         tok = tok->next;
+
+        bool param_const = false;
+        bool param_volatile = false;
+        bool param_restrict = false;
+        bool param_static = false;
+
+        if (!allow_parameter_array_syntax &&
+            (equal(tok, "const") || equal(tok, "volatile") ||
+             equal(tok, "restrict") || equal(tok, "static")))
+            error_at(tok->loc,
+                     "array qualifiers/static are only allowed in the outermost function parameter array");
+
+        if (allow_parameter_array_syntax) {
+            while (equal(tok, "const") || equal(tok, "volatile") ||
+                   equal(tok, "restrict")) {
+                if (consume(&tok, tok, "const"))
+                    param_const = true;
+                else if (consume(&tok, tok, "volatile"))
+                    param_volatile = true;
+                else {
+                    consume(&tok, tok, "restrict");
+                    param_restrict = true;
+                }
+            }
+
+            if (consume(&tok, tok, "static")) {
+                param_static = true;
+                while (equal(tok, "const") || equal(tok, "volatile") ||
+                       equal(tok, "restrict")) {
+                    if (consume(&tok, tok, "const"))
+                        param_const = true;
+                    else if (consume(&tok, tok, "volatile"))
+                        param_volatile = true;
+                    else {
+                        consume(&tok, tok, "restrict");
+                        param_restrict = true;
+                    }
+                }
+            }
+
+            if (equal(tok, "static"))
+                error_at(tok->loc, "duplicate static in parameter array declarator");
+            if (equal(tok, "*"))
+                error_at(tok->loc,
+                         "variable-length parameter array '*' bounds are not supported");
+            if (param_static && equal(tok, "]"))
+                error_at(bracket->loc,
+                         "static parameter array declarator requires an explicit bound");
+        }
+
         int len = 0;
         if (!equal(tok, "]")) {
             Node *bound = ternary(&tok, tok);
@@ -1465,7 +1522,7 @@ static Type *type_suffix(Token **rest, Token *tok, Type *ty) {
             }
         }
         tok = skip(tok, "]");
-        ty = type_suffix(rest, tok, ty);
+        ty = type_suffix(rest, tok, ty, false);
         if (ty->kind == TY_FUNC)
             error_at(bracket->loc, "array element type cannot be a function");
         if (ty->kind == TY_VOID)
@@ -1475,7 +1532,15 @@ static Type *type_suffix(Token **rest, Token *tok, Type *ty) {
         if (ty->kind == TY_STRUCT && ty->has_flexible_array_member)
             error_at(bracket->loc,
                      "array element type contains a flexible array member");
-        return array_of(ty, len);
+
+        Type *arr = array_of(ty, len);
+        if (allow_parameter_array_syntax) {
+            arr->param_array_const = param_const;
+            arr->param_array_volatile = param_volatile;
+            arr->param_array_restrict = param_restrict;
+        }
+        (void)param_static; // `static` is a call-site minimum-bound contract, not type identity.
+        return arr;
     }
 
     *rest = tok;
@@ -1490,7 +1555,7 @@ static Type *type_suffix(Token **rest, Token *tok, Type *ty) {
 // arbitrarily nested pointer/array/function groupings without syntax-specific
 // special cases.
 static Type *declarator_impl(Token **rest, Token *tok, Type *ty, Token **ident,
-                             bool allow_abstract) {
+                             bool allow_abstract, bool parameter_declarator) {
     while (consume(&tok, tok, "*")) {
         ty = pointer_to(ty);
         bool ptr_const = false;
@@ -1522,15 +1587,20 @@ static Type *declarator_impl(Token **rest, Token *tok, Type *ty, Token **ident,
         (equal(tok->next, ")") || is_typename(tok->next) ||
          equal(tok->next, "const") || equal(tok->next, "volatile") ||
          equal(tok->next, "restrict") || equal(tok->next, "register")))
-        return type_suffix(rest, tok, ty);
+        return type_suffix(rest, tok, ty, false);
 
     if (equal(tok, "(")) {
         Token *start = tok;
         Type dummy = {};
-        declarator_impl(&tok, start->next, &dummy, ident, allow_abstract);
+        declarator_impl(&tok, start->next, &dummy, ident, allow_abstract,
+                        parameter_declarator);
         tok = skip(tok, ")");
-        ty = type_suffix(rest, tok, ty);
-        return declarator_impl(&tok, start->next, ty, ident, allow_abstract);
+        // A suffix outside a parenthesized declarator is not the direct
+        // outermost array derivation of the parameter identifier. Parameter
+        // array qualifiers/static are therefore forbidden at this level.
+        ty = type_suffix(rest, tok, ty, false);
+        return declarator_impl(&tok, start->next, ty, ident, allow_abstract,
+                               parameter_declarator);
     }
 
     if (tok->kind == TK_IDENT) {
@@ -1542,15 +1612,15 @@ static Type *declarator_impl(Token **rest, Token *tok, Type *ty, Token **ident,
         error_at(tok->loc, "expected a variable name");
     }
 
-    return type_suffix(rest, tok, ty);
+    return type_suffix(rest, tok, ty, parameter_declarator);
 }
 
 static Type *declarator(Token **rest, Token *tok, Type *ty, Token **ident) {
-    return declarator_impl(rest, tok, ty, ident, false);
+    return declarator_impl(rest, tok, ty, ident, false, false);
 }
 
 static Type *abstract_declarator(Token **rest, Token *tok, Type *ty, Token **ident) {
-    return declarator_impl(rest, tok, ty, ident, true);
+    return declarator_impl(rest, tok, ty, ident, true, false);
 }
 
 // type-name = declaration-specifiers abstract-declarator?

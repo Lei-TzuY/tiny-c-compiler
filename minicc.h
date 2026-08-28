@@ -89,6 +89,12 @@ struct Type {
     bool has_flexible_array_member; // complete struct ends in a flexible array member
     Type *base;       // Pointer or array
     int array_len;    // Array
+    // Parameter-array qualifiers written inside the outermost [] apply
+    // to the pointer produced by C's array-parameter adjustment. These
+    // fields exist only until func_params() performs that adjustment.
+    bool param_array_const;
+    bool param_array_volatile;
+    bool param_array_restrict;
     Member *members;  // Struct members
     Type *return_ty;  // TY_FUNC: return type
     Obj *params;       // TY_FUNC: declared parameter types (metadata Obj list)
