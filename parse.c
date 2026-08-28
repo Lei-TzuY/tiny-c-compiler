@@ -1242,9 +1242,10 @@ static void invalid_type_specifier_set(TypeSpecState *state) {
 }
 
 static void validate_type_specifier_set(TypeSpecState *state,
-                                        bool saw_signed, bool saw_unsigned) {
+                                        bool saw_signed, bool saw_unsigned,
+                                        Token *end) {
     if (!state->first)
-        return; // Preserve this compiler's existing implicit-int behavior.
+        error_at(end->loc, "declaration requires a type specifier");
 
     if (state->n_bool > 1 || state->n_float > 1 || state->n_double > 1 ||
         state->n_char > 1 || state->n_void > 1 || state->n_short > 1 ||
@@ -1546,7 +1547,7 @@ static Type *declspec_impl(Token **rest, Token *tok, DeclAttrs *attrs) {
     ty = ty ? ty : ty_int;
     if ((saw_signed || saw_unsigned) && saw_non_signable_type)
         error_at(sign_spec->loc, "signed/unsigned type specifier requires an integer base type");
-    validate_type_specifier_set(&specs, saw_signed, saw_unsigned);
+    validate_type_specifier_set(&specs, saw_signed, saw_unsigned, tok);
     if (is_restrict && !is_restrict_qualifiable_type(ty))
         error_at(restrict_tok->loc,
                  "restrict qualifier requires a pointer to object or incomplete type");

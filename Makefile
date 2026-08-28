@@ -47,6 +47,7 @@ test: minicc
 	bash ./test/storage_class_specifiers.sh
 	bash ./test/register_addressability.sh
 	bash ./test/typedef_storage_class.sh
+	bash ./test/implicit_int_constraints.sh
 	bash ./test/cast_constraints.sh
 	bash ./test/switch_constraints.sh
 	bash ./test/nested_switch_labels.sh
