@@ -31,7 +31,6 @@ bool is_numeric(Type *ty) {
     return is_integer(ty) || is_flonum(ty);
 }
 
-
 // SysV AMD64 classifies records up to two eightbytes independently.  This
 // compiler's scalar type system needs only INTEGER and SSE classes: integers and
 // pointers contribute INTEGER, float/double contribute SSE, and overlapping
@@ -248,7 +247,7 @@ static bool is_scalar_operand(Type *ty) {
         return true;
 
     // Array and function designators undergo the standard conversions to
-    // pointers in scalar value contexts such as !, &&, and ||.
+    // pointers in scalar value contexts such as !, &&, ||, and comparisons.
     return ty->kind == TY_ARRAY || ty->kind == TY_FUNC;
 }
 
@@ -360,6 +359,8 @@ void add_type(Node *node) {
     case ND_NE:
     case ND_LT:
     case ND_LE:
+        if (!is_scalar_operand(node->lhs->ty) || !is_scalar_operand(node->rhs->ty))
+            error("scalar operands required for comparison operator");
         node->ty = ty_int;
         return;
 
