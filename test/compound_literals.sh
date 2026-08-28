@@ -36,6 +36,7 @@ assert_run 7 'int main(){return ((int){3}=7);}'
 assert_run 9 'int main(){int *p=&(int){4}; *p=9; return *p;}'
 assert_run 12 'int main(){int i=1; int *p=&(int){i++}; return *p*10+i;}'
 assert_run 4 'int main(){return sizeof((int){9});}'
+assert_run 5 'int main(){return (int){5}++;}'
 
 # Aggregate, designated, nested, union, string-array and postfix uses.
 assert_run 5 'struct S{int x;int y;}; int main(){return (struct S){1,5}.y;}'
@@ -57,6 +58,9 @@ assert_run 7 'int *p=&(int){7}; int main(){return *p;}'
 assert_run 6 'struct S{int x;}; struct S *p=&(struct S){.x=6}; int main(){return p->x;}'
 assert_run 6 'int *p=(int[3]){2,4,6}; int main(){return p[2];}'
 assert_run 99 'char *p=(char[4]){"abc"}; int main(){return p[2];}'
+assert_run 9 'struct S{int x;int y;}; int *p=&(struct S){.x=3,.y=9}.y; int main(){return *p;}'
+assert_run 4 'int *p=(int[3]){2,4,6}+1; int main(){return *p;}'
+assert_run 11 'int x=11; int **p=&(int *){&x}; int main(){return **p;}'
 
 # Qualifiers and invalid forms keep ordinary C lvalue/constant rules.
 assert_reject 'int main(){(const int){3}=4; return 0;}'
