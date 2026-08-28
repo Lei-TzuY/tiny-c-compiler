@@ -36,6 +36,7 @@ test: minicc
 	bash ./test/comparison_scalar.sh
 	bash ./test/pointer_equality.sh
 	bash ./test/conditional_operator.sh
+	bash ./test/null_pointer_constants.sh
 	bash ./test/pointer_arithmetic.sh
 	bash ./test/lvalue_semantics.sh
 	bash ./test/type_qualifiers.sh
