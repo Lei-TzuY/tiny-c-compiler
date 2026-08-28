@@ -1,0 +1,31 @@
+name: Replay compound literals v3
+on:
+  push:
+    branches:
+      - agent/compound-literals-v3
+permissions:
+  contents: write
+jobs:
+  replay:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Replay validated permanent patch
+        run: |
+          git fetch origin agent/compound-literals-v2
+          git diff --binary 6a182e23d7da8efa1c43e402fd5079f01c85e745 2b8798fc42af5e0417e9f5a42b68f0f0da3e8b47 -- minicc.h parse.c codegen.c Makefile README.md test/compound_literals.sh > /tmp/compound-literals.patch
+          git apply -3 /tmp/compound-literals.patch
+      - name: Test
+        run: |
+          make clean
+          make test
+      - name: Commit permanent changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add minicc.h parse.c codegen.c Makefile README.md test/compound_literals.sh
+          git commit -m "Implement complete-type compound literals"
+          git push
