@@ -926,6 +926,76 @@ static Type *const_binary_type(Node *node) {
     return get_common_type(node->lhs->ty, node->rhs->ty);
 }
 
+static int64_t signed_const_min(Type *ty) {
+    if (!ty || !is_integer(ty) || ty->is_unsigned)
+        error("signed integer type required in integer constant expression");
+    if (ty->size == 1) return INT8_MIN;
+    if (ty->size == 2) return INT16_MIN;
+    if (ty->size == 4) return INT32_MIN;
+    return INT64_MIN;
+}
+
+static int64_t signed_const_max(Type *ty) {
+    if (!ty || !is_integer(ty) || ty->is_unsigned)
+        error("signed integer type required in integer constant expression");
+    if (ty->size == 1) return INT8_MAX;
+    if (ty->size == 2) return INT16_MAX;
+    if (ty->size == 4) return INT32_MAX;
+    return INT64_MAX;
+}
+
+static int64_t checked_signed_add(int64_t lhs, int64_t rhs, Type *ty) {
+    int64_t min = signed_const_min(ty);
+    int64_t max = signed_const_max(ty);
+    if ((rhs > 0 && lhs > max - rhs) ||
+        (rhs < 0 && lhs < min - rhs))
+        error("signed overflow in integer constant expression");
+    return lhs + rhs;
+}
+
+static int64_t checked_signed_sub(int64_t lhs, int64_t rhs, Type *ty) {
+    int64_t min = signed_const_min(ty);
+    int64_t max = signed_const_max(ty);
+    if ((rhs < 0 && lhs > max + rhs) ||
+        (rhs > 0 && lhs < min + rhs))
+        error("signed overflow in integer constant expression");
+    return lhs - rhs;
+}
+
+static int64_t checked_signed_mul(int64_t lhs, int64_t rhs, Type *ty) {
+    int64_t min = signed_const_min(ty);
+    int64_t max = signed_const_max(ty);
+
+    if (!lhs || !rhs)
+        return 0;
+    if (lhs == -1) {
+        if (rhs == min)
+            error("signed overflow in integer constant expression");
+        return -rhs;
+    }
+    if (rhs == -1) {
+        if (lhs == min)
+            error("signed overflow in integer constant expression");
+        return -lhs;
+    }
+
+    if (lhs > 0) {
+        if (rhs > 0) {
+            if (lhs > max / rhs)
+                error("signed overflow in integer constant expression");
+        } else if (rhs < min / lhs) {
+            error("signed overflow in integer constant expression");
+        }
+    } else if (rhs > 0) {
+        if (lhs < min / rhs)
+            error("signed overflow in integer constant expression");
+    } else if (lhs < max / rhs) {
+        error("signed overflow in integer constant expression");
+    }
+
+    return lhs * rhs;
+}
+
 int64_t eval_const_expr(Node *node) {
     if (!node)
         error("expected integer constant expression");
@@ -942,8 +1012,13 @@ int64_t eval_const_expr(Node *node) {
         if (!is_integer(node->ty))
             error("floating value is not an integer constant expression");
         int64_t val = cast_const_integer(eval_const_expr(node->lhs), node->ty);
-        uint64_t bits = 0 - (uint64_t)val;
-        return cast_const_integer((int64_t)bits, node->ty);
+        if (node->ty->is_unsigned) {
+            uint64_t bits = 0 - (uint64_t)val;
+            return cast_const_integer((int64_t)bits, node->ty);
+        }
+        if (val == signed_const_min(node->ty))
+            error("signed overflow in integer constant expression");
+        return -val;
     }
 
     case ND_ADD:
@@ -954,14 +1029,26 @@ int64_t eval_const_expr(Node *node) {
         Type *ty = const_binary_type(node);
         int64_t lhs = cast_const_integer(eval_const_expr(node->lhs), ty);
         int64_t rhs = cast_const_integer(eval_const_expr(node->rhs), ty);
-        uint64_t bits;
+
+        if (ty->is_unsigned) {
+            uint64_t bits;
+            if (node->kind == ND_ADD)
+                bits = (uint64_t)lhs + (uint64_t)rhs;
+            else if (node->kind == ND_SUB)
+                bits = (uint64_t)lhs - (uint64_t)rhs;
+            else
+                bits = (uint64_t)lhs * (uint64_t)rhs;
+            return cast_const_integer((int64_t)bits, ty);
+        }
+
+        int64_t val;
         if (node->kind == ND_ADD)
-            bits = (uint64_t)lhs + (uint64_t)rhs;
+            val = checked_signed_add(lhs, rhs, ty);
         else if (node->kind == ND_SUB)
-            bits = (uint64_t)lhs - (uint64_t)rhs;
+            val = checked_signed_sub(lhs, rhs, ty);
         else
-            bits = (uint64_t)lhs * (uint64_t)rhs;
-        return cast_const_integer((int64_t)bits, ty);
+            val = checked_signed_mul(lhs, rhs, ty);
+        return cast_const_integer(val, ty);
     }
 
     case ND_DIV:
@@ -982,10 +1069,8 @@ int64_t eval_const_expr(Node *node) {
             return cast_const_integer((int64_t)bits, ty);
         }
 
-        if (rhs == -1 &&
-            ((ty->size == 4 && lhs == INT32_MIN) ||
-             (ty->size == 8 && lhs == INT64_MIN)))
-            error("signed division overflow in integer constant expression");
+        if (rhs == -1 && lhs == signed_const_min(ty))
+            error("signed overflow in integer constant expression");
 
         int64_t val = node->kind == ND_DIV ? lhs / rhs : lhs % rhs;
         return cast_const_integer(val, ty);
@@ -1027,8 +1112,16 @@ int64_t eval_const_expr(Node *node) {
         if (count >= (uint64_t)width)
             error("invalid shift count in integer constant expression");
 
-        if (node->kind == ND_SHL)
-            return cast_const_integer((int64_t)((uint64_t)lhs << count), left_ty);
+        if (node->kind == ND_SHL) {
+            if (left_ty->is_unsigned)
+                return cast_const_integer((int64_t)((uint64_t)lhs << count), left_ty);
+            if (lhs < 0)
+                error("invalid signed left shift in integer constant expression");
+            int64_t max = signed_const_max(left_ty);
+            if (count && lhs > (max >> count))
+                error("signed overflow in integer constant expression");
+            return cast_const_integer(lhs << count, left_ty);
+        }
         if (left_ty->is_unsigned)
             return cast_const_integer((int64_t)((uint64_t)lhs >> count), left_ty);
         return cast_const_integer((int64_t)(lhs >> count), left_ty);
