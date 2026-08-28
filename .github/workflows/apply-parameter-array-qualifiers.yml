@@ -1,0 +1,27 @@
+name: Apply parameter array qualifiers
+on:
+  push:
+    branches:
+      - agent/parameter-array-qualifiers
+permissions:
+  contents: write
+jobs:
+  migrate:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Apply migration
+        run: python3 tools/apply_parameter_array_qualifiers.py
+      - name: Test
+        run: make clean && make test
+      - name: Commit permanent changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add parse.c minicc.h Makefile README.md test/parameter_array_qualifiers.sh
+          git diff --cached --quiet && exit 0
+          git commit -m "Support parameter array qualifiers"
+          git push
