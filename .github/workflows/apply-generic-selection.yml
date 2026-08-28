@@ -1,0 +1,26 @@
+name: Apply generic selection
+on:
+  push:
+    branches:
+      - agent/c11-generic-selection
+permissions:
+  contents: write
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/c11-generic-selection
+      - name: Apply migration
+        run: python3 tools/apply_generic_selection.py
+      - name: Build compiler
+        run: make clean && make
+      - name: Commit parser changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add parse.c
+          git diff --cached --quiet && exit 0
+          git commit -m "Support C11 generic selection parsing"
+          git push origin HEAD:agent/c11-generic-selection
