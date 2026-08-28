@@ -1,0 +1,36 @@
+name: Apply auto storage-class migration
+
+on:
+  push:
+    branches:
+      - agent/auto-storage-class
+
+permissions:
+  contents: write
+
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/auto-storage-class
+          fetch-depth: 0
+      - name: Apply auto storage-class migration
+        run: python3 tools/apply_auto_storage_class.py
+      - name: Audit declaration specifier sites
+        run: |
+          grep -nE 'is_auto|storage_class_count|is_static|is_extern|is_register|is_inline|is_noreturn|declspec\(' parse.c | head -n 320
+      - name: Validate full suite
+        run: make clean && make test
+      - name: Commit generated source changes
+        run: |
+          if git diff --quiet; then
+            echo "No migration changes to commit"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add parse.c tokenize.c README.md Makefile test/storage_class_specifiers.sh
+          git commit -m "Support auto storage class and declaration constraints"
+          git push origin HEAD:agent/auto-storage-class
