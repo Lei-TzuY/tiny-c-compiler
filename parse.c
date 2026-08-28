@@ -423,6 +423,21 @@ static bool is_modifiable_lvalue(Node *node) {
     return true;
 }
 
+// `register` forbids applying unary & to the declared object. Member
+// access still depends on the containing object, so `&r.member` must reject
+// when `r` itself is register-qualified. Dereference breaks that chain:
+// taking `&*p` or `&p->member` is valid even when the pointer object `p` was
+// declared register, because the addressed object is the pointee.
+static bool is_register_based_lvalue(Node *node) {
+    if (!node)
+        return false;
+    if (node->kind == ND_VAR)
+        return node->var && node->var->is_register;
+    if (node->kind == ND_MEMBER)
+        return is_register_based_lvalue(node->lhs);
+    return false;
+}
+
 static bool is_addressable_expr(Node *node) {
     add_type(node);
 
@@ -431,7 +446,9 @@ static bool is_addressable_expr(Node *node) {
     // here with TY_FUNC.
     if (node->ty->kind == TY_FUNC)
         return node->kind == ND_VAR || node->kind == ND_DEREF;
-    return is_lvalue(node);
+    if (!is_lvalue(node))
+        return false;
+    return !is_register_based_lvalue(node);
 }
 
 // The controlling expression of a C11 generic selection is not
@@ -1621,6 +1638,7 @@ static Type *func_params(Token **rest, Token *tok, Type *return_ty) {
 
         Obj *param = calloc(1, sizeof(Obj));
         param->ty = param_ty;
+        param->is_register = param_attrs.is_register;
         if (name)
             param->name = strndup(name->loc, name->len);
         cur = cur->param_next = param;
@@ -3255,6 +3273,7 @@ static Node *declaration(Token **rest, Token *tok) {
             var->ty = ty;
         }
         apply_object_alignment(var, ty, attrs.align, ident);
+        var->is_register = attrs.is_register;
 
         if (!equal(tok, "="))
             continue;
@@ -4971,6 +4990,7 @@ Program *parse(Token *tok) {
                     error_at(ident->loc, "parameter name omitted in function definition");
                 Obj *var = create_lvar(meta->name);
                 var->ty = meta->ty;
+                var->is_register = meta->is_register;
                 pcur = pcur->param_next = var;
             }
 

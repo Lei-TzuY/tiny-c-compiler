@@ -45,6 +45,7 @@ test: minicc
 	bash ./test/type_qualifiers.sh
 	bash ./test/restrict_qualifier.sh
 	bash ./test/storage_class_specifiers.sh
+	bash ./test/register_addressability.sh
 	bash ./test/cast_constraints.sh
 	bash ./test/switch_constraints.sh
 	bash ./test/nested_switch_labels.sh
