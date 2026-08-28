@@ -1,0 +1,161 @@
+name: migrate-pointer-equality
+
+on:
+  push:
+    branches:
+      - fix/pointer-equality-compatibility
+
+permissions:
+  contents: write
+
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/pointer-equality-compatibility
+      - name: Apply pointer equality compatibility fix
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path('type.c')
+          s = p.read_text()
+          marker = 'static bool pointer_equality_compatible(Type *lhs, Type *rhs)'
+          if marker not in s:
+              anchor = '''static bool is_pointer_operand(Type *ty) {
+    return ty && (ty->kind == TY_PTR || ty->kind == TY_ARRAY || ty->kind == TY_FUNC);
+}
+'''
+              helper = r'''
+
+static Type *pointer_operand_target(Type *ty) {
+    if (!ty)
+        return NULL;
+    if (ty->kind == TY_PTR || ty->kind == TY_ARRAY)
+        return ty->base;
+    if (ty->kind == TY_FUNC)
+        return ty;
+    return NULL;
+}
+
+static Type *equality_type_identity(Type *ty) {
+    return ty && ty->origin ? ty->origin : ty;
+}
+
+static bool equality_type_compatible(Type *a, Type *b, bool ignore_top_qual) {
+    if (a == b)
+        return true;
+    if (!a || !b || a->kind != b->kind)
+        return false;
+    if (!ignore_top_qual &&
+        (a->is_const != b->is_const || a->is_volatile != b->is_volatile))
+        return false;
+
+    switch (a->kind) {
+    case TY_CHAR:
+    case TY_SHORT:
+    case TY_INT:
+    case TY_LONG:
+    case TY_LLONG:
+        return a->is_unsigned == b->is_unsigned;
+    case TY_BOOL:
+    case TY_VOID:
+    case TY_FLOAT:
+    case TY_DOUBLE:
+        return true;
+    case TY_PTR:
+        return equality_type_compatible(a->base, b->base, false);
+    case TY_ARRAY:
+        return equality_type_compatible(a->base, b->base, false) &&
+               (!a->array_len || !b->array_len || a->array_len == b->array_len);
+    case TY_STRUCT:
+        return equality_type_identity(a) == equality_type_identity(b);
+    case TY_FUNC: {
+        if (!equality_type_compatible(a->return_ty, b->return_ty, false))
+            return false;
+        if (!a->has_prototype || !b->has_prototype)
+            return true;
+        if (a->is_variadic != b->is_variadic)
+            return false;
+
+        Obj *pa = a->params;
+        Obj *pb = b->params;
+        while (pa && pb) {
+            if (!equality_type_compatible(pa->ty, pb->ty, true))
+                return false;
+            pa = pa->param_next;
+            pb = pb->param_next;
+        }
+        return !pa && !pb;
+    }
+    }
+    return false;
+}
+
+static bool pointer_equality_compatible(Type *lhs, Type *rhs) {
+    Type *a = pointer_operand_target(lhs);
+    Type *b = pointer_operand_target(rhs);
+    if (!a || !b)
+        return false;
+
+    // A pointer to void may be compared with a pointer to any object or
+    // incomplete type, but not with a function pointer.
+    if (a->kind == TY_VOID || b->kind == TY_VOID) {
+        Type *other = a->kind == TY_VOID ? b : a;
+        return other->kind != TY_FUNC;
+    }
+
+    // Equality permits pointers to compatible types, with top-level
+    // qualifiers on the pointed-to type ignored. Nested qualifiers remain
+    // significant because the recursive compatibility check does not ignore
+    // them below this first level.
+    return equality_type_compatible(a, b, true);
+}
+'''
+              if anchor not in s:
+                  raise SystemExit('type.c insertion anchor not found')
+              s = s.replace(anchor, anchor + helper, 1)
+
+              old = '''            (is_pointer_operand(node->lhs->ty) && is_pointer_operand(node->rhs->ty)) ||\n'''
+              new = '''            (is_pointer_operand(node->lhs->ty) && is_pointer_operand(node->rhs->ty) &&\n             pointer_equality_compatible(node->lhs->ty, node->rhs->ty)) ||\n'''
+              if old not in s:
+                  raise SystemExit('equality condition anchor not found')
+              s = s.replace(old, new, 1)
+              p.write_text(s)
+
+          t = Path('test/comparison_scalar.sh')
+          s = t.read_text()
+          if 'pointer equality compatibility' not in s:
+              old = '''  if ((p != 0) != 1) return 10;\n  return 0;\n}\nEOF\n'''
+              new = '''  if ((p != 0) != 1) return 10;\n  {\n    const int *cp = p;\n    void *vp = p;\n    if ((p == cp) != 1) return 11;\n    if ((vp == p) != 1) return 12;\n  }\n  return 0;\n}\nEOF\n'''
+              if old not in s:
+                  raise SystemExit('runtime test anchor not found')
+              s = s.replace(old, new, 1)
+
+              anchor = '''  'int main(void){void *p=0; void *q=0; return p<q;}'\\\ndo\n'''
+              repl = '''  'int main(void){void *p=0; void *q=0; return p<q;}' \\\n  'int main(void){int *p=0; double *q=0; return p==q;}' \\\n  'int main(void){struct A{int x;}; struct B{int x;}; struct A *p=0; struct B *q=0; return p!=q;}' \\\n  'int f(int x){return x;} double g(int x){return x;} int main(void){return f==g;}' \\\n  'int main(void){int **p=0; const int **q=0; return p==q;}'\\\ndo\n'''
+              if anchor not in s:
+                  raise SystemExit('compile-fail test anchor not found')
+              s = s.replace(anchor, repl, 1)
+              s = s.replace('# Equality requires two arithmetic operands, two pointer/designator operands,\n',
+                            '# Equality requires two arithmetic operands, compatible pointer/designator operands,\n')
+              s = s.replace('# or one pointer/designator and the integer null pointer constant 0.\n',
+                            '# or one pointer/designator and the integer null pointer constant 0. The pointer equality compatibility\n# cases below reject incompatible object/function pointer types while allowing void* and top-level qualifiers.\n')
+              t.write_text(s)
+          PY
+      - name: Run full test suite
+        run: make clean && make test
+      - name: Commit migrated files
+        shell: bash
+        run: |
+          if git diff --quiet -- type.c test/comparison_scalar.sh; then
+            exit 0
+          fi
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add type.c test/comparison_scalar.sh
+          git commit -m 'Enforce compatible pointer equality operands'
+          git push origin HEAD:fix/pointer-equality-compatibility
