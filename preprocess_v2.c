@@ -951,10 +951,12 @@ char *preprocess_v2_source(char *input, const char *source_name) {
 
     char *p = spliced;
     int line_no = 0;
+    int line_offset = 0;
+    char *logical_file = strdup(source_name ? source_name : "<stdin>");
     while (*p) {
         line_no++;
-        current_pp_file = source_name ? source_name : "<stdin>";
-        current_pp_line = line_no;
+        current_pp_file = logical_file;
+        current_pp_line = line_no + line_offset;
         char *line_start = p;
         while (*p && *p != '\n') p++;
         size_t line_len = (size_t)(p - line_start);
@@ -1023,6 +1025,34 @@ char *preprocess_v2_source(char *input, const char *source_name) {
                     free(sub);
                     free(owned);
                 }
+            } else if (is_cond_active() && !strcmp(directive, "line")) {
+                bool directive_comment = false;
+                char *expanded = expand_text(start, NULL, &directive_comment);
+                char *q = expanded;
+                while (*q == ' ' || *q == '\t') q++;
+                char *end = NULL;
+                long requested = strtol(q, &end, 10);
+                if (end == q || requested <= 0 || requested > 2147483647L)
+                    error("#line requires a positive decimal line number");
+                q = end;
+                while (*q == ' ' || *q == '\t') q++;
+                if (*q) {
+                    if (*q != '"')
+                        error("#line filename must be a string literal");
+                    char *name_start = ++q;
+                    while (*q && *q != '"') q++;
+                    if (!*q)
+                        error("unterminated #line filename");
+                    char *next_file = strndup(name_start, (size_t)(q - name_start));
+                    q++;
+                    while (*q == ' ' || *q == '\t') q++;
+                    if (*q)
+                        error("extra tokens after #line directive");
+                    free(logical_file);
+                    logical_file = next_file;
+                }
+                line_offset = (int)requested - (line_no + 1);
+                free(expanded);
             } else if (is_cond_active() && !strcmp(directive, "error")) {
                 error("#error %s", start);
             }
@@ -1047,6 +1077,7 @@ char *preprocess_v2_source(char *input, const char *source_name) {
     preprocess_depth--;
     current_pp_file = saved_file;
     current_pp_line = saved_line;
+    free(logical_file);
     return out.data;
 }
 
