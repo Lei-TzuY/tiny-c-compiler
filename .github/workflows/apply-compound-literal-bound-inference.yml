@@ -1,0 +1,29 @@
+name: Apply compound literal bound inference
+
+on:
+  push:
+    branches:
+      - agent/compound-literal-bound-inference
+
+permissions:
+  contents: write
+
+jobs:
+  migrate:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/compound-literal-bound-inference
+      - name: Apply patch
+        run: python3 tools/apply_compound_literal_bound_inference.py
+      - name: Run full test suite
+        run: make clean && make test
+      - name: Commit generated patch
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add parse.c test/compound_literals.sh README.md
+          git commit -m 'Infer unknown-bound compound literal arrays'
+          git push origin HEAD:agent/compound-literal-bound-inference
