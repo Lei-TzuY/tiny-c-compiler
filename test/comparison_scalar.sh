@@ -31,6 +31,8 @@ int main(void) {
   if ((z == 0) != 1) return 8;
   if ((0 == z) != 1) return 9;
   if ((p != 0) != 1) return 10;
+  const int *cp = &a[1];
+  if ((&a[0] < cp) != 1) return 11;
   return 0;
 }
 EOF
@@ -56,7 +58,10 @@ for src in \
   'int main(void){int x=0; int *p=&x; return p>1;}' \
   'int f(void){return 0;} int main(void){return f<f;}' \
   'int f(void){return 0;} int main(void){int (*p)(void)=f; return p<=p;}' \
-  'int main(void){void *p=0; void *q=0; return p<q;}'
+  'int main(void){void *p=0; void *q=0; return p<q;}' \
+  'int main(void){int x=0; double y=0; return &x<&y;}' \
+  'int main(void){struct A{int x;} a; struct B{int x;} b; return &a<=&b;}' \
+  'int main(void){int x=0; int *p=&x; const int *cp=&x; int **pp=&p; const int **cpp=&cp; return pp<cpp;}'
 do
   printf '%s\n' "$src" > tmp-comparison-scalar-bad.c
   if ./minicc tmp-comparison-scalar-bad.c >/dev/null 2>&1; then

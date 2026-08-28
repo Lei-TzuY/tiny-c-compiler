@@ -512,7 +512,8 @@ void add_type(Node *node) {
     case ND_LE:
         if ((is_numeric(node->lhs->ty) && is_numeric(node->rhs->ty)) ||
             (is_object_pointer_operand(node->lhs->ty) &&
-             is_object_pointer_operand(node->rhs->ty))) {
+             is_object_pointer_operand(node->rhs->ty) &&
+             pointer_equality_compatible(node->lhs->ty, node->rhs->ty))) {
             node->ty = ty_int;
             return;
         }
