@@ -50,6 +50,15 @@ assert_run 0 'int f(int *restrict p);int f(int *p){return *p;}int main(void){int
 assert_compile 'int f(int *restrict);int f(int *);int main(void){return 0;}'
 assert_reject 'int f(int *restrict *);int f(int **);int main(void){return 0;}'
 
+# Nested restrict qualification participates in pointer assignment conversion:
+# adding it is permitted, discarding it is not.
+assert_compile 'int main(void){int **src=0;int *restrict *dst=src;return dst!=0;}'
+assert_reject 'int main(void){int *restrict *src=0;int **dst=src;return dst!=0;}'
+
+# Conditional pointer composition unions the immediate pointed-to qualifier set.
+assert_run 0 'int main(void){int *restrict *a=0;int **b=0;return _Generic(1?a:b,int *restrict *:0,default:1);}'
+assert_reject 'int main(void){int *restrict *a=0;int **b=0;int **r=1?a:b;return r!=0;}'
+
 # Address-of preserves the restricted pointer object's nested type identity.
 assert_run 0 'int main(void){int *restrict p=0;return _Generic(&p,int *restrict *:0,default:1);}'
 

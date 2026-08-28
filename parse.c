@@ -3510,7 +3510,8 @@ static Node *expr(Token **rest, Token *tok) {
 static bool qualifier_superset(Type *dst, Type *src) {
     return dst && src &&
            (!src->is_const || dst->is_const) &&
-           (!src->is_volatile || dst->is_volatile);
+           (!src->is_volatile || dst->is_volatile) &&
+           (!src->is_restrict || dst->is_restrict);
 }
 
 static bool pointed_assignment_compatible(Type *dst, Type *src) {
@@ -3707,9 +3708,11 @@ static Type *conditional_result_type(Node *then, Node *els, Token *question) {
     if (tp && ep) {
         bool merged_const = tt->base->is_const || et->base->is_const;
         bool merged_volatile = tt->base->is_volatile || et->base->is_volatile;
+        bool merged_restrict = tt->base->is_restrict || et->base->is_restrict;
 
         if (type_compatible_ignoring_top_qual(tt->base, et->base))
-            return pointer_to(qualify_type(tt->base, merged_const, merged_volatile, false));
+            return pointer_to(qualify_type(tt->base, merged_const, merged_volatile,
+                                           merged_restrict));
 
         bool t_void = tt->base && tt->base->kind == TY_VOID;
         bool e_void = et->base && et->base->kind == TY_VOID;
