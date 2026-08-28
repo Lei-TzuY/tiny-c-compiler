@@ -241,6 +241,17 @@ Type *get_common_type(Type *ty1, Type *ty2) {
     return unsigned_integer_type(s);
 }
 
+static bool is_scalar_operand(Type *ty) {
+    if (!ty)
+        return false;
+    if (is_numeric(ty) || ty->kind == TY_PTR)
+        return true;
+
+    // Array and function designators undergo the standard conversions to
+    // pointers in scalar value contexts such as !, &&, and ||.
+    return ty->kind == TY_ARRAY || ty->kind == TY_FUNC;
+}
+
 void add_type(Node *node) {
     if (!node) return;
 
@@ -332,13 +343,23 @@ void add_type(Node *node) {
         node->ty = integer_promotion(node->lhs->ty);
         return;
 
+    case ND_LOGAND:
+    case ND_LOGOR:
+        if (!is_scalar_operand(node->lhs->ty) || !is_scalar_operand(node->rhs->ty))
+            error("scalar operands required for logical operator");
+        node->ty = ty_int;
+        return;
+
+    case ND_NOT:
+        if (!is_scalar_operand(node->lhs->ty))
+            error("scalar operand required for logical not");
+        node->ty = ty_int;
+        return;
+
     case ND_EQ:
     case ND_NE:
     case ND_LT:
     case ND_LE:
-    case ND_LOGAND:
-    case ND_LOGOR:
-    case ND_NOT:
         node->ty = ty_int;
         return;
 
