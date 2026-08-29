@@ -1,0 +1,36 @@
+name: Apply record static-assert support
+
+on:
+  push:
+    branches:
+      - agent/record-static-assert
+
+permissions:
+  contents: write
+
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/record-static-assert
+          fetch-depth: 0
+      - name: Apply migration
+        run: python3 tools/apply_record_static_assert.py
+      - name: Audit record assertion path
+        run: |
+          grep -n -B 4 -A 10 'parse_static_assertion(tok)' parse.c | head -n 80
+      - name: Validate full suite
+        run: make clean && make test
+      - name: Commit generated source changes
+        run: |
+          if git diff --quiet; then
+            echo "No generated changes"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add parse.c Makefile README.md test/record_static_assert.sh
+          git commit -m "Support C11 static assertions in record definitions"
+          git push origin HEAD:agent/record-static-assert
