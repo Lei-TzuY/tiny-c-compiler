@@ -90,11 +90,66 @@ cc -o tmp-mixed-union-host-main tmp-mixed-union-host-main.c tmp-mixed-union-mini
 ./tmp-mixed-union-host-main
 printf '%s\n' 'OK(mixed-union ABI): host GCC caller interoperates with minicc callee'
 
+# A union that recursively carries a flexible-array-member structure is still
+# a complete union object. C11 permits passing and returning that union by
+# value, so its SysV classification must agree with the host compiler rather
+# than treating the FAM marker as a MEMORY-class payload.
+cat > tmp-fam-union-host.c <<'EOF'
+struct F { int n; int data[]; };
+union Carrier { struct F f; long raw; };
+long host_fam_read(union Carrier u) { return u.raw; }
+union Carrier host_fam_make(long x) { union Carrier u; u.raw=x; return u; }
+EOF
+cc -std=c11 -pedantic-errors -c -o tmp-fam-union-host.o tmp-fam-union-host.c
+cat > tmp-fam-union-mini-caller.c <<'EOF'
+struct F { int n; int data[]; };
+union Carrier { struct F f; long raw; };
+long host_fam_read(union Carrier);
+union Carrier host_fam_make(long);
+int main(void) {
+  union Carrier u; u.raw=0x1122334455667788L;
+  if (host_fam_read(u)!=0x1122334455667788L) return 1;
+  union Carrier v=host_fam_make(0x0102030405060708L);
+  return v.raw==0x0102030405060708L ? 0 : 2;
+}
+EOF
+./minicc tmp-fam-union-mini-caller.c > tmp-fam-union-mini-caller.s
+cc -o tmp-fam-union-mini-caller tmp-fam-union-mini-caller.s tmp-fam-union-host.o
+./tmp-fam-union-mini-caller
+printf '%s\n' 'OK(mixed-union ABI): FAM-carrier union minicc caller interoperates with host GCC'
+
+cat > tmp-fam-union-mini-callee.c <<'EOF'
+struct F { int n; int data[]; };
+union Carrier { struct F f; long raw; };
+long mini_fam_read(union Carrier u){return u.raw;}
+union Carrier mini_fam_make(long x){union Carrier u;u.raw=x;return u;}
+EOF
+./minicc tmp-fam-union-mini-callee.c > tmp-fam-union-mini-callee.s
+cat > tmp-fam-union-host-main.c <<'EOF'
+struct F { int n; int data[]; };
+union Carrier { struct F f; long raw; };
+long mini_fam_read(union Carrier);
+union Carrier mini_fam_make(long);
+int main(void) {
+  union Carrier u; u.raw=0x1122334455667788L;
+  if (mini_fam_read(u)!=0x1122334455667788L) return 1;
+  union Carrier v=mini_fam_make(0x0102030405060708L);
+  return v.raw==0x0102030405060708L ? 0 : 2;
+}
+EOF
+cc -std=c11 -pedantic-errors -o tmp-fam-union-host-main tmp-fam-union-host-main.c tmp-fam-union-mini-callee.s
+./tmp-fam-union-host-main
+printf '%s\n' 'OK(mixed-union ABI): FAM-carrier union host GCC caller interoperates with minicc callee'
+
 rm -f tmp-mixed-union-abi.c tmp-mixed-union-abi.s tmp-mixed-union-abi \
       tmp-mixed-union-abi-bad.c tmp-mixed-union-abi-bad.s \
       tmp-mixed-union-host.c tmp-mixed-union-host.o \
       tmp-mixed-union-mini-caller.c tmp-mixed-union-mini-caller.s tmp-mixed-union-mini-caller \
       tmp-mixed-union-mini-callee.c tmp-mixed-union-mini-callee.s \
-      tmp-mixed-union-host-main.c tmp-mixed-union-host-main
+      tmp-mixed-union-host-main.c tmp-mixed-union-host-main \
+      tmp-fam-union-host.c tmp-fam-union-host.o \
+      tmp-fam-union-mini-caller.c tmp-fam-union-mini-caller.s tmp-fam-union-mini-caller \
+      tmp-fam-union-mini-callee.c tmp-fam-union-mini-callee.s \
+      tmp-fam-union-host-main.c tmp-fam-union-host-main
 
 echo 'All mixed-union SysV ABI tests passed!'
