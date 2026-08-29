@@ -55,12 +55,12 @@ cc -o tmp-driver-cli-attached tmp-driver-cli-attached.s
 ./minicc -fsyntax-only tmp-driver-cli.c > tmp-driver-syntax.out
 test ! -s tmp-driver-syntax.out || fail '-fsyntax-only unexpectedly produced output'
 
-# Syntax-only mode must include the semantic validation pass, not merely stop
-# after parsing. Pointer += floating-point is rejected by semantic_validate.c.
+# Syntax-only mode must still diagnose front-end constraint failures rather than
+# merely preprocessing and returning success.
 cat > tmp-driver-semantic-bad.c <<'EOF'
 int main(void) { int *p = 0; p += 1.5; return 0; }
 EOF
-assert_reject 'invalid operands for additive compound assignment' \
+assert_reject 'invalid operands to pointer compound assignment' \
   ./minicc -fsyntax-only tmp-driver-semantic-bad.c
 
 printf '%s\n' 'int main(void) { return 0; }' | ./minicc -S -o tmp-driver-stdin.s -
