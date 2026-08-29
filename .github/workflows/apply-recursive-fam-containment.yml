@@ -1,0 +1,43 @@
+name: Apply recursive flexible-array containment
+
+on:
+  push:
+    branches:
+      - agent/recursive-fam-containment
+    paths:
+      - tools/apply_recursive_fam_containment.py
+      - .github/workflows/apply-recursive-fam-containment.yml
+
+permissions:
+  contents: write
+
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/recursive-fam-containment
+          fetch-depth: 0
+      - name: Apply migration
+        run: python3 tools/apply_recursive_fam_containment.py
+      - name: Audit containment metadata and constraints
+        run: |
+          grep -q 'contains_flexible_array_member' minicc.h
+          grep -q 'contains_flexible_array_member = contains_flexible_member' parse.c
+          grep -q '!is_union && mty->kind == TY_STRUCT' parse.c
+          grep -q 'array element type contains a flexible array member' parse.c
+          grep -q 'C11 allows a structure with a flexible array member to be a union member' test/flexible_array_containment.sh
+      - name: Validate full suite
+        run: make clean && make test
+      - name: Commit generated source changes
+        run: |
+          git config user.name 'LeiZ'
+          git config user.email '52287354+Lei-TzuY@users.noreply.github.com'
+          git add minicc.h parse.c Makefile README.md test/flexible_array_containment.sh
+          if git diff --cached --quiet; then
+            echo 'No generated changes to commit.'
+            exit 0
+          fi
+          git commit -m 'Enforce recursive flexible-array containment'
+          git push origin HEAD:agent/recursive-fam-containment
