@@ -47,6 +47,41 @@ assert_run 0 'int f(register int *p){return &*p==p?0:1;}int main(void){int x=1;r
 # a prototype does not make a later non-register definition parameter unaddressable.
 assert_run 0 'int f(register int);int f(int x){return *&x==x?0:1;}int main(void){return f(3);}'
 
+# sizeof is one of the standard contexts that does not perform array-to-pointer
+# conversion. Declaration initialization also remains valid: compiler-internal
+# stores must not be mistaken for source-level decay.
+assert_run 0 'int main(void){register int a[2]={1,2};return sizeof(a)==8?0:1;}'
+assert_run 0 'struct S{int a[2];};int main(void){register struct S s={{1,2}};return sizeof(s.a)==8?0:1;}'
+# Parameter array syntax is adjusted to a pointer type before register applies.
+assert_run 0 'int f(register int a[2]){return a[1]==7?0:1;}int main(void){int a[2]={3,7};return f(a);}'
+
+# C11 leaves array-to-pointer conversion of a register array undefined because
+# the conversion requires an unavailable address. Diagnose every supported
+# value context that would perform that conversion, matching strict GCC.
+assert_reject 'int main(void){register int a[2];int *p=a;return p!=0;}'
+assert_reject 'int *f(void){register int a[2];return a;}'
+assert_reject 'int main(void){register int a[2];_Bool b=a;return b;}'
+assert_reject 'int main(void){register int a[2];a;return 0;}'
+assert_reject 'int main(void){register int a[2];return a[0];}'
+assert_reject 'int main(void){register int a[2];return 0[a];}'
+assert_reject 'int main(void){register int a[2];return *a;}'
+assert_reject 'int main(void){register int a[2];int *p=a+1;return p!=0;}'
+assert_reject 'int main(void){register int a[2];int *p=1+a;return p!=0;}'
+assert_reject 'int main(void){register int a[2];if(a)return 1;return 0;}'
+assert_reject 'int main(void){register int a[2];return !a;}'
+assert_reject 'int main(void){register int a[2];int *p=0;return a==p;}'
+assert_reject 'int main(void){register int a[2];int *p=0;return a<p;}'
+assert_reject 'int main(void){register int a[2];int *p=(int*)a;return p!=0;}'
+assert_reject 'int main(void){register int a[2];(void)a;return 0;}'
+assert_reject 'int main(void){register int a[2];int *p=0;return (1?a:p)!=0;}'
+assert_reject 'int main(void){register int a[2];int *p=(0,a);return p!=0;}'
+assert_reject 'int main(void){register int a[2];(a,0);return 0;}'
+assert_reject 'int f(int *p){return p!=0;}int main(void){register int a[2];return f(a);}'
+assert_reject 'int f();int main(void){register int a[2];return f(a);}'
+assert_reject 'int f(int n,...){return n;}int main(void){register int a[2];return f(1,a);}'
+assert_reject 'int main(void){register int a[2];return _Generic(a,int*:1,default:0);}'
+assert_reject 'struct S{int a[2];};int main(void){register struct S s;int *p=s.a;return p!=0;}'
+
 # Unary & may not be applied to an object declared with register storage class.
 assert_reject 'int main(void){register int x=1;int *p=&x;return *p;}'
 assert_reject 'int main(void){register const int x=1;const int *p=&(x);return *p;}'

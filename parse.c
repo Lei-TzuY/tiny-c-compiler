@@ -516,6 +516,26 @@ static bool is_register_based_lvalue(Node *node) {
     return false;
 }
 
+// Outside sizeof and unary &, an array expression undergoes the standard
+// array-to-pointer conversion. For a register array that conversion requires
+// the address that the storage-class contract intentionally makes unavailable.
+// Diagnose the otherwise-undefined C11 case, matching strict host compilers.
+// Member arrays inherit the restriction from a register aggregate root, while
+// dereference deliberately breaks that chain (the array then belongs to the
+// pointed-to object, not to the register pointer variable).
+static bool is_register_array_designator(Node *node) {
+    if (!node)
+        return false;
+    add_type(node);
+    return node->ty && node->ty->kind == TY_ARRAY &&
+           is_register_based_lvalue(node);
+}
+
+static void reject_register_array_decay(Node *node) {
+    if (is_register_array_designator(node))
+        error("register array cannot be converted to a pointer value");
+}
+
 static bool is_addressable_expr(Node *node) {
     add_type(node);
 
@@ -536,6 +556,7 @@ static bool is_addressable_expr(Node *node) {
 // the controlling type and must still participate in association matching.
 static Type *generic_control_type(Node *node) {
     add_type(node);
+    reject_register_array_decay(node);
     Type *ty = node->ty;
     if (!ty)
         return NULL;
@@ -556,6 +577,7 @@ static Node *new_checked_addr(Node *operand, Token *op) {
 
 static Node *new_checked_deref(Node *operand, Token *op) {
     add_type(operand);
+    reject_register_array_decay(operand);
 
     Type *target = NULL;
     if (operand->ty->kind == TY_PTR || operand->ty->kind == TY_ARRAY)
@@ -4257,8 +4279,10 @@ static Node *stmt(Token **rest, Token *tok) {
         return declaration(rest, tok);
 
     Node *node = new_node(ND_EXPR_STMT);
-    if (!equal(tok, ";"))
+    if (!equal(tok, ";")) {
         node->lhs = expr(&tok, tok);
+        reject_register_array_decay(node->lhs);
+    }
     *rest = skip(tok, ";");
     return node;
 }
@@ -4267,8 +4291,12 @@ static Node *stmt(Token **rest, Token *tok) {
 static Node *expr(Token **rest, Token *tok) {
     Node *node = assign(&tok, tok);
 
-    while (equal(tok, ","))
-        node = new_binary(ND_COMMA, node, assign(&tok, tok->next));
+    while (equal(tok, ",")) {
+        reject_register_array_decay(node);
+        Node *rhs = assign(&tok, tok->next);
+        reject_register_array_decay(rhs);
+        node = new_binary(ND_COMMA, node, rhs);
+    }
 
     *rest = tok;
     return node;
@@ -4315,6 +4343,7 @@ static bool pointer_assignment_compatible(Type *dst, Type *src) {
 
 static bool assignment_compatible(Type *dst, Node *rhs) {
     add_type(rhs);
+    reject_register_array_decay(rhs);
     Type *src = rhs->ty;
 
     if (!dst || !src || dst->kind == TY_ARRAY || dst->kind == TY_FUNC)
@@ -4366,12 +4395,14 @@ static Type *decay_value_type(Type *ty) {
 
 static bool is_scalar_expr(Node *node) {
     add_type(node);
+    reject_register_array_decay(node);
     Type *ty = decay_value_type(node->ty);
     return ty && (is_numeric(ty) || ty->kind == TY_PTR);
 }
 
 static bool cast_compatible(Type *dst, Node *expr) {
     add_type(expr);
+    reject_register_array_decay(expr);
 
     // A cast to void explicitly discards the value and accepts any complete
     // expression type, including aggregates and void-valued expressions.
@@ -4425,6 +4456,8 @@ static bool pointer_pair_compatible(Type *a, Type *b, bool relational_only) {
 static bool equality_operands_compatible(Node *lhs, Node *rhs) {
     add_type(lhs);
     add_type(rhs);
+    reject_register_array_decay(lhs);
+    reject_register_array_decay(rhs);
 
     if (is_numeric(lhs->ty) && is_numeric(rhs->ty))
         return true;
@@ -4444,6 +4477,8 @@ static bool equality_operands_compatible(Node *lhs, Node *rhs) {
 static bool relational_operands_compatible(Node *lhs, Node *rhs) {
     add_type(lhs);
     add_type(rhs);
+    reject_register_array_decay(lhs);
+    reject_register_array_decay(rhs);
     if (is_numeric(lhs->ty) && is_numeric(rhs->ty))
         return true;
     return pointer_pair_compatible(lhs->ty, rhs->ty, true);
@@ -4452,6 +4487,8 @@ static bool relational_operands_compatible(Node *lhs, Node *rhs) {
 static Type *conditional_result_type(Node *then, Node *els, Token *question) {
     add_type(then);
     add_type(els);
+    reject_register_array_decay(then);
+    reject_register_array_decay(els);
 
     if (is_numeric(then->ty) && is_numeric(els->ty))
         return get_common_type(then->ty, els->ty);
@@ -4644,8 +4681,20 @@ static Node *relational(Token **rest, Token *tok) {
 static Node *add(Token **rest, Token *tok) {
     Node *node = mul(&tok, tok);
     for (;;) {
-        if (equal(tok, "+")) { node = new_add(node, mul(&tok, tok->next)); continue; }
-        if (equal(tok, "-")) { node = new_sub(node, mul(&tok, tok->next)); continue; }
+        if (equal(tok, "+")) {
+            Node *rhs = mul(&tok, tok->next);
+            reject_register_array_decay(node);
+            reject_register_array_decay(rhs);
+            node = new_add(node, rhs);
+            continue;
+        }
+        if (equal(tok, "-")) {
+            Node *rhs = mul(&tok, tok->next);
+            reject_register_array_decay(node);
+            reject_register_array_decay(rhs);
+            node = new_sub(node, rhs);
+            continue;
+        }
         *rest = tok;
         return node;
     }
@@ -4828,6 +4877,7 @@ static Node *parse_call_arguments(Token **rest, Token *tok, Type *fty) {
         Token *arg_tok = tok;
         Node *arg = assign(&tok, tok);
         add_type(arg);
+        reject_register_array_decay(arg);
 
         // Unprototyped calls and variadic tails have no declared parameter to
         // inspect, so classify aggregate actuals directly before codegen.
@@ -4925,6 +4975,8 @@ static Node *postfix(Token **rest, Token *tok) {
         if (equal(tok, "[")) {
             Node *idx = expr(&tok, tok->next);
             tok = skip(tok, "]");
+            reject_register_array_decay(node);
+            reject_register_array_decay(idx);
             node = new_unary(ND_DEREF, new_add(node, idx));
             continue;
         }
