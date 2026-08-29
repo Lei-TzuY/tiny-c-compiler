@@ -101,8 +101,80 @@ static StructTag *push_tag(const char *name, Type *ty, TagKind kind) {
 }
 
 static bool token_matches_name(Token *tok, const char *name) {
-    return tok->kind == TK_IDENT && strlen(name) == (size_t)tok->len &&
+    return name && tok->kind == TK_IDENT && strlen(name) == (size_t)tok->len &&
            !strncmp(tok->loc, name, tok->len);
+}
+
+typedef struct MemberPath MemberPath;
+struct MemberPath {
+    Member *member;
+    MemberPath *next;
+};
+
+static MemberPath *find_record_member_path_in_list(Member *members, Token *tok) {
+    // Prefer a direct member. C11 uniqueness constraints make the result
+    // unambiguous, but direct-first also keeps diagnostics deterministic.
+    for (Member *m = members; m; m = m->next) {
+        if (m->name && token_matches_name(tok, m->name)) {
+            MemberPath *path = calloc(1, sizeof(MemberPath));
+            path->member = m;
+            return path;
+        }
+    }
+
+    for (Member *m = members; m; m = m->next) {
+        if (!m->is_anonymous || !m->ty || m->ty->kind != TY_STRUCT)
+            continue;
+        MemberPath *sub = find_record_member_path_in_list(m->ty->members, tok);
+        if (!sub)
+            continue;
+        MemberPath *path = calloc(1, sizeof(MemberPath));
+        path->member = m;
+        path->next = sub;
+        return path;
+    }
+    return NULL;
+}
+
+static MemberPath *find_record_member_path(Type *ty, Token *tok) {
+    if (!ty || ty->kind != TY_STRUCT || ty->is_incomplete)
+        return NULL;
+    return find_record_member_path_in_list(ty->members, tok);
+}
+
+static void free_member_path(MemberPath *path) {
+    while (path) {
+        MemberPath *next = path->next;
+        free(path);
+        path = next;
+    }
+}
+
+static bool member_list_has_visible_name(Member *members, const char *name) {
+    for (Member *m = members; m; m = m->next) {
+        if (m->name && !strcmp(m->name, name))
+            return true;
+        if (m->is_anonymous && m->ty && m->ty->kind == TY_STRUCT &&
+            member_list_has_visible_name(m->ty->members, name))
+            return true;
+    }
+    return false;
+}
+
+static const char *anonymous_member_conflict(Member *existing, Type *candidate) {
+    if (!candidate || candidate->kind != TY_STRUCT)
+        return NULL;
+    for (Member *m = candidate->members; m; m = m->next) {
+        if (m->is_anonymous) {
+            const char *conflict = anonymous_member_conflict(existing, m->ty);
+            if (conflict)
+                return conflict;
+            continue;
+        }
+        if (m->name && member_list_has_visible_name(existing, m->name))
+            return m->name;
+    }
+    return NULL;
 }
 
 static VarScope *find_var_name_in_scope(Scope *scope, const char *name) {
@@ -254,6 +326,7 @@ typedef struct {
     bool is_typedef;
     bool is_inline;
     bool is_noreturn;
+    bool has_anonymous_record_specifier;
     int storage_class_count;
     int align;
 } DeclAttrs;
@@ -827,6 +900,29 @@ static Type *record_decl(Token **rest, Token *tok, bool is_union) {
         if (attrs.is_auto || attrs.is_static || attrs.is_extern || attrs.is_register ||
             attrs.is_typedef || attrs.is_inline || attrs.is_noreturn)
             error_at(tok->loc, "storage/function specifier is not allowed on a record member");
+
+        if (equal(tok, ";")) {
+            if (!attrs.has_anonymous_record_specifier || basety->kind != TY_STRUCT)
+                error_at(tok->loc,
+                         "record member declaration without a declarator must be an anonymous struct or union");
+            if (basety->has_flexible_array_member)
+                error_at(tok->loc,
+                         "anonymous record member cannot contain a flexible array member");
+
+            const char *conflict = anonymous_member_conflict(head.next, basety);
+            if (conflict)
+                error_at(tok->loc,
+                         "anonymous record member promotes duplicate name '%s'", conflict);
+
+            Member *m = calloc(1, sizeof(Member));
+            m->ty = basety;
+            m->is_anonymous = true;
+            m->align = validate_requested_alignment(basety, attrs.align, tok);
+            cur = cur->next = m;
+            tok = tok->next;
+            continue;
+        }
+
         for (bool first = true; !consume(&tok, tok, ";"); first = false) {
             if (!first)
                 tok = skip(tok, ",");
@@ -856,9 +952,11 @@ static Type *record_decl(Token **rest, Token *tok, bool is_union) {
                              "record containing a flexible array member cannot be embedded");
             }
 
-            for (Member *prev = head.next; prev; prev = prev->next)
-                if (token_matches_name(ident, prev->name))
-                    error_at(ident->loc, "duplicate record member name");
+            MemberPath *duplicate =
+                find_record_member_path_in_list(head.next, ident);
+            if (duplicate)
+                error_at(ident->loc, "duplicate record member name");
+            free_member_path(duplicate);
 
             Member *m = calloc(1, sizeof(Member));
             m->name = strndup(ident->loc, ident->len);
@@ -1649,16 +1747,22 @@ static Type *declspec_impl(Token **rest, Token *tok, DeclAttrs *attrs) {
         }
 
         if (equal(tok, "union")) {
+            bool anonymous_record_specifier = equal(tok->next, "{");
             note_type_specifier(&specs, tok, &specs.n_named);
             saw_non_signable_type = true;
             ty = record_decl(&tok, tok->next, true);
+            if (attrs && anonymous_record_specifier)
+                attrs->has_anonymous_record_specifier = true;
             continue;
         }
 
         if (equal(tok, "struct")) {
+            bool anonymous_record_specifier = equal(tok->next, "{");
             note_type_specifier(&specs, tok, &specs.n_named);
             saw_non_signable_type = true;
             ty = record_decl(&tok, tok->next, false);
+            if (attrs && anonymous_record_specifier)
+                attrs->has_anonymous_record_specifier = true;
             continue;
         }
 
@@ -2729,14 +2833,6 @@ static void parse_static_image_scalar(Obj *var, Token **rest, Token *tok,
     error_at(tok->loc, "unsupported scalar in static aggregate initializer");
 }
 
-static Member *find_static_initializer_member(Type *ty, Token *tok) {
-    for (Member *m = ty->members; m; m = m->next)
-        if ((int)strlen(m->name) == tok->len &&
-            !strncmp(m->name, tok->loc, tok->len))
-            return m;
-    return NULL;
-}
-
 static bool is_initializer_aggregate(Type *ty) {
     return ty && (ty->kind == TY_ARRAY || ty->kind == TY_STRUCT);
 }
@@ -2764,14 +2860,22 @@ typedef struct {
     int depth;
 } InitializerDesignatorPath;
 
+static void append_initializer_designator_step(InitializerDesignatorPath *path,
+                                               InitializerDesignator *step) {
+    if (!path->head)
+        path->head = step;
+    else
+        path->tail->next = step;
+    path->tail = step;
+    path->depth++;
+}
+
 static InitializerDesignatorPath
 parse_initializer_designator_path(Token **rest, Token *tok, Type *root_ty) {
     InitializerDesignatorPath path = {.first_index = -1};
     Type *cur = root_ty;
 
     while (equal(tok, "[") || equal(tok, ".")) {
-        InitializerDesignator *step = calloc(1, sizeof(InitializerDesignator));
-
         if (equal(tok, "[")) {
             Token *where = tok;
             if (!cur || cur->kind != TY_ARRAY)
@@ -2785,39 +2889,40 @@ parse_initializer_designator_path(Token **rest, Token *tok, Type *root_ty) {
             if (cur->array_len > 0 && index >= cur->array_len)
                 error_at(where->loc, "array designator index exceeds array bounds");
 
+            InitializerDesignator *step = calloc(1, sizeof(InitializerDesignator));
             step->kind = INIT_DESIGNATOR_INDEX;
             step->index = index;
             step->result_ty = cur->base;
             if (path.depth == 0)
                 path.first_index = index;
             cur = cur->base;
-        } else {
-            Token *where = tok;
-            if (!cur || cur->kind != TY_STRUCT)
-                error_at(where->loc, "member designator requires a record subobject");
-            tok = tok->next;
-            if (tok->kind != TK_IDENT)
-                error_at(tok->loc, "expected member name in designated initializer");
-
-            Member *member = find_static_initializer_member(cur, tok);
-            if (!member)
-                error_at(tok->loc, "unknown member in designated initializer");
-            tok = tok->next;
-
-            step->kind = INIT_DESIGNATOR_MEMBER;
-            step->member = member;
-            step->result_ty = member->ty;
-            if (path.depth == 0)
-                path.first_member = member;
-            cur = member->ty;
+            append_initializer_designator_step(&path, step);
+            continue;
         }
 
-        if (!path.head)
-            path.head = step;
-        else
-            path.tail->next = step;
-        path.tail = step;
-        path.depth++;
+        Token *where = tok;
+        if (!cur || cur->kind != TY_STRUCT)
+            error_at(where->loc, "member designator requires a record subobject");
+        tok = tok->next;
+        if (tok->kind != TK_IDENT)
+            error_at(tok->loc, "expected member name in designated initializer");
+
+        MemberPath *members = find_record_member_path(cur, tok);
+        if (!members)
+            error_at(tok->loc, "unknown member in designated initializer");
+        tok = tok->next;
+
+        for (MemberPath *mp = members; mp; mp = mp->next) {
+            InitializerDesignator *step = calloc(1, sizeof(InitializerDesignator));
+            step->kind = INIT_DESIGNATOR_MEMBER;
+            step->member = mp->member;
+            step->result_ty = mp->member->ty;
+            if (path.depth == 0)
+                path.first_member = mp->member;
+            cur = mp->member->ty;
+            append_initializer_designator_step(&path, step);
+        }
+        free_member_path(members);
     }
 
     if (!path.depth)
@@ -4721,6 +4826,16 @@ static Node *indirect_funcall(Token **rest, Token *tok, Node *callee) {
     return node;
 }
 
+static Node *apply_record_member_path(Node *base, MemberPath *path) {
+    for (MemberPath *mp = path; mp; mp = mp->next) {
+        Node *member = new_node(ND_MEMBER);
+        member->lhs = base;
+        member->member = mp->member;
+        base = member;
+    }
+    return base;
+}
+
 static Node *postfix(Token **rest, Token *tok) {
     Node *node;
     if (equal(tok, "(") && is_typename(tok->next)) {
@@ -4770,14 +4885,11 @@ static Node *postfix(Token **rest, Token *tok) {
             add_type(node);
             if (node->ty->kind != TY_STRUCT) error_at(tok->loc, "not a struct");
             if (node->ty->is_incomplete) error_at(tok->loc, "incomplete struct type");
-            Member *mem = node->ty->members;
-            for (; mem; mem = mem->next)
-                if ((int)strlen(mem->name) == tok->len &&
-                    !strncmp(mem->name, tok->loc, tok->len)) break;
-            if (!mem) error_at(tok->loc, "unknown member");
-            Node *n = new_node(ND_MEMBER);
-            n->lhs = node; n->member = mem;
-            tok = tok->next; node = n;
+            MemberPath *path = find_record_member_path(node->ty, tok);
+            if (!path) error_at(tok->loc, "unknown member");
+            node = apply_record_member_path(node, path);
+            free_member_path(path);
+            tok = tok->next;
             continue;
         }
 
@@ -4791,14 +4903,11 @@ static Node *postfix(Token **rest, Token *tok) {
                 error_at(tok->loc, "incomplete struct type");
             Node *deref = new_unary(ND_DEREF, node);
             add_type(deref);
-            Member *mem = deref->ty->members;
-            for (; mem; mem = mem->next)
-                if ((int)strlen(mem->name) == tok->len &&
-                    !strncmp(mem->name, tok->loc, tok->len)) break;
-            if (!mem) error_at(tok->loc, "unknown member");
-            Node *n = new_node(ND_MEMBER);
-            n->lhs = deref; n->member = mem;
-            tok = tok->next; node = n;
+            MemberPath *path = find_record_member_path(deref->ty, tok);
+            if (!path) error_at(tok->loc, "unknown member");
+            node = apply_record_member_path(deref, path);
+            free_member_path(path);
+            tok = tok->next;
             continue;
         }
 

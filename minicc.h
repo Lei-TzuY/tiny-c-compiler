@@ -115,6 +115,7 @@ struct Member {
     Member *next;
     char *name;
     Type *ty;
+    bool is_anonymous; // unnamed C11 struct/union member; nested names are promoted
     int align;      // explicit _Alignas requirement, 0 = natural type alignment
     int offset;
 };
