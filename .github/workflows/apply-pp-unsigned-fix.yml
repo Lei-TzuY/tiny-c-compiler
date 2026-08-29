@@ -16,7 +16,9 @@ jobs:
         with:
           ref: fix-pp-unsigned-intmax-semantics
       - name: Apply patch
-        run: python3 .github/apply_pp_unsigned_fix.py
+        run: |
+          python3 .github/apply_pp_unsigned_fix.py
+          sed -i "/if (\\*call != '(')/{n;s/return 0;/return pp_signed_value(0);/;}" preprocess_v2.c
       - name: Run complete regression suite
         run: make clean && make test
       - name: Commit verified changes
