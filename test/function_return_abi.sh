@@ -1,0 +1,79 @@
+#!/bin/bash
+set -eu
+
+MINICC=${MINICC:-./minicc}
+
+cat > tmp-return-host.c <<'EOF'
+signed char host_schar(void) { return -3; }
+short host_short(void) { return -1234; }
+int host_int(void) { return -1234567; }
+unsigned char host_uchar(void) { return 250; }
+unsigned short host_ushort(void) { return 60000; }
+unsigned int host_uint(void) { return 4000000000U; }
+EOF
+cc -c tmp-return-host.c -o tmp-return-host.o
+
+cat > tmp-return-minicc.c <<'EOF'
+signed char host_schar(void);
+short host_short(void);
+int host_int(void);
+unsigned char host_uchar(void);
+unsigned short host_ushort(void);
+unsigned int host_uint(void);
+
+signed char local_schar(void) { return -7; }
+short local_short(void) { return -2222; }
+int local_int(void) { return -7654321; }
+
+int main(void) {
+    if (host_schar() != -3) return 1;
+    if (host_schar() >= 0) return 2;
+    if (host_short() != -1234) return 3;
+    if (host_short() >= 0) return 4;
+    if (host_int() != -1234567) return 5;
+    if (host_int() >= 0) return 6;
+
+    if (host_uchar() != 250) return 7;
+    if (host_ushort() != 60000) return 8;
+    if (host_uint() != 4000000000U) return 9;
+
+    if (local_schar() != -7) return 10;
+    if (local_schar() >= 0) return 11;
+    if (local_short() != -2222) return 12;
+    if (local_short() >= 0) return 13;
+    if (local_int() != -7654321) return 14;
+    if (local_int() >= 0) return 15;
+    return 0;
+}
+EOF
+
+"$MINICC" tmp-return-minicc.c > tmp-return-minicc.s
+cc -o tmp-return-abi tmp-return-minicc.s tmp-return-host.o
+set +e
+./tmp-return-abi
+actual="$?"
+set -e
+if [ "$actual" != 0 ]; then
+    echo "FAIL(function return ABI): exit $actual"
+    exit 1
+fi
+
+# A real libc function returning a negative int exercises the same caller rule.
+cat > tmp-return-libc.c <<'EOF'
+int strcoll(const char *, const char *);
+int main(void) { return strcoll("abc", "abd") < 0 ? 0 : 1; }
+EOF
+"$MINICC" tmp-return-libc.c > tmp-return-libc.s
+cc -o tmp-return-libc tmp-return-libc.s
+set +e
+./tmp-return-libc
+actual="$?"
+set -e
+if [ "$actual" != 0 ]; then
+    echo "FAIL(function return ABI): negative libc int return was not preserved"
+    exit 1
+fi
+
+rm -f tmp-return-host.c tmp-return-host.o tmp-return-minicc.c tmp-return-minicc.s tmp-return-abi tmp-return-libc.c tmp-return-libc.s tmp-return-libc
+
+echo 'All function-return ABI tests passed!'
