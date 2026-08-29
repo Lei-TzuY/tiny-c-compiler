@@ -1,0 +1,46 @@
+name: Apply C limits header
+
+on:
+  push:
+    branches:
+      - agent/limits-header
+    paths:
+      - tools/apply_limits_header.py
+      - test/limits_header.sh
+      - .github/workflows/apply-limits-header.yml
+
+permissions:
+  contents: write
+
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/limits-header
+          fetch-depth: 0
+      - name: Apply migration
+        run: python3 tools/apply_limits_header.py
+      - name: Audit limits header
+        run: |
+          grep -q '"limits.h"' preprocess_v2.c
+          grep -q '#define CHAR_BIT 8' preprocess_v2.c
+          grep -q '#define CHAR_MIN SCHAR_MIN' preprocess_v2.c
+          grep -q '#define INT_MAX 2147483647' preprocess_v2.c
+          grep -q '#define LONG_MAX 9223372036854775807L' preprocess_v2.c
+          grep -q '#define ULLONG_MAX 18446744073709551615ULL' preprocess_v2.c
+          grep -q 'test/limits_header.sh' Makefile
+      - name: Validate full suite
+        run: make clean && make test
+      - name: Commit generated changes
+        run: |
+          git config user.name 'LeiZ'
+          git config user.email '52287354+Lei-TzuY@users.noreply.github.com'
+          git add preprocess_v2.c Makefile test/limits_header.sh
+          if git diff --cached --quiet; then
+            echo 'No generated changes to commit.'
+            exit 0
+          fi
+          git commit -m 'Support limits.h integer limits'
+          git push origin HEAD:agent/limits-header
