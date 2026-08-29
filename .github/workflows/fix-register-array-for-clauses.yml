@@ -1,0 +1,42 @@
+name: Fix register-array for-clause diagnostics
+
+on:
+  push:
+    branches:
+      - agent/register-array-decay
+    paths:
+      - tools/fix_register_array_for_clauses.py
+      - .github/workflows/fix-register-array-for-clauses.yml
+
+permissions:
+  contents: write
+
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/register-array-decay
+          fetch-depth: 0
+      - name: Apply migration
+        run: python3 tools/fix_register_array_for_clauses.py
+      - name: Audit for-clause conversions
+        run: |
+          grep -A5 'node->init->lhs = expr' parse.c | grep -q 'reject_register_array_decay(node->init->lhs)'
+          grep -A4 'node->inc = expr' parse.c | grep -q 'reject_register_array_decay(node->inc)'
+          grep -q 'for(a;;)break' test/register_addressability.sh
+          grep -q 'for(;;a)break' test/register_addressability.sh
+      - name: Validate full suite
+        run: make clean && make test
+      - name: Commit generated source changes
+        run: |
+          git config user.name 'LeiZ'
+          git config user.email '52287354+Lei-TzuY@users.noreply.github.com'
+          git add parse.c test/register_addressability.sh
+          if git diff --cached --quiet; then
+            echo 'No generated changes to commit.'
+            exit 0
+          fi
+          git commit -m 'Cover register-array for-clause conversions'
+          git push origin HEAD:agent/register-array-decay
