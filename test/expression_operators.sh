@@ -43,6 +43,12 @@ assert_run 1 'int main(){int x=1;int *p=&x;return p && 1;}'
 assert_run 1 'int f(){return 1;} int main(){return f && 1;}'
 assert_run 1 'int main(){int *p=0;return !p;}'
 
+# The comma operator puts its right operand in an ordinary value context.
+# Array and function designators therefore decay before the result type is
+# observed by surrounding operators such as sizeof.
+assert_run 1 'int main(void){int a[3];return sizeof((0,a))==sizeof(int *);}'
+assert_run 1 'int f(void){return 0;} int main(void){return sizeof((0,f))==sizeof(int (*)(void));}'
+
 # Conditional operator computes a composite type and normalizes both branches.
 assert_run 7 'int main(){int x=7;int *p=1 ? &x : 0;return *p;}'
 assert_run 8 'int main(){int x=8;int *p=0 ? 0 : &x;return *p;}'
