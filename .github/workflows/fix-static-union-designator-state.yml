@@ -1,0 +1,42 @@
+name: Fix static union designator active-member state
+
+on:
+  push:
+    branches:
+      - agent/c11-anonymous-record-members
+    paths:
+      - tools/fix_static_union_designator_state.py
+      - .github/workflows/fix-static-union-designator-state.yml
+
+permissions:
+  contents: write
+
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/c11-anonymous-record-members
+          fetch-depth: 0
+      - name: Apply migration
+        run: python3 tools/fix_static_union_designator_state.py
+      - name: Audit active union state
+        run: |
+          grep -q 'StaticUnionSelection' parse.c
+          grep -q 'select_static_union_member' parse.c
+          grep -q 'static union U u={.s.a=3,.s.b=5}' test/union_initializers.sh
+          grep -q 'static struct S s={.x=4,.y=5}' test/anonymous_record_members.sh
+      - name: Validate full suite
+        run: make clean && make test
+      - name: Commit generated source changes
+        run: |
+          git config user.name 'LeiZ'
+          git config user.email '52287354+Lei-TzuY@users.noreply.github.com'
+          git add parse.c test/union_initializers.sh
+          if git diff --cached --quiet; then
+            echo 'No generated changes to commit.'
+            exit 0
+          fi
+          git commit -m 'Preserve repeated static union member designators'
+          git push origin HEAD:agent/c11-anonymous-record-members
