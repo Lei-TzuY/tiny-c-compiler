@@ -268,6 +268,18 @@ static char *get_builtin_header(char *name) {
                "lldiv_t lldiv(long long numer, long long denom);\n"
                "#endif\n";
     }
+    if (!strcmp(name, "assert.h")) {
+        return "#ifdef assert\n"
+               "#undef assert\n"
+               "#endif\n"
+               "#ifdef NDEBUG\n"
+               "#define assert(expression) ((void)0)\n"
+               "#else\n"
+               "#include <stdio.h>\n"
+               "#include <stdlib.h>\n"
+               "#define assert(expression) ((void)((expression) || (fprintf(stderr, \\\"%s:%d: %s: Assertion `%s' failed.\\\\n\\\", __FILE__, __LINE__, __func__, #expression), abort(), 0)))\n"
+               "#endif\n";
+    }
     if (!strcmp(name, "stdbool.h")) {
         return "#define bool _Bool\n"
                "#define true 1\n"
