@@ -323,6 +323,7 @@ typedef struct {
     bool is_static;
     bool is_extern;
     bool is_register;
+    bool is_thread_local;
     bool is_typedef;
     bool is_inline;
     bool is_noreturn;
@@ -388,7 +389,8 @@ static bool is_decl_start(Token *tok) {
     if (equal(tok, "auto") || equal(tok, "static") || equal(tok, "extern") ||
         equal(tok, "typedef")) return true;
     if (equal(tok, "const") || equal(tok, "volatile") || equal(tok, "restrict")) return true;
-    if (equal(tok, "register") || equal(tok, "inline")) return true;
+    if (equal(tok, "register") || equal(tok, "inline") ||
+        equal(tok, "_Thread_local")) return true;
     if (equal(tok, "_Alignas") || equal(tok, "_Noreturn")) return true;
     return false;
 }
@@ -787,12 +789,14 @@ static void check_oldstyle_definition_redeclaration(Obj *old, Type *new_ty,
 // Create a block-scope declaration with linkage. A prior file-scope or earlier
 // block-scope extern declaration is reused when compatible, but the lexical
 // binding itself belongs only to the current block.
-static Obj *create_extern_ref(char *name, Type *ty) {
+static Obj *create_extern_ref(char *name, Type *ty, bool is_thread_local) {
     if (find_typedef_name_in_scope(current_scope, name) ||
         find_enum_name_in_scope(current_scope, name))
         error("extern declaration of '%s' conflicts with ordinary identifier", name);
 
     bool wants_function = ty->kind == TY_FUNC;
+    if (wants_function && is_thread_local)
+        error("_Thread_local may only declare an object");
     VarScope *same_scope = find_var_name_in_scope(current_scope, name);
     if (same_scope) {
         Obj *old = same_scope->var;
@@ -801,6 +805,8 @@ static Obj *create_extern_ref(char *name, Type *ty) {
             error("conflicting block-scope declaration of '%s'", name);
         if (wants_function)
             check_oldstyle_definition_redeclaration(old, ty, false, name);
+        if (!wants_function && old->is_thread_local != is_thread_local)
+            error("inconsistent _Thread_local redeclaration of '%s'", name);
         if (!type_compatible(old->ty, ty))
             error("conflicting block-scope declaration of '%s'", name);
         old->ty = composite_redecl_type(old->ty, ty);
@@ -813,6 +819,8 @@ static Obj *create_extern_ref(char *name, Type *ty) {
             error("'%s' redeclared as different kind of symbol", name);
         if (wants_function)
             check_oldstyle_definition_redeclaration(var, ty, false, name);
+        if (!wants_function && var->is_thread_local != is_thread_local)
+            error("inconsistent _Thread_local redeclaration of '%s'", name);
         if (!type_compatible(var->ty, ty))
             error("conflicting types for '%s'", name);
         var->ty = composite_redecl_type(var->ty, ty);
@@ -823,6 +831,7 @@ static Obj *create_extern_ref(char *name, Type *ty) {
         var->is_local = false;
         var->is_extern = true;
         var->is_function = wants_function;
+        var->is_thread_local = is_thread_local;
         var->next = globals;
         globals = var;
     }
@@ -920,7 +929,7 @@ static Type *record_decl(Token **rest, Token *tok, bool is_union) {
         DeclAttrs attrs = {};
         Type *basety = declspec_with_attrs(&tok, tok, &attrs);
         if (attrs.is_auto || attrs.is_static || attrs.is_extern || attrs.is_register ||
-            attrs.is_typedef || attrs.is_inline || attrs.is_noreturn)
+            attrs.is_thread_local || attrs.is_typedef || attrs.is_inline || attrs.is_noreturn)
             error_at(tok->loc, "storage/function specifier is not allowed on a record member");
 
         if (equal(tok, ";")) {
@@ -1620,6 +1629,17 @@ static Type *declspec_impl(Token **rest, Token *tok, DeclAttrs *attrs) {
                 restrict_tok = qual_tok;
             continue;
         }
+        Token *thread_tok = tok;
+        if (consume(&tok, tok, "_Thread_local")) {
+            if (!attrs)
+                error_at(thread_tok->loc,
+                         "_Thread_local is not allowed in this declaration context");
+            if (attrs->is_thread_local)
+                error_at(thread_tok->loc, "duplicate _Thread_local storage-class specifier");
+            attrs->is_thread_local = true;
+            continue;
+        }
+
         Token *storage_tok = tok;
         if (consume(&tok, tok, "auto")) {
             note_storage_class(attrs, storage_tok);
@@ -1896,7 +1916,8 @@ static Type *func_params(Token **rest, Token *tok, Type *return_ty) {
         DeclAttrs param_attrs = {};
         Token *param_spec = tok;
         Type *basety = declspec_with_attrs(&tok, tok, &param_attrs);
-        if (param_attrs.storage_class_count && !param_attrs.is_register)
+        if (param_attrs.is_thread_local ||
+            (param_attrs.storage_class_count && !param_attrs.is_register))
             error_at(param_spec->loc,
                      "only register storage class is allowed on a parameter");
         if (param_attrs.is_inline || param_attrs.is_noreturn)
@@ -2380,6 +2401,8 @@ static StaticAddress eval_static_lvalue_address(Node *node) {
 
     switch (node->kind) {
     case ND_VAR:
+        if (node->var->is_thread_local)
+            error("address of thread-local object is not a static address constant");
         if (node->var->is_local)
             error("address of automatic object is not a static address constant");
         return (StaticAddress){node->var->name, 0};
@@ -2415,6 +2438,8 @@ static StaticAddress eval_static_address(Node *node) {
     case ND_VAR:
         // Array and function designators decay to their link-time addresses.
         // Reading the value of an ordinary pointer object is not a constant.
+        if (node->var->is_thread_local)
+            error("thread-local object is not a static address constant");
         if (node->var->is_local)
             error("automatic object is not a static address constant");
         if (node->ty->kind != TY_ARRAY && node->ty->kind != TY_FUNC)
@@ -3629,6 +3654,8 @@ static Token *parse_typedef_declaration(Token *tok, Type *basety,
                                         DeclAttrs *attrs) {
     if (attrs->align)
         error_at(tok->loc, "_Alignas is not allowed on a typedef declaration");
+    if (attrs->is_thread_local)
+        error_at(tok->loc, "_Thread_local is not allowed on a typedef declaration");
     if (attrs->is_inline || attrs->is_noreturn)
         error_at(tok->loc, "function specifier is not allowed on a typedef declaration");
     if (equal(tok, ";"))
@@ -3659,10 +3686,16 @@ static Node *declaration(Token **rest, Token *tok) {
     bool is_extern = attrs.is_extern;
     if (is_static && is_extern)
         error_at(tok->loc, "declaration cannot be both static and extern");
+    if (attrs.is_thread_local && (attrs.is_auto || attrs.is_register))
+        error_at(tok->loc,
+                 "_Thread_local may be combined only with static or extern storage class");
+    if (attrs.is_thread_local && !is_static && !is_extern)
+        error_at(tok->loc,
+                 "block-scope _Thread_local declaration requires static or extern");
     if (attrs.align && attrs.is_register)
         error_at(tok->loc, "_Alignas is not allowed on a register object");
     if (equal(tok, ";")) {
-        if (attrs.storage_class_count)
+        if (attrs.storage_class_count || attrs.is_thread_local)
             error_at(tok->loc, "storage class specifier requires a declarator");
         if (attrs.align)
             error_at(tok->loc, "_Alignas requires an object declarator");
@@ -3696,21 +3729,24 @@ static Node *declaration(Token **rest, Token *tok) {
         char *name = strndup(ident->loc, ident->len);
         Obj *var;
         if (ty->kind == TY_FUNC) {
+            if (attrs.is_thread_local)
+                error_at(ident->loc, "_Thread_local may only declare an object");
             if (attrs.is_auto || attrs.is_register || is_static)
                 error_at(ident->loc,
                          "block-scope function declaration may only use extern storage class");
-            var = create_extern_ref(name, ty);
+            var = create_extern_ref(name, ty, false);
         } else if (is_static) {
             var = create_static_lvar(name);
             var->ty = ty;
         } else if (is_extern) {
-            var = create_extern_ref(name, ty);
+            var = create_extern_ref(name, ty, attrs.is_thread_local);
         } else {
             var = create_lvar(name);
             var->ty = ty;
         }
         apply_object_alignment(var, ty, attrs.align, ident);
         var->is_register = attrs.is_register;
+        var->is_thread_local = attrs.is_thread_local;
 
         if (!equal(tok, "="))
             continue;
@@ -5393,7 +5429,8 @@ static bool object_has_initializer(Obj *var) {
 }
 
 static Obj *register_global_symbol(Token *ident, Type *ty, bool is_static,
-                                   bool is_extern, bool has_storage_class) {
+                                   bool is_extern, bool has_storage_class,
+                                   bool is_thread_local) {
     char *name = strndup(ident->loc, ident->len);
     Obj *var = find_global_symbol(name);
     if (var) {
@@ -5401,6 +5438,9 @@ static Obj *register_global_symbol(Token *ident, Type *ty, bool is_static,
             error_at(ident->loc, "'%s' redeclared as different kind of symbol", name);
         if (!type_compatible(var->ty, ty))
             error_at(ident->loc, "conflicting types for '%s'", name);
+        if (var->is_thread_local != is_thread_local)
+            error_at(ident->loc,
+                     "inconsistent _Thread_local redeclaration of '%s'", name);
         if (is_static && !var->is_static)
             error_at(ident->loc, "static declaration of '%s' follows non-static declaration", name);
         // For file-scope objects, a declaration with no storage-class
@@ -5426,6 +5466,7 @@ static Obj *register_global_symbol(Token *ident, Type *ty, bool is_static,
     var->is_local = false;
     var->is_static = is_static;
     var->is_extern = is_extern;
+    var->is_thread_local = is_thread_local;
     var->next = globals;
     globals = var;
     bind_var_in_current_scope(var->name, var, false);
@@ -5527,7 +5568,7 @@ Program *parse(Token *tok) {
 
         // Standalone type declaration
         if (consume(&tok, tok, ";")) {
-            if (attrs.storage_class_count)
+            if (attrs.storage_class_count || attrs.is_thread_local)
                 error_at(tok->loc, "storage class specifier requires a declarator");
             if (attrs.align)
                 error_at(tok->loc, "_Alignas requires an object declarator");
@@ -5544,6 +5585,8 @@ Program *parse(Token *tok) {
             error_at(ident->loc, "object cannot have void type");
 
         if (ty->kind == TY_FUNC) {
+            if (attrs.is_thread_local)
+                error_at(ident->loc, "_Thread_local may only declare an object");
             if (attrs.align)
                 error_at(ident->loc, "_Alignas is not allowed on a function declaration");
             char *name = strndup(ident->loc, ident->len);
@@ -5626,7 +5669,8 @@ Program *parse(Token *tok) {
                     error_at(ident->loc, "variable has incomplete type");
 
                 Obj *var = register_global_symbol(ident, ty, is_static, is_extern,
-                                                  attrs.storage_class_count != 0);
+                                                  attrs.storage_class_count != 0,
+                                                  attrs.is_thread_local);
                 apply_object_alignment(var, ty, attrs.align, ident);
                 ty = var->ty;
 

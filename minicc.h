@@ -305,6 +305,7 @@ struct Obj {
     bool is_static;    // static storage class
     bool is_extern;    // extern storage class
     bool is_register;  // register storage class; address may not be taken
+    bool is_thread_local; // C11 _Thread_local storage duration
     bool is_defined;   // function symbol already has a body
 };
 

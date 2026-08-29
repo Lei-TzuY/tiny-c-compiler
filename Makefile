@@ -56,6 +56,7 @@ test: minicc
 	bash ./test/restrict_qualifier.sh
 	bash ./test/storage_class_specifiers.sh
 	bash ./test/register_addressability.sh
+	bash ./test/thread_local.sh
 	bash ./test/typedef_storage_class.sh
 	bash ./test/implicit_int_constraints.sh
 	bash ./test/object_linkage_redeclarations.sh

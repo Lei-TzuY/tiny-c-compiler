@@ -281,6 +281,14 @@ static void gen_addr(Node *node) {
     if (node->kind == ND_VAR) {
         if (node->var->is_local)
             printf("  lea %d(%%rbp), %%rax\n", node->var->offset);
+        else if (node->var->is_thread_local) {
+            // Linux x86-64 local-exec TLS: obtain the thread pointer from FS
+            // and add the linker's per-symbol TPOFF relocation. This works for
+            // executable-local definitions and external TLS symbols resolved at
+            // final link time.
+            printf("  mov %%fs:0, %%rax\n");
+            printf("  lea %s@tpoff(%%rax), %%rax\n", node->var->name);
+        }
         else if (node->var->is_function && !node->var->is_static)
             // A default-visible function may be interposed, so materialize its
             // address through the GOT. This is valid in PIE code and also works
@@ -1567,6 +1575,17 @@ static void emit_data_alignment(Obj *var) {
         printf("  .balign %d\n", align);
 }
 
+static void emit_object_section(Obj *var, bool initialized) {
+    if (var->is_thread_local) {
+        if (initialized)
+            printf("  .section .tdata,\"awT\",@progbits\n");
+        else
+            printf("  .section .tbss,\"awT\",@nobits\n");
+        return;
+    }
+    printf("  .data\n");
+}
+
 static void assign_lvar_offsets(Program *prog) {
     for (Function *fn = prog->fns; fn; fn = fn->next) {
         int offset = 0;
@@ -1634,7 +1653,7 @@ static void emit_data(Program *prog) {
         if (var->is_extern) continue;   // extern declarations don't allocate
 
         if (var->init_image) {
-            printf("  .data\n");
+            emit_object_section(var, true);
             if (!var->is_static)
                 printf("  .globl %s\n", var->name);
             emit_data_alignment(var);
@@ -1669,7 +1688,7 @@ static void emit_data(Program *prog) {
             if (var->is_string_literal)
                 printf("  .section .rodata\n");
             else {
-                printf("  .data\n");
+                emit_object_section(var, true);
                 if (!var->is_static)
                     printf("  .globl %s\n", var->name);
             }
@@ -1678,7 +1697,7 @@ static void emit_data(Program *prog) {
             for (int i = 0; i < var->ty->array_len; i++)
                 printf("  .byte %d\n", (unsigned char)var->init_data[i]);
         } else if (var->init_vals) {
-            printf("  .data\n");
+            emit_object_section(var, true);
             if (!var->is_static)
                 printf("  .globl %s\n", var->name);
             emit_data_alignment(var);
@@ -1698,7 +1717,7 @@ static void emit_data(Program *prog) {
             if (emitted < var->ty->size)
                 printf("  .zero %d\n", var->ty->size - emitted);
         } else if (var->has_init_reloc) {
-            printf("  .data\n");
+            emit_object_section(var, true);
             if (!var->is_static)
                 printf("  .globl %s\n", var->name);
             emit_data_alignment(var);
@@ -1712,7 +1731,7 @@ static void emit_data(Program *prog) {
             else
                 printf("  .quad %s\n", var->init_reloc_label);
         } else if (var->has_init_val) {
-            printf("  .data\n");
+            emit_object_section(var, true);
             if (!var->is_static)
                 printf("  .globl %s\n", var->name);
             emit_data_alignment(var);
@@ -1732,7 +1751,7 @@ static void emit_data(Program *prog) {
             else
                 printf("  .quad %" PRId64 "\n", var->init_val);
         } else {
-            printf("  .data\n");
+            emit_object_section(var, false);
             if (!var->is_static)
                 printf("  .globl %s\n", var->name);
             emit_data_alignment(var);
