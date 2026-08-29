@@ -277,7 +277,7 @@ static char *get_builtin_header(char *name) {
                "#else\n"
                "#include <stdio.h>\n"
                "#include <stdlib.h>\n"
-               "#define assert(expression) ((void)((expression) || (fprintf(stderr, \\\"%s:%d: %s: Assertion `%s' failed.\\\\n\\\", __FILE__, __LINE__, __func__, #expression), abort(), 0)))\n"
+               "#define assert(expression) ((void)((expression) || (fprintf(stderr, \"%s:%d: %s: Assertion `%s' failed.\\n\", __FILE__, __LINE__, __func__, #expression), abort(), 0)))\n"
                "#endif\n";
     }
     if (!strcmp(name, "stdbool.h")) {
