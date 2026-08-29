@@ -83,6 +83,7 @@ test: minicc
 	bash ./test/string_header.sh
 	bash ./test/stdlib_header.sh
 	bash ./test/assert_header.sh
+	bash ./test/ctype_header.sh
 	bash ./test/stdio_header.sh
 	bash ./test/noreturn.sh
 	bash ./test/sizeof_alignof_size_t.sh

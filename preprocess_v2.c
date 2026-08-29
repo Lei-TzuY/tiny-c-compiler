@@ -268,6 +268,25 @@ static char *get_builtin_header(char *name) {
                "lldiv_t lldiv(long long numer, long long denom);\n"
                "#endif\n";
     }
+    if (!strcmp(name, "ctype.h")) {
+        return "#ifndef __MINICC_CTYPE_H\n"
+               "#define __MINICC_CTYPE_H 1\n"
+               "int isalnum(int c);\n"
+               "int isalpha(int c);\n"
+               "int isblank(int c);\n"
+               "int iscntrl(int c);\n"
+               "int isdigit(int c);\n"
+               "int isgraph(int c);\n"
+               "int islower(int c);\n"
+               "int isprint(int c);\n"
+               "int ispunct(int c);\n"
+               "int isspace(int c);\n"
+               "int isupper(int c);\n"
+               "int isxdigit(int c);\n"
+               "int tolower(int c);\n"
+               "int toupper(int c);\n"
+               "#endif\n";
+    }
     if (!strcmp(name, "assert.h")) {
         return "#ifdef assert\n"
                "#undef assert\n"
