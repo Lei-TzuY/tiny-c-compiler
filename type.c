@@ -445,11 +445,11 @@ void add_type(Node *node) {
     switch (node->kind) {
     case ND_ADD:
         if (node->lhs->ty->base) {
-            node->ty = node->lhs->ty;
+            node->ty = decay_pointer_operand_type(node->lhs->ty);
             return;
         }
         if (node->rhs->ty && node->rhs->ty->base) {
-            node->ty = node->rhs->ty;
+            node->ty = decay_pointer_operand_type(node->rhs->ty);
             return;
         }
         if (!is_numeric(node->lhs->ty) || !is_numeric(node->rhs->ty))
@@ -459,7 +459,7 @@ void add_type(Node *node) {
 
     case ND_SUB:
         if (node->lhs->ty->base) {
-            node->ty = node->lhs->ty;
+            node->ty = decay_pointer_operand_type(node->lhs->ty);
             return;
         }
         // Subtraction is not commutative: only pointer - integer is a valid
