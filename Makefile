@@ -22,6 +22,7 @@ test: minicc
 	bash ./test/predefined_source_macros.sh
 	bash ./test/float.sh
 	bash ./test/floating_literals.sh
+	bash ./test/float_header.sh
 	bash ./test/float_abi.sh
 	bash ./test/function_return_abi.sh
 	bash ./test/incomplete_tags.sh
