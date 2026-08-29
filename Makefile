@@ -78,6 +78,7 @@ test: minicc
 	bash ./test/limits_header.sh
 	bash ./test/stddef_header.sh
 	bash ./test/string_header.sh
+	bash ./test/stdlib_header.sh
 	bash ./test/noreturn.sh
 	bash ./test/sizeof_alignof_size_t.sh
 	bash ./test/sizeof_constraints.sh
