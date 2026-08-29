@@ -245,4 +245,24 @@ assert_pp_fail '#define PICK(x) (x)
 int main() { return 0; }
 #endif'
 
+
+# Integer constant suffixes in #if expressions follow C grammar.
+assert_pp_adv 33 '#if 1U == 1 && 1UL == 1 && 1LU == 1 && 1ULL == 1 && 1LLU == 1
+int main() { return 33; }
+#else
+int main() { return 0; }
+#endif'
+
+assert_pp_fail '#if 1UU
+int main() { return 0; }
+#endif'
+
+assert_pp_fail '#if 1ULU
+int main() { return 0; }
+#endif'
+
+assert_pp_fail '#if 1LLL
+int main() { return 0; }
+#endif'
+
 echo "All advanced preprocessor tests passed!"

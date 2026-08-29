@@ -428,9 +428,23 @@ static int64_t pp_primary(PPExpr *e) {
         unsigned long long val = strtoull(e->p, &end, 0);
         if (end == e->p)
             error("invalid number in #if expression");
-        e->p = end;
-        while (*e->p == 'u' || *e->p == 'U' || *e->p == 'l' || *e->p == 'L')
-            e->p++;
+
+        const char *suffix = end;
+        bool seen_u = false;
+        if (*suffix == 'u' || *suffix == 'U') {
+            seen_u = true;
+            suffix++;
+        }
+        if (*suffix == 'l' || *suffix == 'L') {
+            char first = *suffix++;
+            if (*suffix == first)
+                suffix++;
+        }
+        if (!seen_u && (*suffix == 'u' || *suffix == 'U'))
+            suffix++;
+        if (*suffix == 'u' || *suffix == 'U' || *suffix == 'l' || *suffix == 'L')
+            error("invalid integer suffix in #if expression");
+        e->p = suffix;
         return (int64_t)val;
     }
     error("invalid #if expression near '%s'", e->p);
