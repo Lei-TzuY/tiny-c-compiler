@@ -60,6 +60,8 @@ assert_run 2 'int main(){union U{int x; int y;}; union U u={.x=1,.y=2}; return u
 assert_run 7 'int main(){union U{int x; int y;}; union U u={.x=3,.x=7}; return u.x;}'
 assert_run 5 'union U{int x; long y;}; union U u={.y=99,.x=5}; int main(){return u.x;}'
 assert_run 8 'int main(){union U{struct {int a; int b;} s; long y;}; union U u={.s.a=3,.s.b=5}; return u.s.a+u.s.b;}'
+assert_run 8 'union U{struct {int a; int b;} s; long y;}; static union U u={.s.a=3,.s.b=5}; int main(){return u.s.a+u.s.b;}'
+assert_run 8 'struct W{int h;union U{struct {int a;int b;} s;long y;} u;}; static struct W w={.u.s.a=3,.u.s.b=5}; int main(){return w.u.s.a+w.u.s.b;}'
 assert_run 6 'int main(){union U{struct {int a; int b;} s; long y;}; union U u={.s.a=9,.y=4,.s.b=6}; return u.s.a+u.s.b;}'
 
 # Positional elements after the selected union member remain excess elements.

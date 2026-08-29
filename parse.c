@@ -2759,6 +2759,62 @@ static void reset_static_subobject(Obj *var, int offset, int size) {
     clear_static_reloc_range(var, offset, size);
 }
 
+typedef struct StaticUnionSelection StaticUnionSelection;
+struct StaticUnionSelection {
+    StaticUnionSelection *next;
+    Obj *var;
+    Type *ty;
+    int offset;
+    Member *member;
+};
+
+static StaticUnionSelection *static_union_selections;
+
+static void invalidate_static_union_selections(Obj *var, int offset, int size) {
+    StaticUnionSelection head = {};
+    StaticUnionSelection *tail = &head;
+    for (StaticUnionSelection *sel = static_union_selections; sel;) {
+        StaticUnionSelection *next = sel->next;
+        bool contained = sel->var == var && sel->offset >= offset &&
+                         sel->offset < offset + size;
+        if (contained) {
+            free(sel);
+        } else {
+            tail = tail->next = sel;
+            sel->next = NULL;
+        }
+        sel = next;
+    }
+    static_union_selections = head.next;
+}
+
+// Designators may enter the same union member repeatedly, e.g. `.s.a` then
+// `.s.b`. Preserve earlier writes while that selected member stays active, but
+// clear the complete overlapping representation (including relocations) when a
+// later designator switches the union to another member. Offset plus Type
+// identifies each physical union subobject within one static object image.
+static void select_static_union_member(Obj *var, Type *ty, int offset,
+                                       Member *member) {
+    for (StaticUnionSelection *sel = static_union_selections; sel; sel = sel->next) {
+        if (sel->var == var && sel->ty == ty && sel->offset == offset) {
+            if (sel->member == member)
+                return;
+            break;
+        }
+    }
+
+    reset_static_subobject(var, offset, ty->size);
+    invalidate_static_union_selections(var, offset, ty->size);
+
+    StaticUnionSelection *sel = calloc(1, sizeof(StaticUnionSelection));
+    sel->var = var;
+    sel->ty = ty;
+    sel->offset = offset;
+    sel->member = member;
+    sel->next = static_union_selections;
+    static_union_selections = sel;
+}
+
 // Static aggregate images use the same character-array string rule. The image
 // is already writable .data storage; copy at most the destination width so a
 // char[N] may omit the terminating NUL when N equals the string payload length.
@@ -2951,11 +3007,8 @@ static int apply_static_designator_path(Obj *var, Type *root_ty, int root_offset
         if (step->kind == INIT_DESIGNATOR_INDEX) {
             offset += step->index * cur->base->size;
         } else {
-            // Selecting a union member replaces the complete overlapping
-            // representation.  Clear both bytes and relocations before walking
-            // farther into the selected member.
             if (cur->is_union)
-                reset_static_subobject(var, offset, cur->size);
+                select_static_union_member(var, cur, offset, step->member);
             offset += step->member->offset;
         }
         cur = step->result_ty;
@@ -3068,7 +3121,7 @@ static void parse_static_image_elided(Obj *var, Token **rest, Token *tok,
             error_at(tok->loc, "designators in brace-elided nested aggregates are not yet supported");
 
         if (ty->is_union)
-            reset_static_subobject(var, offset, ty->size);
+            select_static_union_member(var, ty, offset, m);
         else
             reset_static_subobject(var, offset + m->offset, m->ty->size);
 
@@ -3208,7 +3261,6 @@ static Type *parse_static_image_initializer(Obj *var, Token **rest, Token *tok,
 
     ensure_static_image(var, offset + ty->size);
     Member *next_member = ty->members;
-    Member *active_union_member = NULL;
     bool first = true;
     int initialized_members = 0;
     while (!equal(tok, "}")) {
@@ -3231,11 +3283,7 @@ static Type *parse_static_image_initializer(Obj *var, Token **rest, Token *tok,
             Member *member = path.first_member;
             Type *target_ty = path.target_ty;
             int target_offset = apply_static_designator_path(var, ty, offset, &path);
-            if (ty->is_union && active_union_member && active_union_member != member)
-                reset_static_subobject(var, offset, ty->size);
             reset_static_subobject(var, target_offset, target_ty->size);
-            if (ty->is_union)
-                active_union_member = member;
             free_initializer_designator_path(&path);
 
             if (parse_static_string_array_initializer(var, &tok, tok,
@@ -3257,10 +3305,10 @@ static Type *parse_static_image_initializer(Obj *var, Token **rest, Token *tok,
         if (!member)
             error_at(tok->loc, "excess elements in record initializer");
 
-        // All union members overlap at offset zero. Clear the complete union so
-        // a positional pointer member cannot leave stale relocation/data bytes.
+        // All union members overlap at offset zero. Selecting a positional
+        // member participates in the same active-member state as designators.
         if (ty->is_union)
-            reset_static_subobject(var, offset, ty->size);
+            select_static_union_member(var, ty, offset, member);
         else
             reset_static_subobject(var, offset + member->offset, member->ty->size);
 
