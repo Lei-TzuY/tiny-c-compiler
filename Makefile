@@ -13,6 +13,7 @@ test: minicc
 	bash ./test/driver_cli.sh
 	bash ./test/preprocessor.sh
 	bash ./test/preprocessor_advanced.sh
+	bash ./test/preprocessor_function_invocation.sh
 	bash ./test/preprocessor_char_constants.sh
 	bash ./test/predefined_macros.sh
 	bash ./test/predefined_source_macros.sh
