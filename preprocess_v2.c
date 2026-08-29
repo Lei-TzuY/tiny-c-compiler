@@ -456,7 +456,40 @@ typedef struct {
     bool suppress_eval;
 } PPExpr;
 
-static int64_t pp_conditional(PPExpr *e);
+typedef struct {
+    uint64_t bits;
+    bool is_unsigned;
+} PPValue;
+
+static PPValue pp_conditional(PPExpr *e);
+
+static PPValue pp_value(uint64_t bits, bool is_unsigned) {
+    return (PPValue){.bits = bits, .is_unsigned = is_unsigned};
+}
+
+static PPValue pp_signed_value(int64_t value) {
+    return pp_value((uint64_t)value, false);
+}
+
+static PPValue pp_unsigned_value(uint64_t value) {
+    return pp_value(value, true);
+}
+
+static bool pp_truth(PPValue value) {
+    return value.bits != 0;
+}
+
+static int64_t pp_as_signed(PPValue value) {
+    return (int64_t)value.bits;
+}
+
+static bool pp_common_unsigned(PPValue lhs, PPValue rhs) {
+    return lhs.is_unsigned || rhs.is_unsigned;
+}
+
+static PPValue pp_bool_value(bool value) {
+    return pp_signed_value(value ? 1 : 0);
+}
 
 static void pp_skip_space(PPExpr *e) {
     while (isspace((unsigned char)*e->p))
@@ -489,7 +522,7 @@ static int pp_hex_digit(char c) {
     return -1;
 }
 
-static int64_t pp_read_char_constant(PPExpr *e) {
+static PPValue pp_read_char_constant(PPExpr *e) {
     pp_skip_space(e);
     const char *p = e->p;
     if (*p++ != '\'')
@@ -545,13 +578,37 @@ static int64_t pp_read_char_constant(PPExpr *e) {
     if (*p != '\'')
         error("multi-character or unterminated character constant in #if expression");
     e->p = p + 1;
-    return (int64_t)value;
+    return pp_signed_value((int64_t)value);
 }
 
-static int64_t eval_pp_expr_depth(const char *text, int depth, bool suppress_eval);
-static int64_t pp_eval_function_macro(PPExpr *e, Macro *m);
+static PPValue eval_pp_expr_depth(const char *text, int depth, bool suppress_eval);
+static PPValue pp_eval_function_macro(PPExpr *e, Macro *m);
 
-static int64_t pp_primary(PPExpr *e) {
+static bool pp_integer_constant_is_unsigned(const char *start, uint64_t value,
+                                            bool seen_u, int long_count) {
+    if (seen_u)
+        return true;
+
+    bool decimal = *start != '0';
+    if (decimal) {
+        if (value > INT64_MAX)
+            error("decimal integer constant is too large in #if expression");
+        return false;
+    }
+
+    if (long_count > 0)
+        return value > INT64_MAX;
+
+    if (value <= INT32_MAX)
+        return false;
+    if (value <= UINT32_MAX)
+        return true;
+    if (value <= INT64_MAX)
+        return false;
+    return true;
+}
+
+static PPValue pp_primary(PPExpr *e) {
     pp_skip_space(e);
     const char *saved = e->p;
     char *ident = pp_read_ident(e);
@@ -565,13 +622,13 @@ static int64_t pp_primary(PPExpr *e) {
             error("expected ')' after defined");
         bool result = find_macro(name) != NULL;
         free(name);
-        return result;
+        return pp_bool_value(result);
     }
     if (ident) {
         Macro *m = find_macro(ident);
-        int64_t result = 0;
+        PPValue result = pp_signed_value(0);
         if (m && m->builtin == BUILTIN_MACRO_LINE) {
-            result = current_pp_line;
+            result = pp_signed_value(current_pp_line);
         } else if (m && m->builtin == BUILTIN_MACRO_FILE) {
             error("__FILE__ expands to a string and is not valid in #if arithmetic");
         } else if (m && m->is_objlike && e->depth < 64) {
@@ -585,7 +642,7 @@ static int64_t pp_primary(PPExpr *e) {
     e->p = saved;
 
     if (pp_consume(e, "(")) {
-        int64_t val = pp_conditional(e);
+        PPValue val = pp_conditional(e);
         if (!pp_consume(e, ")"))
             error("expected ')' in #if expression");
         return val;
@@ -595,6 +652,7 @@ static int64_t pp_primary(PPExpr *e) {
     if (*e->p == '\'')
         return pp_read_char_constant(e);
     if (isdigit((unsigned char)*e->p)) {
+        const char *number_start = e->p;
         char *end;
         errno = 0;
         unsigned long long val = strtoull(e->p, &end, 0);
@@ -605,183 +663,313 @@ static int64_t pp_primary(PPExpr *e) {
 
         const char *suffix = end;
         bool seen_u = false;
+        int long_count = 0;
         if (*suffix == 'u' || *suffix == 'U') {
             seen_u = true;
             suffix++;
         }
         if (*suffix == 'l' || *suffix == 'L') {
             char first = *suffix++;
-            if (*suffix == first)
+            long_count = 1;
+            if (*suffix == first) {
                 suffix++;
+                long_count = 2;
+            }
         }
-        if (!seen_u && (*suffix == 'u' || *suffix == 'U'))
+        if (!seen_u && (*suffix == 'u' || *suffix == 'U')) {
+            seen_u = true;
             suffix++;
+        }
         if (*suffix == 'u' || *suffix == 'U' || *suffix == 'l' || *suffix == 'L')
             error("invalid integer suffix in #if expression");
         e->p = suffix;
-        return (int64_t)val;
+
+        bool is_unsigned = pp_integer_constant_is_unsigned(number_start, val,
+                                                           seen_u, long_count);
+        return pp_value((uint64_t)val, is_unsigned);
     }
     error("invalid #if expression near '%s'", e->p);
 }
 
-static int64_t pp_unary(PPExpr *e) {
-    if (pp_consume(e, "!")) return !pp_unary(e);
-    if (pp_consume(e, "~")) return ~pp_unary(e);
-    if (pp_consume(e, "+")) return +pp_unary(e);
-    if (pp_consume(e, "-")) return -pp_unary(e);
+static PPValue pp_unary(PPExpr *e) {
+    if (pp_consume(e, "!"))
+        return pp_bool_value(!pp_truth(pp_unary(e)));
+    if (pp_consume(e, "~")) {
+        PPValue val = pp_unary(e);
+        val.bits = ~val.bits;
+        return val;
+    }
+    if (pp_consume(e, "+"))
+        return pp_unary(e);
+    if (pp_consume(e, "-")) {
+        PPValue val = pp_unary(e);
+        val.bits = 0 - val.bits;
+        return val;
+    }
     return pp_primary(e);
 }
 
-static int64_t pp_mul(PPExpr *e) {
-    int64_t val = pp_unary(e);
+static PPValue pp_mul(PPExpr *e) {
+    PPValue val = pp_unary(e);
     for (;;) {
-        if (pp_consume(e, "*")) val *= pp_unary(e);
-        else if (pp_consume(e, "/")) {
-            int64_t rhs = pp_unary(e);
-            if (!e->suppress_eval) {
-                if (!rhs) error("division by zero in #if expression");
-                val /= rhs;
+        if (pp_consume(e, "*")) {
+            PPValue rhs = pp_unary(e);
+            bool uns = pp_common_unsigned(val, rhs);
+            val = pp_value(val.bits * rhs.bits, uns);
+        } else if (pp_consume(e, "/")) {
+            PPValue rhs = pp_unary(e);
+            bool uns = pp_common_unsigned(val, rhs);
+            if (e->suppress_eval) {
+                val = pp_value(0, uns);
+                continue;
+            }
+            if (!rhs.bits)
+                error("division by zero in #if expression");
+            if (uns) {
+                val = pp_unsigned_value(val.bits / rhs.bits);
+            } else {
+                int64_t lhs_s = pp_as_signed(val);
+                int64_t rhs_s = pp_as_signed(rhs);
+                if (lhs_s == INT64_MIN && rhs_s == -1)
+                    error("signed division overflow in #if expression");
+                val = pp_signed_value(lhs_s / rhs_s);
             }
         } else if (pp_consume(e, "%")) {
-            int64_t rhs = pp_unary(e);
-            if (!e->suppress_eval) {
-                if (!rhs) error("division by zero in #if expression");
-                val %= rhs;
+            PPValue rhs = pp_unary(e);
+            bool uns = pp_common_unsigned(val, rhs);
+            if (e->suppress_eval) {
+                val = pp_value(0, uns);
+                continue;
             }
-        } else return val;
+            if (!rhs.bits)
+                error("division by zero in #if expression");
+            if (uns) {
+                val = pp_unsigned_value(val.bits % rhs.bits);
+            } else {
+                int64_t lhs_s = pp_as_signed(val);
+                int64_t rhs_s = pp_as_signed(rhs);
+                if (lhs_s == INT64_MIN && rhs_s == -1)
+                    val = pp_signed_value(0);
+                else
+                    val = pp_signed_value(lhs_s % rhs_s);
+            }
+        } else {
+            return val;
+        }
     }
 }
 
-static int64_t pp_add(PPExpr *e) {
-    int64_t val = pp_mul(e);
+static PPValue pp_add(PPExpr *e) {
+    PPValue val = pp_mul(e);
     for (;;) {
-        if (pp_consume(e, "+")) val += pp_mul(e);
-        else if (pp_consume(e, "-")) val -= pp_mul(e);
-        else return val;
+        if (pp_consume(e, "+")) {
+            PPValue rhs = pp_mul(e);
+            val = pp_value(val.bits + rhs.bits, pp_common_unsigned(val, rhs));
+        } else if (pp_consume(e, "-")) {
+            PPValue rhs = pp_mul(e);
+            val = pp_value(val.bits - rhs.bits, pp_common_unsigned(val, rhs));
+        } else {
+            return val;
+        }
     }
 }
 
-static int64_t pp_shift(PPExpr *e) {
-    int64_t val = pp_add(e);
+static PPValue pp_shift(PPExpr *e) {
+    PPValue val = pp_add(e);
     for (;;) {
-        if (pp_consume(e, "<<")) val <<= pp_add(e);
-        else if (pp_consume(e, ">>")) val >>= pp_add(e);
-        else return val;
+        bool left = false;
+        if (pp_consume(e, "<<"))
+            left = true;
+        else if (!pp_consume(e, ">>"))
+            return val;
+
+        PPValue rhs = pp_add(e);
+        if (e->suppress_eval) {
+            val.bits = 0;
+            continue;
+        }
+        int64_t count = pp_as_signed(rhs);
+        if (rhs.is_unsigned) {
+            if (rhs.bits >= 64)
+                error("invalid shift count in #if expression");
+            count = (int64_t)rhs.bits;
+        }
+        if (count < 0 || count >= 64)
+            error("invalid shift count in #if expression");
+        if (left)
+            val.bits <<= (unsigned)count;
+        else if (val.is_unsigned)
+            val.bits >>= (unsigned)count;
+        else
+            val.bits = (uint64_t)(pp_as_signed(val) >> (unsigned)count);
     }
 }
 
-static int64_t pp_rel(PPExpr *e) {
-    int64_t val = pp_shift(e);
+static PPValue pp_rel(PPExpr *e) {
+    PPValue val = pp_shift(e);
     for (;;) {
-        if (pp_consume(e, "<=")) val = val <= pp_shift(e);
-        else if (pp_consume(e, ">=")) val = val >= pp_shift(e);
-        else if (pp_consume(e, "<")) val = val < pp_shift(e);
-        else if (pp_consume(e, ">")) val = val > pp_shift(e);
+        enum { PP_NONE, PP_LE, PP_GE, PP_LT, PP_GT } op = PP_NONE;
+        if (pp_consume(e, "<=")) op = PP_LE;
+        else if (pp_consume(e, ">=")) op = PP_GE;
+        else if (pp_consume(e, "<")) op = PP_LT;
+        else if (pp_consume(e, ">")) op = PP_GT;
         else return val;
+
+        PPValue rhs = pp_shift(e);
+        if (e->suppress_eval) {
+            val = pp_signed_value(0);
+            continue;
+        }
+        bool uns = pp_common_unsigned(val, rhs);
+        bool result;
+        if (uns) {
+            if (op == PP_LE) result = val.bits <= rhs.bits;
+            else if (op == PP_GE) result = val.bits >= rhs.bits;
+            else if (op == PP_LT) result = val.bits < rhs.bits;
+            else result = val.bits > rhs.bits;
+        } else {
+            int64_t lhs_s = pp_as_signed(val);
+            int64_t rhs_s = pp_as_signed(rhs);
+            if (op == PP_LE) result = lhs_s <= rhs_s;
+            else if (op == PP_GE) result = lhs_s >= rhs_s;
+            else if (op == PP_LT) result = lhs_s < rhs_s;
+            else result = lhs_s > rhs_s;
+        }
+        val = pp_bool_value(result);
     }
 }
 
-static int64_t pp_eq(PPExpr *e) {
-    int64_t val = pp_rel(e);
+static PPValue pp_eq(PPExpr *e) {
+    PPValue val = pp_rel(e);
     for (;;) {
-        if (pp_consume(e, "==")) val = val == pp_rel(e);
-        else if (pp_consume(e, "!=")) val = val != pp_rel(e);
+        bool is_eq;
+        if (pp_consume(e, "==")) is_eq = true;
+        else if (pp_consume(e, "!=")) is_eq = false;
         else return val;
+
+        PPValue rhs = pp_rel(e);
+        if (e->suppress_eval) {
+            val = pp_signed_value(0);
+            continue;
+        }
+        bool result;
+        if (pp_common_unsigned(val, rhs))
+            result = val.bits == rhs.bits;
+        else
+            result = pp_as_signed(val) == pp_as_signed(rhs);
+        val = pp_bool_value(is_eq ? result : !result);
     }
 }
 
-static int64_t pp_bitand(PPExpr *e) {
-    int64_t val = pp_eq(e);
+static PPValue pp_bitand(PPExpr *e) {
+    PPValue val = pp_eq(e);
     for (;;) {
         pp_skip_space(e);
         if (e->p[0] == '&' && e->p[1] != '&') {
             e->p++;
-            val &= pp_eq(e);
-        } else return val;
+            PPValue rhs = pp_eq(e);
+            val = pp_value(val.bits & rhs.bits, pp_common_unsigned(val, rhs));
+        } else {
+            return val;
+        }
     }
 }
 
-static int64_t pp_bitxor(PPExpr *e) {
-    int64_t val = pp_bitand(e);
-    while (pp_consume(e, "^"))
-        val ^= pp_bitand(e);
+static PPValue pp_bitxor(PPExpr *e) {
+    PPValue val = pp_bitand(e);
+    while (pp_consume(e, "^")) {
+        PPValue rhs = pp_bitand(e);
+        val = pp_value(val.bits ^ rhs.bits, pp_common_unsigned(val, rhs));
+    }
     return val;
 }
 
-static int64_t pp_bitor(PPExpr *e) {
-    int64_t val = pp_bitxor(e);
+static PPValue pp_bitor(PPExpr *e) {
+    PPValue val = pp_bitxor(e);
     for (;;) {
         pp_skip_space(e);
         if (e->p[0] == '|' && e->p[1] != '|') {
             e->p++;
-            val |= pp_bitxor(e);
-        } else return val;
+            PPValue rhs = pp_bitxor(e);
+            val = pp_value(val.bits | rhs.bits, pp_common_unsigned(val, rhs));
+        } else {
+            return val;
+        }
     }
 }
 
-static int64_t pp_logand(PPExpr *e) {
-    int64_t val = pp_bitor(e);
+static PPValue pp_logand(PPExpr *e) {
+    PPValue val = pp_bitor(e);
     while (pp_consume(e, "&&")) {
+        bool lhs_truth = pp_truth(val);
         bool saved = e->suppress_eval;
-        if (!saved && !val)
+        if (!saved && !lhs_truth)
             e->suppress_eval = true;
-        int64_t rhs = pp_bitor(e);
+        PPValue rhs = pp_bitor(e);
         e->suppress_eval = saved;
-        if (!saved)
-            val = val && rhs;
+        if (saved)
+            val = pp_signed_value(0);
+        else
+            val = pp_bool_value(lhs_truth && pp_truth(rhs));
     }
     return val;
 }
 
-static int64_t pp_logor(PPExpr *e) {
-    int64_t val = pp_logand(e);
+static PPValue pp_logor(PPExpr *e) {
+    PPValue val = pp_logand(e);
     while (pp_consume(e, "||")) {
+        bool lhs_truth = pp_truth(val);
         bool saved = e->suppress_eval;
-        if (!saved && val)
+        if (!saved && lhs_truth)
             e->suppress_eval = true;
-        int64_t rhs = pp_logand(e);
+        PPValue rhs = pp_logand(e);
         e->suppress_eval = saved;
-        if (!saved)
-            val = val || rhs;
+        if (saved)
+            val = pp_signed_value(0);
+        else
+            val = pp_bool_value(lhs_truth || pp_truth(rhs));
     }
     return val;
 }
 
-static int64_t pp_conditional(PPExpr *e) {
-    int64_t cond = pp_logor(e);
+static PPValue pp_conditional(PPExpr *e) {
+    PPValue cond = pp_logor(e);
     if (!pp_consume(e, "?"))
         return cond;
 
     bool saved = e->suppress_eval;
-    if (!saved && !cond)
+    if (!saved && !pp_truth(cond))
         e->suppress_eval = true;
-    int64_t then_val = pp_conditional(e);
+    PPValue then_val = pp_conditional(e);
     e->suppress_eval = saved;
 
     if (!pp_consume(e, ":"))
         error("expected ':' in #if conditional expression");
 
-    if (!saved && cond)
+    if (!saved && pp_truth(cond))
         e->suppress_eval = true;
-    int64_t else_val = pp_conditional(e);
+    PPValue else_val = pp_conditional(e);
     e->suppress_eval = saved;
 
+    bool uns = pp_common_unsigned(then_val, else_val);
     if (saved)
-        return 0;
-    return cond ? then_val : else_val;
+        return pp_value(0, uns);
+    PPValue selected = pp_truth(cond) ? then_val : else_val;
+    selected.is_unsigned = uns;
+    return selected;
 }
 
-static int64_t eval_pp_expr_depth(const char *text, int depth, bool suppress_eval) {
+static PPValue eval_pp_expr_depth(const char *text, int depth, bool suppress_eval) {
     PPExpr e = {.p = text, .depth = depth, .suppress_eval = suppress_eval};
-    int64_t val = pp_conditional(&e);
+    PPValue val = pp_conditional(&e);
     pp_skip_space(&e);
     if (*e.p)
         error("unexpected token in #if expression near '%s'", e.p);
-    return suppress_eval ? 0 : val;
+    return val;
 }
 
-static int64_t eval_pp_expr(const char *text) {
-    return eval_pp_expr_depth(text, 0, false);
+static bool eval_pp_expr(const char *text) {
+    return pp_truth(eval_pp_expr_depth(text, 0, false));
 }
 
 // ---- Macro expansion ---------------------------------------------------------
@@ -1042,12 +1230,12 @@ static char **parse_macro_args(const char **pp, int *argc_out) {
     return args;
 }
 
-static int64_t pp_eval_function_macro(PPExpr *e, Macro *m) {
+static PPValue pp_eval_function_macro(PPExpr *e, Macro *m) {
     const char *call = e->p;
     while (*call == ' ' || *call == '\t')
         call++;
     if (*call != '(')
-        return 0;
+        return pp_signed_value(0);
 
     int argc = 0;
     const char *after_call = call;
@@ -1074,7 +1262,7 @@ static int64_t pp_eval_function_macro(PPExpr *e, Macro *m) {
     Expansion frame = {.macro = m};
     bool nested_comment = false;
     char *rescanned = expand_text(subst, &frame, &nested_comment);
-    int64_t result = eval_pp_expr_depth(rescanned, e->depth + 1, e->suppress_eval);
+    PPValue result = eval_pp_expr_depth(rescanned, e->depth + 1, e->suppress_eval);
 
     for (int i = 0; i < argc; i++)
         free(args[i]);
