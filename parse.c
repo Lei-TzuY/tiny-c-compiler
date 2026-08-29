@@ -268,6 +268,7 @@ static Type *type_suffix(Token **rest, Token *tok, Type *ty,
                          bool allow_parameter_array_syntax);
 static Type *declarator(Token **rest, Token *tok, Type *ty, Token **ident);
 static Type *abstract_declarator(Token **rest, Token *tok, Type *ty, Token **ident);
+static Token *parse_static_assertion(Token *tok);
 static Type *type_name(Token **rest, Token *tok);
 static bool type_compatible(Type *a, Type *b);
 static bool type_compatible_ignoring_top_qual(Type *a, Type *b);
@@ -816,6 +817,11 @@ static Type *record_decl(Token **rest, Token *tok, bool is_union) {
     Member *cur = &head;
     bool has_flexible_member = false;
     while (!equal(tok, "}")) {
+        if (equal(tok, "_Static_assert")) {
+            tok = parse_static_assertion(tok);
+            continue;
+        }
+
         DeclAttrs attrs = {};
         Type *basety = declspec_with_attrs(&tok, tok, &attrs);
         if (attrs.is_auto || attrs.is_static || attrs.is_extern || attrs.is_register ||

@@ -24,6 +24,7 @@ test: minicc
 	bash ./test/incomplete_flexible_arrays.sh
 	bash ./test/tag_definition_constraints.sh
 	bash ./test/duplicate_record_members.sh
+	bash ./test/record_static_assert.sh
 	bash ./test/typedef_scope.sh
 	bash ./test/enum_scope.sh
 	bash ./test/ordinary_namespace.sh
