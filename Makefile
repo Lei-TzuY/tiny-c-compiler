@@ -75,6 +75,7 @@ test: minicc
 	bash ./test/alignof.sh
 	bash ./test/alignas.sh
 	bash ./test/stdalign_header.sh
+	bash ./test/stdbool_header.sh
 	bash ./test/stdint_header.sh
 	bash ./test/limits_header.sh
 	bash ./test/stddef_header.sh
