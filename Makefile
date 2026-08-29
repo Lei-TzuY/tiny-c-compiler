@@ -67,6 +67,7 @@ test: minicc
 	bash ./test/alignas.sh
 	bash ./test/noreturn.sh
 	bash ./test/sizeof_alignof_size_t.sh
+	bash ./test/sizeof_constraints.sh
 	bash ./test/static_assert.sh
 	bash ./test/generic_selection.sh
 	bash ./test/predefined_func.sh
