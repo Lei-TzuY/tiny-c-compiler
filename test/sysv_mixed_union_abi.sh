@@ -140,6 +140,56 @@ cc -std=c11 -pedantic-errors -o tmp-fam-union-host-main tmp-fam-union-host-main.
 ./tmp-fam-union-host-main
 printf '%s\n' 'OK(mixed-union ABI): FAM-carrier union host GCC caller interoperates with minicc callee'
 
+# Repeat the external boundary check with an SSE-class FAM carrier. The zero-size
+# flexible array must not force MEMORY/INTEGER classification when the fixed
+# payload is a double; arguments and returns should stay in XMM registers.
+cat > tmp-fam-sse-host.c <<'EOF'
+struct F { double d; int data[]; };
+union Carrier { struct F f; double raw; };
+double host_fam_sse_read(union Carrier u) { return u.raw; }
+union Carrier host_fam_sse_make(double x) { union Carrier u; u.raw=x; return u; }
+EOF
+cc -std=c11 -pedantic-errors -c -o tmp-fam-sse-host.o tmp-fam-sse-host.c
+cat > tmp-fam-sse-mini-caller.c <<'EOF'
+struct F { double d; int data[]; };
+union Carrier { struct F f; double raw; };
+double host_fam_sse_read(union Carrier);
+union Carrier host_fam_sse_make(double);
+int main(void) {
+  union Carrier u; u.raw=42.5;
+  if (host_fam_sse_read(u)!=42.5) return 1;
+  union Carrier v=host_fam_sse_make(37.25);
+  return v.raw==37.25 ? 0 : 2;
+}
+EOF
+./minicc tmp-fam-sse-mini-caller.c > tmp-fam-sse-mini-caller.s
+cc -o tmp-fam-sse-mini-caller tmp-fam-sse-mini-caller.s tmp-fam-sse-host.o
+./tmp-fam-sse-mini-caller
+printf '%s\n' 'OK(mixed-union ABI): SSE FAM-carrier minicc caller interoperates with host GCC'
+
+cat > tmp-fam-sse-mini-callee.c <<'EOF'
+struct F { double d; int data[]; };
+union Carrier { struct F f; double raw; };
+double mini_fam_sse_read(union Carrier u){return u.raw;}
+union Carrier mini_fam_sse_make(double x){union Carrier u;u.raw=x;return u;}
+EOF
+./minicc tmp-fam-sse-mini-callee.c > tmp-fam-sse-mini-callee.s
+cat > tmp-fam-sse-host-main.c <<'EOF'
+struct F { double d; int data[]; };
+union Carrier { struct F f; double raw; };
+double mini_fam_sse_read(union Carrier);
+union Carrier mini_fam_sse_make(double);
+int main(void) {
+  union Carrier u; u.raw=42.5;
+  if (mini_fam_sse_read(u)!=42.5) return 1;
+  union Carrier v=mini_fam_sse_make(35.75);
+  return v.raw==35.75 ? 0 : 2;
+}
+EOF
+cc -std=c11 -pedantic-errors -o tmp-fam-sse-host-main tmp-fam-sse-host-main.c tmp-fam-sse-mini-callee.s
+./tmp-fam-sse-host-main
+printf '%s\n' 'OK(mixed-union ABI): SSE FAM-carrier host GCC caller interoperates with minicc callee'
+
 rm -f tmp-mixed-union-abi.c tmp-mixed-union-abi.s tmp-mixed-union-abi \
       tmp-mixed-union-abi-bad.c tmp-mixed-union-abi-bad.s \
       tmp-mixed-union-host.c tmp-mixed-union-host.o \
@@ -149,6 +199,10 @@ rm -f tmp-mixed-union-abi.c tmp-mixed-union-abi.s tmp-mixed-union-abi \
       tmp-fam-union-host.c tmp-fam-union-host.o \
       tmp-fam-union-mini-caller.c tmp-fam-union-mini-caller.s tmp-fam-union-mini-caller \
       tmp-fam-union-mini-callee.c tmp-fam-union-mini-callee.s \
-      tmp-fam-union-host-main.c tmp-fam-union-host-main
+      tmp-fam-union-host-main.c tmp-fam-union-host-main \
+      tmp-fam-sse-host.c tmp-fam-sse-host.o \
+      tmp-fam-sse-mini-caller.c tmp-fam-sse-mini-caller.s tmp-fam-sse-mini-caller \
+      tmp-fam-sse-mini-callee.c tmp-fam-sse-mini-callee.s \
+      tmp-fam-sse-host-main.c tmp-fam-sse-host-main
 
 echo 'All mixed-union SysV ABI tests passed!'
