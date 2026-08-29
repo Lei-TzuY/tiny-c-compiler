@@ -1,0 +1,32 @@
+name: Migrate assert header
+
+on:
+  push:
+    branches:
+      - feat/assert-header-c11
+
+permissions:
+  contents: write
+
+jobs:
+  migrate:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/assert-header-c11
+          fetch-depth: 0
+      - name: Apply assert header support
+        run: python3 tools/migrate_assert_header.py
+      - name: Commit migrated sources
+        run: |
+          if git diff --quiet -- preprocess_v2.c Makefile test/assert_header.sh; then
+            echo 'No migration changes required.'
+            exit 0
+          fi
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add preprocess_v2.c Makefile test/assert_header.sh
+          git commit -m 'Support C11 assert.h'
+          git push origin HEAD:feat/assert-header-c11
