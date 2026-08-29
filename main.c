@@ -171,6 +171,14 @@ static void select_output(char *path) {
         error("cannot open output %s", path);
 }
 
+static void finish_output(char *path) {
+    if (fflush(stdout) == EOF || ferror(stdout)) {
+        if (path && strcmp(path, "-"))
+            error("failed to write output %s", path);
+        error("failed to write output");
+    }
+}
+
 int main(int argc, char **argv) {
     DriverOptions opts = parse_options(argc, argv);
     if (opts.exit_after_options)
@@ -183,6 +191,7 @@ int main(int argc, char **argv) {
     if (opts.mode == DRIVER_PREPROCESS_ONLY) {
         select_output(opts.output_path);
         fputs(preprocessed, stdout);
+        finish_output(opts.output_path);
         return 0;
     }
 
@@ -194,6 +203,7 @@ int main(int argc, char **argv) {
     // have succeeded so a front-end error does not truncate an existing file.
     select_output(opts.output_path);
     codegen(prog);
+    finish_output(opts.output_path);
 
     return 0;
 }
