@@ -5071,6 +5071,71 @@ static Node *postfix(Token **rest, Token *tok) {
 }
 
 static Node *primary(Token **rest, Token *tok) {
+    if (equal(tok, "__builtin_offsetof")) {
+        Token *builtin = tok;
+        tok = skip(tok->next, "(");
+        Type *cur_ty = type_name(&tok, tok);
+        if (!cur_ty || cur_ty->kind != TY_STRUCT || cur_ty->is_incomplete)
+            error_at(builtin->loc, "offsetof requires a complete struct or union type");
+        tok = skip(tok, ",");
+
+        int64_t offset = 0;
+        for (;;) {
+            if (tok->kind != TK_IDENT)
+                error_at(tok->loc, "offsetof requires a member designator");
+            if (!cur_ty || cur_ty->kind != TY_STRUCT || cur_ty->is_incomplete)
+                error_at(tok->loc, "member designator does not name a record subobject");
+
+            MemberPath *path = find_record_member_path(cur_ty, tok);
+            if (!path)
+                error_at(tok->loc, "unknown member in offsetof");
+            for (MemberPath *mp = path; mp; mp = mp->next) {
+                offset += mp->member->offset;
+                cur_ty = mp->member->ty;
+            }
+            free_member_path(path);
+            tok = tok->next;
+
+            while (equal(tok, "[")) {
+                Token *bracket = tok;
+                if (!cur_ty || cur_ty->kind != TY_ARRAY || !cur_ty->base ||
+                    cur_ty->array_len <= 0 || cur_ty->base->size <= 0)
+                    error_at(bracket->loc,
+                             "offsetof array designator requires a complete array type");
+                tok = tok->next;
+                Node *index_expr = ternary(&tok, tok);
+                add_type(index_expr);
+                if (!is_integer(index_expr->ty))
+                    error_at(bracket->loc, "offsetof array index must have integer type");
+
+                int64_t raw = eval_const_expr(index_expr);
+                uint64_t index;
+                if (index_expr->ty->is_unsigned) {
+                    index = (uint64_t)cast_const_integer(raw, index_expr->ty);
+                } else {
+                    int64_t signed_index = cast_const_integer(raw, index_expr->ty);
+                    if (signed_index < 0)
+                        error_at(bracket->loc, "offsetof array index must be nonnegative");
+                    index = (uint64_t)signed_index;
+                }
+                if (index >= (uint64_t)cur_ty->array_len)
+                    error_at(bracket->loc, "offsetof array index exceeds array bounds");
+                if (index > (uint64_t)INT64_MAX / (uint64_t)cur_ty->base->size)
+                    error_at(bracket->loc, "offsetof result is out of range");
+                offset += (int64_t)(index * (uint64_t)cur_ty->base->size);
+                cur_ty = cur_ty->base;
+                tok = skip(tok, "]");
+            }
+
+            if (!equal(tok, "."))
+                break;
+            tok = tok->next;
+        }
+
+        *rest = skip(tok, ")");
+        return new_size_t_num(offset);
+    }
+
     if (equal(tok, "__builtin_va_start")) {
         Token *builtin = tok;
         if (!current_function_variadic)

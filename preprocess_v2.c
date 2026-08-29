@@ -248,6 +248,17 @@ static char *get_builtin_header(char *name) {
                "#define __alignas_is_defined 1\n"
                "#define __alignof_is_defined 1\n";
     }
+    if (!strcmp(name, "stddef.h")) {
+        return "#ifndef __MINICC_STDDEF_H\n"
+               "#define __MINICC_STDDEF_H 1\n"
+               "typedef unsigned long size_t;\n"
+               "typedef long ptrdiff_t;\n"
+               "typedef int wchar_t;\n"
+               "typedef struct { long long __ll; double __d; } max_align_t;\n"
+               "#define NULL ((void *)0)\n"
+               "#define offsetof(type, member) __builtin_offsetof(type, member)\n"
+               "#endif\n";
+    }
     if (!strcmp(name, "limits.h")) {
         return "#define CHAR_BIT 8\n"
                "#define SCHAR_MIN (-127 - 1)\n"
