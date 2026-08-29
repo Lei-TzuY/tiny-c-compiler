@@ -7,6 +7,7 @@ void validate_program(Program *prog);
 typedef enum {
     DRIVER_COMPILE_ASSEMBLY,
     DRIVER_PREPROCESS_ONLY,
+    DRIVER_SYNTAX_ONLY,
 } DriverMode;
 
 typedef struct {
@@ -26,6 +27,7 @@ static void print_usage(FILE *out, const char *prog) {
             "Options:\n"
             "  -E               Preprocess only\n"
             "  -S               Compile to assembly (default)\n"
+            "  -fsyntax-only    Check preprocessing, syntax and semantics only\n"
             "  -o <file>        Write output to <file>\n"
             "  -o<file>         Same as '-o <file>'\n"
             "  -h, --help       Show this help and exit\n"
@@ -51,6 +53,7 @@ static DriverOptions parse_options(int argc, char **argv) {
     bool end_options = false;
     bool saw_E = false;
     bool saw_S = false;
+    bool saw_syntax_only = false;
 
     for (int i = 1; i < argc; i++) {
         char *arg = argv[i];
@@ -84,6 +87,12 @@ static DriverOptions parse_options(int argc, char **argv) {
             continue;
         }
 
+        if (!end_options && !strcmp(arg, "-fsyntax-only")) {
+            saw_syntax_only = true;
+            opts.mode = DRIVER_SYNTAX_ONLY;
+            continue;
+        }
+
         if (!end_options && !strcmp(arg, "-o")) {
             if (++i >= argc)
                 error("%s: missing argument after '-o'", argv[0]);
@@ -108,10 +117,12 @@ static DriverOptions parse_options(int argc, char **argv) {
         opts.input_path = arg;
     }
 
-    if (saw_E && saw_S)
-        error("%s: '-E' and '-S' are mutually exclusive", argv[0]);
+    if ((saw_E ? 1 : 0) + (saw_S ? 1 : 0) + (saw_syntax_only ? 1 : 0) > 1)
+        error("%s: '-E', '-S' and '-fsyntax-only' are mutually exclusive", argv[0]);
     if (!opts.input_path)
         error("%s: no input file", argv[0]);
+    if (opts.mode == DRIVER_SYNTAX_ONLY && opts.output_path)
+        error("%s: '-o' is not supported with '-fsyntax-only'", argv[0]);
     if (opts.output_path && strcmp(opts.output_path, "-") &&
         (!strcmp(opts.output_path, opts.input_path) ||
          same_existing_file(opts.output_path, opts.input_path)))
@@ -198,6 +209,9 @@ int main(int argc, char **argv) {
     Token *tok = tokenize(preprocessed);
     Program *prog = parse(tok);
     validate_program(prog);
+
+    if (opts.mode == DRIVER_SYNTAX_ONLY)
+        return 0;
 
     // Delay opening the output until preprocessing, tokenization and parsing
     // have succeeded so a front-end error does not truncate an existing file.
