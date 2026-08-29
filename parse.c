@@ -4215,6 +4215,7 @@ static Node *stmt(Token **rest, Token *tok) {
         } else {
             node->init = new_node(ND_EXPR_STMT);
             node->init->lhs = expr(&tok, tok);
+            reject_register_array_decay(node->init->lhs);
             tok = skip(tok, ";");
         }
 
@@ -4224,8 +4225,10 @@ static Node *stmt(Token **rest, Token *tok) {
         }
         tok = skip(tok, ";");
 
-        if (!equal(tok, ")"))
+        if (!equal(tok, ")")) {
             node->inc = expr(&tok, tok);
+            reject_register_array_decay(node->inc);
+        }
         tok = skip(tok, ")");
         require_control_substatement(tok, "for");
 
