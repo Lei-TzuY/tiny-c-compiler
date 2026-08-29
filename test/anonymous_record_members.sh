@@ -40,6 +40,8 @@ assert_run 8 'struct S{_Alignas(8) struct{char c;};char d;};int main(void){retur
 assert_run 10 'struct S{struct{int x;int y;};int z;};int main(void){struct S s={.x=2,.y=3,.z=5};return s.x+s.y+s.z;}'
 assert_run 12 'struct S{union{int x;long y;};int z;};int main(void){struct S s={.x=7,.z=5};return s.x+s.z;}'
 assert_run 11 'struct S{struct{int x;int y;};};static struct S s={.x=5,.y=6};int main(void){return s.x+s.y;}'
+assert_run 9 'struct S{union{struct{int x;int y;};long q;};};int main(void){struct S s={.x=4,.y=5};return s.x+s.y;}'
+assert_run 9 'struct S{union{struct{int x;int y;};long q;};};static struct S s={.x=4,.y=5};int main(void){return s.x+s.y;}'
 assert_run 9 'struct S{struct{int x;int y;};};int main(void){return ((struct S){.x=4,.y=5}).x+((struct S){.x=4,.y=5}).y;}'
 
 # Anonymous members remain real ABI-visible subobjects rather than flattened
