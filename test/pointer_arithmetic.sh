@@ -42,6 +42,14 @@ assert_run 6 'int main(){int a[3];a[1]=6;int *p=a;p++;return *p;}'
 assert_run 4 'int main(){int a[3];a[1]=4;int *p=a+2;--p;return *p;}'
 assert_run 1 'int main(){int a[2][3];int (*p)[3]=a;p++;return p-a;}'
 
+# Array designators decay before additive pointer arithmetic determines the
+# expression type. sizeof observes the resulting pointer type without
+# evaluating the arithmetic itself.
+assert_run 8 'int main(){int a[3];return sizeof(a+1);}'
+assert_run 8 'int main(){int a[3];return sizeof(1+a);}'
+assert_run 8 'int main(){int a[3];return sizeof(a-1);}'
+assert_run 8 'int main(){int a[2][3];return sizeof(a+1);}'
+
 # void*, function pointers, incomplete objects and non-integral offsets are not
 # valid pointer-arithmetic operands in standard C.
 assert_fail 'int main(){void *p; p=p+1; return 0;}'
