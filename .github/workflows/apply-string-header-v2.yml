@@ -1,0 +1,45 @@
+name: Apply C string header v2
+
+on:
+  push:
+    branches:
+      - agent/string-header-v2
+    paths:
+      - tools/apply_string_header.py
+      - test/string_header.sh
+      - .github/workflows/apply-string-header-v2.yml
+
+permissions:
+  contents: write
+
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/string-header-v2
+          fetch-depth: 0
+      - name: Apply migration
+        run: python3 tools/apply_string_header.py
+      - name: Audit string header
+        run: |
+          grep -q '"string.h"' preprocess_v2.c
+          grep -q '#include <stddef.h>' preprocess_v2.c
+          grep -q 'void \*memcpy' preprocess_v2.c
+          grep -q 'char \*strtok' preprocess_v2.c
+          grep -q 'size_t strlen' preprocess_v2.c
+          grep -q 'test/string_header.sh' Makefile
+      - name: Validate full suite
+        run: make clean && make test
+      - name: Commit generated changes
+        run: |
+          git config user.name 'LeiZ'
+          git config user.email '52287354+Lei-TzuY@users.noreply.github.com'
+          git add preprocess_v2.c Makefile test/string_header.sh
+          if git diff --cached --quiet; then
+            echo 'No generated changes to commit.'
+            exit 0
+          fi
+          git commit -m 'Support C11 string.h declarations'
+          git push origin HEAD:agent/string-header-v2
