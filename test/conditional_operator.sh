@@ -38,6 +38,17 @@ assert_run 5 'int main(){int x=5; int *p=1 ? &x : 0; return *p;}'
 assert_run 4 'int main(){int a[2];a[1]=4;int *p=1 ? a : 0;return p[1];}'
 assert_run 6 'int f(int x){return x+1;} int main(){int (*p)(int)=0 ? 0 : f;return p(5);}'
 
+# When both arms are designators, the conditional result itself must be a
+# pointer type. sizeof makes this a pure type regression rather than relying
+# only on a later assignment to trigger another conversion.
+assert_run 8 'int main(){int a[2];int b[2];return sizeof(1 ? a : b);}'
+assert_run 8 'int f(void){return 1;} int g(void){return 2;} int main(){return sizeof(1 ? f : g);}'
+
+# Designators in the first operand are scalar value contexts too: arrays and
+# functions decay to non-null pointers before truth-value testing.
+assert_run 1 'int main(){int a[1];return a ? 1 : 0;}'
+assert_run 1 'int f(void){return 0;} int main(){return f ? 1 : 0;}'
+
 # Compatible object pointers combine pointed-to qualifiers; void* wins
 # when mixed with an object pointer.
 assert_run 3 'int main(){int x=3; int *p=&x; const int *cp=&x; const int *q=1?p:cp; return *q;}'
