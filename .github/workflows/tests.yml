@@ -5,101 +5,12 @@ on:
   pull_request:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - name: Apply preprocessor integer suffix fix
-        if: github.event_name == 'push' && github.ref == 'refs/heads/fix/pp-integer-suffix-validation'
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-          src = Path('preprocess_v2.c')
-          text = src.read_text()
-          old = "\n".join([
-              "    if (isdigit((unsigned char)*e->p)) {",
-              "        char *end;",
-              "        unsigned long long val = strtoull(e->p, &end, 0);",
-              "        if (end == e->p)",
-              "            error(\"invalid number in #if expression\");",
-              "        e->p = end;",
-              "        while (*e->p == 'u' || *e->p == 'U' || *e->p == 'l' || *e->p == 'L')",
-              "            e->p++;",
-              "        return (int64_t)val;",
-              "    }",
-              "",
-          ])
-          new = "\n".join([
-              "    if (isdigit((unsigned char)*e->p)) {",
-              "        char *end;",
-              "        unsigned long long val = strtoull(e->p, &end, 0);",
-              "        if (end == e->p)",
-              "            error(\"invalid number in #if expression\");",
-              "",
-              "        const char *suffix = end;",
-              "        bool seen_u = false;",
-              "        if (*suffix == 'u' || *suffix == 'U') {",
-              "            seen_u = true;",
-              "            suffix++;",
-              "        }",
-              "        if (*suffix == 'l' || *suffix == 'L') {",
-              "            char first = *suffix++;",
-              "            if (*suffix == first)",
-              "                suffix++;",
-              "        }",
-              "        if (!seen_u && (*suffix == 'u' || *suffix == 'U'))",
-              "            suffix++;",
-              "        if (*suffix == 'u' || *suffix == 'U' || *suffix == 'l' || *suffix == 'L')",
-              "            error(\"invalid integer suffix in #if expression\");",
-              "        e->p = suffix;",
-              "        return (int64_t)val;",
-              "    }",
-              "",
-          ])
-          if old in text:
-              src.write_text(text.replace(old, new, 1))
-          elif 'invalid integer suffix in #if expression' not in text:
-              raise SystemExit('numeric parser pattern not found')
-          test = Path('test/preprocessor_advanced.sh')
-          t = test.read_text()
-          marker = '# Integer constant suffixes in #if expressions follow C grammar.'
-          if marker not in t:
-              insert = "\n".join([
-                  "",
-                  marker,
-                  "assert_pp_adv 33 '#if 1U == 1 && 1UL == 1 && 1LU == 1 && 1ULL == 1 && 1LLU == 1",
-                  "int main() { return 33; }",
-                  "#else",
-                  "int main() { return 0; }",
-                  "#endif'",
-                  "",
-                  "assert_pp_fail '#if 1UU",
-                  "int main() { return 0; }",
-                  "#endif'",
-                  "",
-                  "assert_pp_fail '#if 1ULU",
-                  "int main() { return 0; }",
-                  "#endif'",
-                  "",
-                  "assert_pp_fail '#if 1LLL",
-                  "int main() { return 0; }",
-                  "#endif'",
-                  "",
-                  "",
-              ])
-              test.write_text(t.replace('echo \"All advanced preprocessor tests passed!\"\n', insert + 'echo \"All advanced preprocessor tests passed!\"\n'))
-          PY
-          if ! git diff --quiet -- preprocess_v2.c test/preprocessor_advanced.sh; then
-            git config user.name github-actions[bot]
-            git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-            git add preprocess_v2.c test/preprocessor_advanced.sh
-            git commit -m "Validate preprocessor integer constant suffixes"
-            git push origin HEAD:fix/pp-integer-suffix-validation
-          fi
       - name: Test
         run: make test
