@@ -1,0 +1,40 @@
+name: Apply bool array decay fix
+
+on:
+  push:
+    branches:
+      - fix-bool-array-decay
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Patch assignment compatibility
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('parse.c')
+          s = p.read_text()
+          old = '''    // _Bool accepts any scalar value, including pointers/function designators.\n    if (dst->kind == TY_BOOL &&\n        (src->kind == TY_PTR || src->kind == TY_FUNC))\n        return true;\n'''
+          new = '''    // _Bool accepts any scalar value after the standard value conversions.\n    // Array and function designators therefore contribute pointer values here.\n    if (dst->kind == TY_BOOL &&\n        (src->kind == TY_PTR || src->kind == TY_ARRAY || src->kind == TY_FUNC))\n        return true;\n'''
+          if s.count(old) != 1:
+              raise SystemExit('expected exactly one _Bool compatibility block')
+          p.write_text(s.replace(old, new))
+          PY
+      - name: Run full test suite
+        run: make clean && make test
+      - name: Commit source fix and remove helper workflow
+        run: |
+          rm .github/workflows/apply-bool-array-fix.yml
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add parse.c .github/workflows/apply-bool-array-fix.yml
+          git commit -m 'fix: decay arrays in _Bool conversions'
+          git push
