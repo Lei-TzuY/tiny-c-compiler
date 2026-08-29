@@ -85,7 +85,53 @@ int main() { return 58; }
 int main() { return 0; }
 #endif'
 
+assert_pp_integer 59 '#if (18446744073709551615ULL >> 63) == 1
+int main() { return 59; }
+#else
+int main() { return 0; }
+#endif'
+
+assert_pp_integer 60 '#if 0xffffffffL > -1
+int main() { return 60; }
+#else
+int main() { return 0; }
+#endif'
+
+assert_pp_integer 61 '#if -1ULL == 18446744073709551615ULL
+int main() { return 61; }
+#else
+int main() { return 0; }
+#endif'
+
+assert_pp_integer 62 '#if (-5 % 3ULL) == 2
+int main() { return 62; }
+#else
+int main() { return 0; }
+#endif'
+
+assert_pp_integer 63 '#if (~0ULL) > 0
+int main() { return 63; }
+#else
+int main() { return 0; }
+#endif'
+
+assert_pp_integer 64 '#if (0 ? 1ULL : -1) > 0
+int main() { return 64; }
+#else
+int main() { return 0; }
+#endif'
+
+assert_pp_integer 65 '#if 9223372036854775808U > 0
+int main() { return 65; }
+#else
+int main() { return 0; }
+#endif'
+
 assert_pp_integer_fail '#if 18446744073709551615
+int main() { return 0; }
+#endif'
+
+assert_pp_integer_fail '#if 1uLLL
 int main() { return 0; }
 #endif'
 
