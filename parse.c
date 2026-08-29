@@ -850,6 +850,10 @@ static Type *record_decl(Token **rest, Token *tok, bool is_union) {
                              "record containing a flexible array member cannot be embedded");
             }
 
+            for (Member *prev = head.next; prev; prev = prev->next)
+                if (token_matches_name(ident, prev->name))
+                    error_at(ident->loc, "duplicate record member name");
+
             Member *m = calloc(1, sizeof(Member));
             m->name = strndup(ident->loc, ident->len);
             m->ty = mty;
