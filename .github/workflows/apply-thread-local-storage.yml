@@ -6,6 +6,7 @@ on:
       - agent/thread-local-storage
     paths:
       - tools/apply_thread_local_storage.py
+      - tools/fix_thread_local_test_literal.py
       - .github/workflows/apply-thread-local-storage.yml
 
 permissions:
@@ -21,6 +22,8 @@ jobs:
           fetch-depth: 0
       - name: Apply migration
         run: python3 tools/apply_thread_local_storage.py
+      - name: Fix regression literal
+        run: python3 tools/fix_thread_local_test_literal.py
       - name: Audit TLS implementation
         run: |
           grep -q 'bool is_thread_local' minicc.h
@@ -30,6 +33,7 @@ jobs:
           grep -q '\.section \.tdata' codegen.c
           grep -q '\.section \.tbss' codegen.c
           grep -q 'pthread_create' test/thread_local.sh
+          grep -q 's\[2\]!=99' test/thread_local.sh
           grep -q 'readelf -sW' test/thread_local.sh
           grep -q 'test/thread_local.sh' Makefile
       - name: Validate full suite
