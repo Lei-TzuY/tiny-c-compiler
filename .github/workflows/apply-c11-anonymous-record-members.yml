@@ -1,0 +1,44 @@
+name: Apply C11 anonymous record-member support
+
+on:
+  push:
+    branches:
+      - agent/c11-anonymous-record-members
+    paths:
+      - tools/apply_c11_anonymous_record_members.py
+      - .github/workflows/apply-c11-anonymous-record-members.yml
+
+permissions:
+  contents: write
+
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/c11-anonymous-record-members
+          fetch-depth: 0
+      - name: Apply migration
+        run: python3 tools/apply_c11_anonymous_record_members.py
+      - name: Audit anonymous member integration
+        run: |
+          grep -q 'bool is_anonymous' minicc.h
+          grep -q 'has_anonymous_record_specifier' parse.c
+          grep -q 'find_record_member_path' parse.c
+          grep -q 'anonymous record member promotes duplicate name' parse.c
+          grep -q 'anonymous_record_members.sh' Makefile
+          test -f test/anonymous_record_members.sh
+      - name: Validate full suite
+        run: make clean && make test
+      - name: Commit generated source changes
+        run: |
+          git config user.name 'LeiZ'
+          git config user.email '52287354+Lei-TzuY@users.noreply.github.com'
+          git add parse.c minicc.h Makefile README.md test/anonymous_record_members.sh
+          if git diff --cached --quiet; then
+            echo 'No generated changes to commit.'
+            exit 0
+          fi
+          git commit -m 'Support C11 anonymous struct and union members'
+          git push origin HEAD:agent/c11-anonymous-record-members
