@@ -880,6 +880,14 @@ static void gen_funcall(Node *node) {
         depth -= spill_count;
     }
 
+    // SysV places scalar integer return values in the low part of RAX. For
+    // types narrower than 64 bits the remaining bits are not a C value and
+    // must be interpreted according to the declared return type at the call
+    // site. Canonicalize signed/unsigned bool/char/short/int exactly as loads
+    // and casts do before any enclosing expression consumes the result.
+    if (node->ty && node->ty->kind != TY_STRUCT)
+        normalize(node->ty);
+
     if (node->ty && node->ty->kind == TY_STRUCT)
         materialize_record_call(node);
 }
