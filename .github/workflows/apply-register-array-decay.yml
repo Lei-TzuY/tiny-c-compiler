@@ -1,0 +1,43 @@
+name: Apply register-array decay diagnostics
+
+on:
+  push:
+    branches:
+      - agent/register-array-decay
+    paths:
+      - tools/apply_register_array_decay.py
+      - .github/workflows/apply-register-array-decay.yml
+
+permissions:
+  contents: write
+
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/register-array-decay
+          fetch-depth: 0
+      - name: Apply migration
+        run: python3 tools/apply_register_array_decay.py
+      - name: Audit register-array value conversions
+        run: |
+          grep -q 'is_register_array_designator' parse.c
+          grep -q 'reject_register_array_decay' parse.c
+          grep -q 'register array cannot be converted to a pointer value' parse.c
+          grep -q 'register int a\[2\]={1,2};return sizeof(a)==8' test/register_addressability.sh
+          grep -q '_Generic(a,int\*:1,default:0)' test/register_addressability.sh
+      - name: Validate full suite
+        run: make clean && make test
+      - name: Commit generated source changes
+        run: |
+          git config user.name 'LeiZ'
+          git config user.email '52287354+Lei-TzuY@users.noreply.github.com'
+          git add parse.c README.md test/register_addressability.sh
+          if git diff --cached --quiet; then
+            echo 'No generated changes to commit.'
+            exit 0
+          fi
+          git commit -m 'Diagnose register-array value conversions'
+          git push origin HEAD:agent/register-array-decay
