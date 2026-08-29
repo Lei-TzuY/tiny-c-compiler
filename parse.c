@@ -807,7 +807,10 @@ static Type *record_decl(Token **rest, Token *tok, bool is_union) {
         ty = new_record_type(is_union);
     }
 
+    Token *body = tok;
     tok = skip(tok, "{");
+    if (equal(tok, "}"))
+        error_at(body->loc, "%s definition requires at least one member", kind);
 
     Member head = {};
     Member *cur = &head;
@@ -1229,7 +1232,10 @@ static Type *enum_decl(Token **rest, Token *tok) {
         push_tag(tag_name, ty_int, TAG_ENUM);
     }
 
+    Token *body = tok;
     tok = skip(tok, "{");
+    if (equal(tok, "}"))
+        error_at(body->loc, "enum definition requires at least one enumerator");
     int64_t next_val = 0;
     bool implicit_value_valid = true;
 
