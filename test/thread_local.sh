@@ -51,6 +51,11 @@ assert_run 0 '_Thread_local int x=12;int f(void){extern _Thread_local int x;retu
 # do not leak back to the main thread.
 assert_run 0 'int pthread_create(unsigned long*,void*,void*(*)(void*),void*);int pthread_join(unsigned long,void**);_Thread_local int x=1;void *worker(void *p){if(x!=1)return (void*)1;x=7;return (void*)(long)x;}int main(void){unsigned long t;void *r=0;x=3;if(pthread_create(&t,0,worker,0))return 2;if(pthread_join(t,&r))return 3;return x==3&&(long)r==7?0:4;}'
 
+# Block-scope static TLS must also be instantiated independently for every
+# thread. The main thread advances its own instance to 12, the worker must
+# still observe a fresh 10 initializer, and the main instance must resume at 13.
+assert_run 0 'int pthread_create(unsigned long*,void*,void*(*)(void*),void*);int pthread_join(unsigned long,void**);int next(void){static _Thread_local int x=10;return ++x;}void *worker(void *p){return (void*)(long)(next()!=11||next()!=12);}int main(void){unsigned long t;void *r=0;if(next()!=11||next()!=12)return 1;if(pthread_create(&t,0,worker,0))return 2;if(pthread_join(t,&r))return 3;if((long)r)return 4;return next()==13?0:5;}'
+
 # Cross-object ELF TLS interoperability: consume a host-defined TLS symbol.
 cat > tmp-host-tls-def.c <<'EOF'
 _Thread_local int host_tls = 21;
@@ -81,6 +86,14 @@ readelf -sW tmp-thread-local.o | grep -Eq 'TLS[[:space:]]+GLOBAL.*tls_init'
 readelf -sW tmp-thread-local.o | grep -Eq 'TLS[[:space:]]+GLOBAL.*tls_zero'
 readelf -SW tmp-thread-local.o | grep -q '\.tdata'
 readelf -SW tmp-thread-local.o | grep -q '\.tbss'
+
+# Internal-linkage TLS must remain a local ELF symbol rather than being
+# exported just because it uses TLS storage.
+printf '%s\n' '_Thread_local int global_tls;static _Thread_local int hidden_tls=3;int read_hidden(void){return hidden_tls;}' > tmp-thread-local.c
+"$MINICC" tmp-thread-local.c > tmp-thread-local.s
+cc -c tmp-thread-local.s -o tmp-thread-local.o
+readelf -sW tmp-thread-local.o | grep -Eq 'TLS[[:space:]]+GLOBAL.*global_tls'
+readelf -sW tmp-thread-local.o | grep -Eq 'TLS[[:space:]]+LOCAL.*hidden_tls'
 
 # C11 storage-class and declaration constraints.
 assert_reject '_Thread_local int f(void);int main(void){return 0;}'
