@@ -607,7 +607,12 @@ void add_type(Node *node) {
         return;
 
     case ND_COMMA:
-        node->ty = node->rhs->ty;
+        // Both operands of the comma operator are ordinary value contexts.
+        // In particular, array and function designators on the right undergo
+        // their standard conversions before determining the result type.
+        node->ty = decay_pointer_operand_type(node->rhs->ty);
+        if (!node->ty)
+            node->ty = node->rhs->ty;
         return;
 
     case ND_ASSIGN:
