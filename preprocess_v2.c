@@ -1,5 +1,6 @@
 #include "minicc.h"
 #include "preprocess_v2.h"
+#include <errno.h>
 
 typedef enum {
     BUILTIN_MACRO_NONE,
@@ -425,7 +426,10 @@ static int64_t pp_primary(PPExpr *e) {
         return pp_read_char_constant(e);
     if (isdigit((unsigned char)*e->p)) {
         char *end;
+        errno = 0;
         unsigned long long val = strtoull(e->p, &end, 0);
+        if (errno == ERANGE)
+            error("integer constant is too large in #if expression");
         if (end == e->p)
             error("invalid number in #if expression");
 
