@@ -1,0 +1,45 @@
+name: Apply C11 stdalign header
+
+on:
+  push:
+    branches:
+      - agent/stdalign-header
+    paths:
+      - tools/apply_stdalign_header.py
+      - test/stdalign_header.sh
+      - .github/workflows/apply-stdalign-header.yml
+
+permissions:
+  contents: write
+
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/stdalign-header
+          fetch-depth: 0
+      - name: Apply migration
+        run: python3 tools/apply_stdalign_header.py
+      - name: Audit stdalign header
+        run: |
+          grep -q 'stdalign.h' preprocess_v2.c
+          grep -q '#define alignas _Alignas' preprocess_v2.c
+          grep -q '#define alignof _Alignof' preprocess_v2.c
+          grep -q '__alignas_is_defined 1' preprocess_v2.c
+          grep -q '__alignof_is_defined 1' preprocess_v2.c
+          grep -q 'test/stdalign_header.sh' Makefile
+      - name: Validate full suite
+        run: make clean && make test
+      - name: Commit generated changes
+        run: |
+          git config user.name 'LeiZ'
+          git config user.email '52287354+Lei-TzuY@users.noreply.github.com'
+          git add preprocess_v2.c Makefile test/stdalign_header.sh
+          if git diff --cached --quiet; then
+            echo 'No generated changes to commit.'
+            exit 0
+          fi
+          git commit -m 'Support C11 stdalign.h'
+          git push origin HEAD:agent/stdalign-header
