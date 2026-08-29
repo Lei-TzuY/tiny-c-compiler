@@ -265,4 +265,21 @@ assert_pp_fail '#if 1LLL
 int main() { return 0; }
 #endif'
 
+# Preprocessor integer constants must fit in uintmax_t/uint64_t. Keep the
+# largest representable unsigned value valid and reject one-past-the-limit
+# spellings instead of silently accepting strtoull() saturation.
+assert_pp_adv 34 '#if 18446744073709551615ULL
+int main() { return 34; }
+#else
+int main() { return 0; }
+#endif'
+
+assert_pp_fail '#if 18446744073709551616ULL
+int main() { return 0; }
+#endif'
+
+assert_pp_fail '#if 0x10000000000000000ULL
+int main() { return 0; }
+#endif'
+
 echo "All advanced preprocessor tests passed!"
