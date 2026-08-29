@@ -4133,9 +4133,10 @@ static bool assignment_compatible(Type *dst, Node *rhs) {
     if (is_numeric(dst) && is_numeric(src))
         return true;
 
-    // _Bool accepts any scalar value, including pointers/function designators.
+    // _Bool accepts any scalar value after the standard value conversions.
+    // Array and function designators therefore contribute pointer values here.
     if (dst->kind == TY_BOOL &&
-        (src->kind == TY_PTR || src->kind == TY_FUNC))
+        (src->kind == TY_PTR || src->kind == TY_ARRAY || src->kind == TY_FUNC))
         return true;
 
     if (dst->kind == TY_PTR)
@@ -4648,7 +4649,10 @@ static Node *parse_call_arguments(Token **rest, Token *tok, Type *fty) {
         if (expected) {
             if (!assignment_compatible(expected->ty, arg))
                 error_at(tok->loc, "incompatible argument type");
-            if (is_numeric(arg->ty) && is_numeric(expected->ty))
+            if ((is_numeric(arg->ty) && is_numeric(expected->ty)) ||
+                (expected->ty->kind == TY_BOOL &&
+                 (arg->ty->kind == TY_PTR || arg->ty->kind == TY_ARRAY ||
+                  arg->ty->kind == TY_FUNC)))
                 arg = cast_call_argument(arg, expected->ty);
             expected = expected->param_next;
         } else if (!has_prototype || variadic) {
