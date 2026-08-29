@@ -74,6 +74,7 @@ test: minicc
 	bash ./test/alignas.sh
 	bash ./test/stdalign_header.sh
 	bash ./test/stdint_header.sh
+	bash ./test/limits_header.sh
 	bash ./test/noreturn.sh
 	bash ./test/sizeof_alignof_size_t.sh
 	bash ./test/sizeof_constraints.sh

@@ -248,6 +248,27 @@ static char *get_builtin_header(char *name) {
                "#define __alignas_is_defined 1\n"
                "#define __alignof_is_defined 1\n";
     }
+    if (!strcmp(name, "limits.h")) {
+        return "#define CHAR_BIT 8\n"
+               "#define SCHAR_MIN (-127 - 1)\n"
+               "#define SCHAR_MAX 127\n"
+               "#define UCHAR_MAX 255\n"
+               "#define CHAR_MIN SCHAR_MIN\n"
+               "#define CHAR_MAX SCHAR_MAX\n"
+               "#define MB_LEN_MAX 1\n"
+               "#define SHRT_MIN (-32767 - 1)\n"
+               "#define SHRT_MAX 32767\n"
+               "#define USHRT_MAX 65535\n"
+               "#define INT_MIN (-2147483647 - 1)\n"
+               "#define INT_MAX 2147483647\n"
+               "#define UINT_MAX 4294967295U\n"
+               "#define LONG_MIN (-9223372036854775807L - 1)\n"
+               "#define LONG_MAX 9223372036854775807L\n"
+               "#define ULONG_MAX 18446744073709551615UL\n"
+               "#define LLONG_MIN (-9223372036854775807LL - 1)\n"
+               "#define LLONG_MAX 9223372036854775807LL\n"
+               "#define ULLONG_MAX 18446744073709551615ULL\n";
+    }
     if (!strcmp(name, "stdint.h")) {
         return "typedef signed char int8_t;\n"
                "typedef unsigned char uint8_t;\n"
