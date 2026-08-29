@@ -40,8 +40,8 @@ assert_run 1 'int main(){int *p=0; return p==0;}'
 assert_run 4 'int f(int x){return x+1;} int main(){int (*fp)(int)=f; return fp(3);}'
 assert_run 1 'int main(){int x=1; int *p=&x; _Bool b=p; return b;}'
 
-# Array designators decay to pointers in scalar conversion contexts, so they
-# are valid sources for _Bool assignment, parameter passing, and return.
+# Array designators decay to non-null pointers in scalar conversion contexts,
+# so _Bool assignment, parameter passing, and return must all produce true.
 assert_run 1 'int main(){int a[1]; _Bool b=a; return b;}'
 assert_run 1 'int f(_Bool b){return b;} int main(){int a[1]; return f(a);}'
 assert_run 1 '_Bool f(){int a[1];return a;} int main(){return f();}'
