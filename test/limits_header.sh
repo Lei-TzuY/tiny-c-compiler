@@ -46,6 +46,32 @@ int main(void){return !IMAX_OK||!LMAX_OK||sizeof(a)!=sizeof(int);}'
 assert_run 0 '#include <limits.h>
 int main(void){char c=CHAR_MIN;char d=CHAR_MAX;return !(c<0&&d>0&&sizeof(c)==1);}'
 
+# The same limit macros must preserve their C integer types when expanded inside
+# preprocessing conditional expressions.  In particular, the 64-bit unsigned
+# maxima must not be reinterpreted as negative signed values, and mixed
+# signed/unsigned comparisons must follow the usual arithmetic conversions.
+assert_run 0 '#include <limits.h>
+#include <limits.h>
+#if CHAR_BIT != 8
+#error "CHAR_BIT lost in #if"
+#endif
+#if LONG_MAX != 9223372036854775807L
+#error "LONG_MAX lost in #if"
+#endif
+#if ULONG_MAX <= LONG_MAX
+#error "ULONG_MAX signedness lost in #if"
+#endif
+#if ULLONG_MAX != 18446744073709551615ULL
+#error "ULLONG_MAX value lost in #if"
+#endif
+#if (ULLONG_MAX + 1ULL) != 0
+#error "unsigned wraparound broken in #if"
+#endif
+#if (-1LL < 1ULL)
+#error "mixed signed/unsigned conversion broken in #if"
+#endif
+int main(void){return 0;}'
+
 rm -f tmp-limits.c tmp-limits.s tmp-limits
 
 echo 'All <limits.h> tests passed!'
