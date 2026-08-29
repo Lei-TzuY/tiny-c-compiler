@@ -242,6 +242,12 @@ static char *get_builtin_header(char *name) {
     if (!strcmp(name, "stdnoreturn.h")) {
         return "#define noreturn _Noreturn\n";
     }
+    if (!strcmp(name, "stdalign.h")) {
+        return "#define alignas _Alignas\n"
+               "#define alignof _Alignof\n"
+               "#define __alignas_is_defined 1\n"
+               "#define __alignof_is_defined 1\n";
+    }
     if (!strcmp(name, "stdarg.h")) {
         return "typedef struct __minicc_va_list {\n"
                "  unsigned int gp_offset;\n"
