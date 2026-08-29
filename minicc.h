@@ -86,7 +86,8 @@ struct Type {
     bool is_plain_char; // distinguish plain char from signed/unsigned char
     bool is_incomplete; // forward-declared struct/union with no body yet
     bool is_union;      // TY_STRUCT represents both records; true for union
-    bool has_flexible_array_member; // complete struct ends in a flexible array member
+    bool has_flexible_array_member; // complete struct itself ends in a flexible array member
+    bool contains_flexible_array_member; // direct-FAM struct or union recursively containing one
     Type *base;       // Pointer or array
     int array_len;    // Array
     // Parameter-array qualifiers written inside the outermost [] apply

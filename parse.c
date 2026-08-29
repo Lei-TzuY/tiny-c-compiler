@@ -905,9 +905,9 @@ static Type *record_decl(Token **rest, Token *tok, bool is_union) {
             if (!attrs.has_anonymous_record_specifier || basety->kind != TY_STRUCT)
                 error_at(tok->loc,
                          "record member declaration without a declarator must be an anonymous struct or union");
-            if (basety->has_flexible_array_member)
+            if (!is_union && basety->contains_flexible_array_member)
                 error_at(tok->loc,
-                         "anonymous record member cannot contain a flexible array member");
+                         "record recursively containing a flexible array member cannot be embedded in a struct");
 
             const char *conflict = anonymous_member_conflict(head.next, basety);
             if (conflict)
@@ -947,9 +947,10 @@ static Type *record_decl(Token **rest, Token *tok, bool is_union) {
             } else {
                 if (is_incomplete_object_type(mty))
                     error_at(ident->loc, "field has incomplete type");
-                if (mty->kind == TY_STRUCT && mty->has_flexible_array_member)
+                if (!is_union && mty->kind == TY_STRUCT &&
+                    mty->contains_flexible_array_member)
                     error_at(ident->loc,
-                             "record containing a flexible array member cannot be embedded");
+                             "record recursively containing a flexible array member cannot be embedded in a struct");
             }
 
             MemberPath *duplicate =
@@ -992,10 +993,22 @@ static Type *record_decl(Token **rest, Token *tok, bool is_union) {
         ty->size = align_up(offset, align);
     }
 
+    bool contains_flexible_member = has_flexible_member;
+    if (is_union) {
+        for (Member *m = head.next; m; m = m->next) {
+            if (m->ty && m->ty->kind == TY_STRUCT &&
+                m->ty->contains_flexible_array_member) {
+                contains_flexible_member = true;
+                break;
+            }
+        }
+    }
+
     ty->align = align;
     ty->members = head.next;
     ty->is_union = is_union;
     ty->has_flexible_array_member = has_flexible_member;
+    ty->contains_flexible_array_member = contains_flexible_member;
     ty->is_incomplete = false;
     for (Type *q = ty->qual_next; q; q = q->qual_next) {
         q->size = ty->size;
@@ -1003,6 +1016,7 @@ static Type *record_decl(Token **rest, Token *tok, bool is_union) {
         q->members = ty->members;
         q->is_union = ty->is_union;
         q->has_flexible_array_member = ty->has_flexible_array_member;
+        q->contains_flexible_array_member = ty->contains_flexible_array_member;
         q->is_incomplete = false;
     }
     *rest = tok;
@@ -2002,7 +2016,7 @@ static Type *type_suffix(Token **rest, Token *tok, Type *ty,
             error_at(bracket->loc, "array element type cannot be void");
         if (is_incomplete_object_type(ty))
             error_at(bracket->loc, "array element type is incomplete");
-        if (ty->kind == TY_STRUCT && ty->has_flexible_array_member)
+        if (ty->kind == TY_STRUCT && ty->contains_flexible_array_member)
             error_at(bracket->loc,
                      "array element type contains a flexible array member");
 
