@@ -70,6 +70,14 @@ assert_reject 'output file specified more than once' ./minicc -o a.s -o b.s tmp-
 assert_reject 'input and output files must be different' ./minicc -o tmp-driver-cli.c tmp-driver-cli.c
 assert_reject 'no input file' ./minicc -S
 
+# The driver must report buffered output failures instead of exiting successfully
+# after silently losing preprocessed or assembly output. /dev/full accepts open(2)
+# but fails writes with ENOSPC, which exercises the final stdio flush path.
+if [ -e /dev/full ]; then
+  assert_reject 'failed to write output' ./minicc -E -o /dev/full tmp-driver-cli.c
+  assert_reject 'failed to write output' ./minicc -S -o /dev/full tmp-driver-cli.c
+fi
+
 # Path aliases of the input must be rejected too. Otherwise freopen() would
 # truncate the source through a hardlink or symlink even though the path strings
 # differ.
