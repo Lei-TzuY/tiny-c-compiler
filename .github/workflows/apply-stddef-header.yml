@@ -1,0 +1,46 @@
+name: Apply C stddef header
+
+on:
+  push:
+    branches:
+      - agent/stddef-header
+    paths:
+      - tools/apply_stddef_header.py
+      - test/stddef_header.sh
+      - .github/workflows/apply-stddef-header.yml
+
+permissions:
+  contents: write
+
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/stddef-header
+          fetch-depth: 0
+      - name: Apply migration
+        run: python3 tools/apply_stddef_header.py
+      - name: Audit stddef implementation
+        run: |
+          grep -q '__builtin_offsetof' parse.c
+          grep -q 'offsetof requires a complete struct or union type' parse.c
+          grep -q '"stddef.h"' preprocess_v2.c
+          grep -q 'typedef unsigned long size_t' preprocess_v2.c
+          grep -q 'typedef long ptrdiff_t' preprocess_v2.c
+          grep -q '#define offsetof(type, member) __builtin_offsetof(type, member)' preprocess_v2.c
+          grep -q 'test/stddef_header.sh' Makefile
+      - name: Validate full suite
+        run: make clean && make test
+      - name: Commit generated changes
+        run: |
+          git config user.name 'LeiZ'
+          git config user.email '52287354+Lei-TzuY@users.noreply.github.com'
+          git add parse.c preprocess_v2.c Makefile test/stddef_header.sh
+          if git diff --cached --quiet; then
+            echo 'No generated changes to commit.'
+            exit 0
+          fi
+          git commit -m 'Support stddef.h and constant offsetof'
+          git push origin HEAD:agent/stddef-header
