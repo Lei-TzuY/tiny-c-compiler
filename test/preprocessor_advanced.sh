@@ -245,7 +245,6 @@ assert_pp_fail '#define PICK(x) (x)
 int main() { return 0; }
 #endif'
 
-
 # Integer constant suffixes in #if expressions follow C grammar.
 assert_pp_adv 33 '#if 1U == 1 && 1UL == 1 && 1LU == 1 && 1ULL == 1 && 1LLU == 1
 int main() { return 33; }
@@ -279,6 +278,27 @@ int main() { return 0; }
 #endif'
 
 assert_pp_fail '#if 0x10000000000000000ULL
+int main() { return 0; }
+#endif'
+
+# Lock the complete #if operator-precedence ladder. These expressions are
+# intentionally unparenthesized so a parser-level precedence regression changes
+# the selected branch rather than being masked by the runtime C parser.
+assert_pp_adv 35 '#if 1 + 2 * 3 == 7 && 16 >> 1 + 2 == 2
+int main() { return 35; }
+#else
+int main() { return 0; }
+#endif'
+
+assert_pp_adv 36 '#if 3 < 4 == 1 && (7 & 3 ^ 1 | 8) == 10
+int main() { return 36; }
+#else
+int main() { return 0; }
+#endif'
+
+assert_pp_adv 37 '#if 0 || 1 && 2 ? 5 : 0
+int main() { return 37; }
+#else
 int main() { return 0; }
 #endif'
 
