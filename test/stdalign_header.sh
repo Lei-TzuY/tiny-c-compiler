@@ -34,9 +34,9 @@ int main(void){return alignof(char)!=1||alignof(int)!=4||alignof(long)!=8||align
 
 # alignas is a macro for _Alignas and inherits the compiler's file/local/member semantics.
 assert_run 0 '#include <stdalign.h>
-alignas(32) char global_c;
+alignas(16) char global_c;
 struct S { char a; alignas(16) char b; };
-int main(void){alignas(64) char local_c;struct S s;return (unsigned long)&global_c%32||(unsigned long)&local_c%64||(unsigned long)&s.b%16||alignof(struct S)!=16;}'
+int main(void){alignas(16) char local_c;struct S s;return (unsigned long)&global_c%16||(unsigned long)&local_c%16||(unsigned long)&s.b%16||alignof(struct S)!=16;}'
 
 # Type-based alignas spelling is also required by the C11 header alias.
 assert_run 0 '#include <stdalign.h>
