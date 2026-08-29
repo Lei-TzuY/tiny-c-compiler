@@ -168,6 +168,28 @@ static void add_builtin_macro(const char *name, BuiltinMacroKind builtin) {
     macros = m;
 }
 
+// Resolve a quoted include relative to the physical source file that
+// contains the directive.  `#line` changes __FILE__/__LINE__ diagnostics but
+// must not redirect the include search base, so callers pass the immutable
+// preprocess_v2_source() source_name rather than current_pp_file/logical_file.
+static char *source_relative_include_path(const char *source_name,
+                                          const char *header) {
+    if (!source_name || !header || !*header || header[0] == '/' ||
+        source_name[0] == '<')
+        return NULL;
+
+    const char *slash = strrchr(source_name, '/');
+    if (!slash)
+        return NULL;
+
+    size_t dir_len = (size_t)(slash - source_name + 1);
+    size_t header_len = strlen(header);
+    char *path = calloc(1, dir_len + header_len + 1);
+    memcpy(path, source_name, dir_len);
+    memcpy(path + dir_len, header, header_len);
+    return path;
+}
+
 static char *read_file_content(char *path) {
     FILE *fp = fopen(path, "r");
     if (!fp)
@@ -1207,18 +1229,39 @@ char *preprocess_v2_source(char *input, const char *source_name) {
                 *end_h = '\0';
 
                 char *owned = NULL;
+                char *resolved_path = NULL;
                 const char *content = NULL;
-                if (quote == '"')
-                    owned = read_file_content(hname);
+                if (quote == '"') {
+                    // Quoted headers search next to the physical including file
+                    // first. Preserve the historical current-working-directory
+                    // fallback for callers using stdin or deliberately shared
+                    // project-root headers.
+                    resolved_path = source_relative_include_path(source_name, hname);
+                    if (resolved_path)
+                        owned = read_file_content(resolved_path);
+                    if (!owned) {
+                        free(resolved_path);
+                        resolved_path = NULL;
+                        owned = read_file_content(hname);
+                        if (owned)
+                            resolved_path = strdup(hname);
+                    }
+                }
                 content = owned ? owned : get_builtin_header(hname);
                 if (!content)
                     error("cannot include %s", hname);
-                char *sub = preprocess_v2_source((char *)content, hname);
+
+                // Recursive quoted includes must inherit the resolved physical
+                // path so their own relative header names are based on the
+                // directory of the header that contains them.
+                const char *included_source = owned ? resolved_path : hname;
+                char *sub = preprocess_v2_source((char *)content, included_source);
                 sb_puts(&out, sub);
                 if (out.len && out.data[out.len - 1] != '\n')
                     sb_putc(&out, '\n');
                 free(sub);
                 free(owned);
+                free(resolved_path);
                 free(expanded_include);
             } else if (is_cond_active() && !strcmp(directive, "line")) {
                 // C11 #line operands are macro-expanded before interpretation.
