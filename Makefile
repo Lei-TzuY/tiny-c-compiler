@@ -90,6 +90,7 @@ test: minicc
 	bash ./test/union_initializers.sh
 	bash ./test/aggregate_initializers.sh
 	bash ./test/scalar_brace_initializers.sh
+	bash ./test/empty_initializer_constraints.sh
 	bash ./test/brace_elision.sh
 	bash ./test/array_designators.sh
 	bash ./test/nested_designators.sh

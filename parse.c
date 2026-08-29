@@ -3000,6 +3000,8 @@ static Type *parse_static_image_initializer(Obj *var, Token **rest, Token *tok,
     if (!equal(tok, "{"))
         error_at(tok->loc, "nested static aggregate initializer requires braces");
     tok = tok->next;
+    if (equal(tok, "}"))
+        error_at(brace->loc, "empty aggregate initializer is not valid in C11");
 
     if (ty->kind == TY_ARRAY) {
         if (ty->array_len > 0)
@@ -3189,6 +3191,8 @@ static void parse_automatic_aggregate_subobject(Node **tail, Node *lhs, Type *ty
     bool braced = consume(&tok, tok, "{");
     if (infer_array && !braced)
         error_at(where->loc, "unknown-bound array initializer requires braces");
+    if (braced && equal(tok, "}"))
+        error_at(where->loc, "empty aggregate initializer is not valid in C11");
 
     // A braced nested initializer is a real initializer-list, so it may contain
     // designators at any entry.  Reuse the same designator-path parser used by
@@ -3560,6 +3564,8 @@ static Node *declaration(Token **rest, Token *tok) {
 
             Token *brace = tok;
             tok = tok->next;
+            if (equal(tok, "}"))
+                error_at(brace->loc, "empty aggregate initializer is not valid in C11");
 
             int cur_idx = 0;
             int max_idx = -1;
