@@ -35,6 +35,10 @@ assert_run 0 'struct F{int n;int data[];};union U{struct F f;long raw;};union V{
 assert_run 0 'struct F{int n;int data[];};union U{struct F f;long raw;};struct H{union U *p;};int main(void){return sizeof(struct H)!=8;}'
 assert_run 0 'struct F;typedef const struct F CF;struct F{int n;int data[];};union U{CF f;long raw;};int main(void){return sizeof(union U)!=8;}'
 
+# Typedef aliases preserve the underlying containment semantics. In particular,
+# aliasing the direct-FAM structure does not prevent legal union containment.
+assert_run 0 'struct F{int n;int data[];};typedef struct F F;union U{F f;long raw;};int main(void){return sizeof(union U)!=8;}'
+
 # The same rule applies to anonymous record members: an anonymous FAM struct may
 # live in a union, and the resulting union becomes a restricted carrier.
 assert_run 0 'union U{struct{int n;int data[];};long raw;};int main(void){return sizeof(union U)!=8;}'
@@ -47,16 +51,19 @@ assert_reject 'struct F{int n;int data[];};union U{struct F f;long raw;};struct 
 assert_reject 'struct F{int n;int data[];};union U{struct F f;long raw;};union V{union U u;int x;};struct H{union V v;};int main(void){return 0;}'
 assert_reject 'struct F{int n;int data[];};struct H{union{struct F f;long raw;};};int main(void){return 0;}'
 assert_reject 'struct H{union{struct{int n;int data[];} f;long raw;};};int main(void){return 0;}'
+assert_reject 'struct F{int n;int data[];};union U{struct F f;long raw;};typedef union U Carrier;struct H{Carrier u;};int main(void){return 0;}'
+assert_reject 'struct F{int n;int data[];};union U{struct F f;long raw;};typedef union U Carrier;union V{Carrier u;int x;};typedef union V Nested;struct H{Nested v;};int main(void){return 0;}'
 
 # Anonymous direct-FAM structs are likewise forbidden when the containing
 # record is a structure rather than a union.
 assert_reject 'struct H{struct{int n;int data[];};};int main(void){return 0;}'
 
-# Restricted carriers may not be array elements, including recursively nested
-# and qualified carrier unions.
+# Restricted carriers may not be array elements, including recursively nested,
+# qualified, and typedef-aliased carrier unions.
 assert_reject 'struct F{int n;int data[];};union U{struct F f;long raw;};union U a[2];int main(void){return 0;}'
 assert_reject 'struct F{int n;int data[];};union U{struct F f;long raw;};union V{union U u;int x;};union V a[2];int main(void){return 0;}'
 assert_reject 'struct F{int n;int data[];};union U{struct F f;long raw;};typedef const union U CU;CU a[2];int main(void){return 0;}'
+assert_reject 'struct F{int n;int data[];};union U{struct F f;long raw;};typedef union U Carrier;Carrier a[2];int main(void){return 0;}'
 
 rm -f tmp-fam-containment.c tmp-fam-containment.s tmp-fam-containment \
       tmp-fam-containment-bad.c tmp-fam-containment.err
