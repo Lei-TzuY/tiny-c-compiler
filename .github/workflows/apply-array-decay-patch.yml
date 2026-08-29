@@ -1,0 +1,42 @@
+name: Apply array decay patch
+
+on:
+  push:
+    branches:
+      - fix-array-pointer-arithmetic-decay
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Patch type inference
+        shell: python
+        run: |
+          from pathlib import Path
+          p = Path('type.c')
+          s = p.read_text()
+          old = '''    case ND_ADD:\n        if (node->lhs->ty->base) {\n            node->ty = node->lhs->ty;\n            return;\n        }\n        if (node->rhs->ty && node->rhs->ty->base) {\n            node->ty = node->rhs->ty;\n            return;\n        }'''
+          new = '''    case ND_ADD:\n        if (node->lhs->ty->base) {\n            node->ty = decay_pointer_operand_type(node->lhs->ty);\n            return;\n        }\n        if (node->rhs->ty && node->rhs->ty->base) {\n            node->ty = decay_pointer_operand_type(node->rhs->ty);\n            return;\n        }'''
+          if old not in s:
+              raise SystemExit('ND_ADD pattern not found')
+          s = s.replace(old, new, 1)
+          old = '''    case ND_SUB:\n        if (node->lhs->ty->base) {\n            node->ty = node->lhs->ty;\n            return;\n        }'''
+          new = '''    case ND_SUB:\n        if (node->lhs->ty->base) {\n            node->ty = decay_pointer_operand_type(node->lhs->ty);\n            return;\n        }'''
+          if old not in s:
+              raise SystemExit('ND_SUB pattern not found')
+          s = s.replace(old, new, 1)
+          p.write_text(s)
+      - name: Commit patch
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add type.c
+          git commit -m 'Fix array decay in pointer arithmetic result typing'
+          git push origin HEAD:fix-array-pointer-arithmetic-decay
