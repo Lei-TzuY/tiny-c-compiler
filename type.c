@@ -75,17 +75,25 @@ static SysVAbiClass merge_sysv_class(SysVAbiClass a, SysVAbiClass b) {
 }
 
 static bool classify_sysv_type(Type *ty, int offset, SysVAbiClass classes[2]) {
-    if (!ty || ty->size <= 0)
+    if (!ty)
         return false;
 
     if (ty->kind == TY_ARRAY) {
-        if (ty->array_len <= 0 || !ty->base)
+        // A flexible array member has no payload in sizeof(record), so it
+        // contributes no SysV eightbyte class.  The parser permits a zero-bound
+        // array here only as the trailing C11 flexible member of a struct.
+        if (ty->array_len == 0 && ty->base)
+            return true;
+        if (ty->size <= 0 || ty->array_len < 0 || !ty->base)
             return false;
         for (int i = 0; i < ty->array_len; i++)
             if (!classify_sysv_type(ty->base, offset + i * ty->base->size, classes))
                 return false;
         return true;
     }
+
+    if (ty->size <= 0)
+        return false;
 
     if (ty->kind == TY_STRUCT) {
         if (ty->is_incomplete || !ty->members)
