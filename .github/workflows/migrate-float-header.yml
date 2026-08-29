@@ -1,0 +1,32 @@
+name: Migrate float.h supported model
+
+on:
+  push:
+    branches:
+      - feat/float-header-supported-model
+
+permissions:
+  contents: write
+
+jobs:
+  migrate:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/float-header-supported-model
+          fetch-depth: 0
+      - name: Apply float.h support
+        run: python3 tools/migrate_float_header.py
+      - name: Commit migrated sources
+        run: |
+          if git diff --quiet -- preprocess_v2.c Makefile test/float_header.sh; then
+            echo 'No migration changes required.'
+            exit 0
+          fi
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add preprocess_v2.c Makefile test/float_header.sh
+          git commit -m 'Add float.h for supported float/double model'
+          git push origin HEAD:feat/float-header-supported-model
