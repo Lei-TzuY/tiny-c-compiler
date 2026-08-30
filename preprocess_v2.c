@@ -1,6 +1,8 @@
 #include "minicc.h"
 #include "preprocess_v2.h"
 #include <errno.h>
+#include <sys/types.h>
+#include <sys/stat.h>
 
 typedef enum {
     BUILTIN_MACRO_NONE,
@@ -47,6 +49,15 @@ struct CliMacroAction {
     char *arg;
 };
 
+typedef struct OnceFile OnceFile;
+struct OnceFile {
+    OnceFile *next;
+    bool has_stat;
+    dev_t dev;
+    ino_t ino;
+    char *name;
+};
+
 static void parse_define(char *start);
 
 typedef struct {
@@ -62,6 +73,7 @@ static const char *current_pp_file;
 static int current_pp_line;
 static CliMacroAction *cli_macro_actions;
 static CliMacroAction *cli_macro_actions_tail;
+static OnceFile *once_files;
 
 static void sb_init(StrBuf *sb, size_t cap) {
     sb->cap = cap < 64 ? 64 : cap;
@@ -100,6 +112,53 @@ static bool is_ident1_pp(char c) {
 
 static bool is_ident2_pp(char c) {
     return isalnum((unsigned char)c) || c == '_';
+}
+
+static bool stat_source(const char *source_name, struct stat *st) {
+    return source_name && source_name[0] != '<' && stat(source_name, st) == 0;
+}
+
+static bool once_contains_source(const char *source_name) {
+    struct stat st;
+    bool has_stat = stat_source(source_name, &st);
+
+    for (OnceFile *file = once_files; file; file = file->next) {
+        if (has_stat && file->has_stat) {
+            if (file->dev == st.st_dev && file->ino == st.st_ino)
+                return true;
+            continue;
+        }
+        if (!has_stat && !file->has_stat && file->name && source_name &&
+            !strcmp(file->name, source_name))
+            return true;
+    }
+    return false;
+}
+
+static void mark_once_source(const char *source_name) {
+    if (!source_name || once_contains_source(source_name))
+        return;
+
+    OnceFile *file = calloc(1, sizeof(OnceFile));
+    struct stat st;
+    file->has_stat = stat_source(source_name, &st);
+    if (file->has_stat) {
+        file->dev = st.st_dev;
+        file->ino = st.st_ino;
+    } else {
+        file->name = strdup(source_name);
+    }
+    file->next = once_files;
+    once_files = file;
+}
+
+static void clear_once_files(void) {
+    while (once_files) {
+        OnceFile *next = once_files->next;
+        free(once_files->name);
+        free(once_files);
+        once_files = next;
+    }
 }
 
 static void queue_cli_macro_action(CliMacroKind kind, const char *arg) {
@@ -1849,6 +1908,7 @@ char *preprocess_v2_source(char *input, const char *source_name) {
     int saved_line = current_pp_line;
     bool outermost = preprocess_depth++ == 0;
     if (outermost) {
+        clear_once_files();
         add_macro(strdup("__STDC__"), true, false, NULL, 0, strdup("1"));
         add_macro(strdup("__STDC_VERSION__"), true, false, NULL, 0, strdup("201112L"));
         add_macro(strdup("__STDC_HOSTED__"), true, false, NULL, 0, strdup("1"));
@@ -1916,6 +1976,13 @@ char *preprocess_v2_source(char *input, const char *source_name) {
                 if (!name) error("expected identifier after #undef");
                 undef_macro(name);
                 free(name);
+            } else if (is_cond_active() && !strcmp(directive, "pragma")) {
+                // #pragma is implementation-defined.  Support the ubiquitous
+                // once form and deliberately ignore unknown pragmas.
+                char *pragma = read_directive_ident(&start);
+                if (pragma && !strcmp(pragma, "once"))
+                    mark_once_source(source_name);
+                free(pragma);
             } else if (is_cond_active() && !strcmp(directive, "include")) {
                 // C11 6.10.2: if the directive does not directly contain a
                 // header-name token, macro-expand the remaining preprocessing
@@ -1965,13 +2032,17 @@ char *preprocess_v2_source(char *input, const char *source_name) {
 
                 // Recursive quoted includes must inherit the resolved physical
                 // path so their own relative header names are based on the
-                // directory of the header that contains them.
+                // directory of the header that contains them.  A file that has
+                // already executed #pragma once is skipped by physical identity
+                // (device/inode when available), not merely by path spelling.
                 const char *included_source = owned ? resolved_path : hname;
-                char *sub = preprocess_v2_source((char *)content, included_source);
-                sb_puts(&out, sub);
-                if (out.len && out.data[out.len - 1] != '\n')
-                    sb_putc(&out, '\n');
-                free(sub);
+                if (!once_contains_source(included_source)) {
+                    char *sub = preprocess_v2_source((char *)content, included_source);
+                    sb_puts(&out, sub);
+                    if (out.len && out.data[out.len - 1] != '\n')
+                        sb_putc(&out, '\n');
+                    free(sub);
+                }
                 free(owned);
                 free(resolved_path);
                 free(expanded_include);
@@ -2029,6 +2100,8 @@ char *preprocess_v2_source(char *input, const char *source_name) {
     current_pp_file = saved_file;
     current_pp_line = saved_line;
     free(logical_file);
+    if (outermost)
+        clear_once_files();
     return out.data;
 }
 
