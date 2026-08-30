@@ -94,4 +94,154 @@ echo 'OK(preprocessor include path): source-relative, nested, and macro-expanded
 )
 echo 'OK(preprocessor include path): -E preserves macro-expanded include lookup'
 
+
+
+# Command-line -I paths are searched in argv order. Angle includes use -I
+# before builtin fallback, while quoted includes prefer the physical source
+# directory before -I and then retain the historical cwd fallback.
+mkdir -p "$work/inc-first/nested" "$work/inc-second" "$work/include-project/local"
+cat > "$work/inc-first/ordered.h" <<'SRC'
+#define ORDERED_VALUE 31
+SRC
+cat > "$work/inc-second/ordered.h" <<'SRC'
+#define ORDERED_VALUE 99
+SRC
+cat > "$work/inc-first/angle-only.h" <<'SRC'
+#define ANGLE_VALUE 37
+SRC
+cat > "$work/inc-first/quoted-fallback.h" <<'SRC'
+#define QUOTED_FALLBACK 41
+SRC
+cat > "$work/inc-first/nested/inner.h" <<'SRC'
+#define NESTED_VALUE 43
+SRC
+cat > "$work/inc-first/outer.h" <<'SRC'
+#include "nested/inner.h"
+#define OUTER_VALUE NESTED_VALUE
+SRC
+cat > "$work/inc-first/line-base.h" <<'SRC'
+#line 700 "fake/generated/header.h"
+#include "nested/inner.h"
+#define LINE_BASE_VALUE NESTED_VALUE
+SRC
+cat > "$work/include-project/local/prefer.h" <<'SRC'
+#define PREFER_VALUE 47
+SRC
+cat > "$work/inc-first/prefer.h" <<'SRC'
+#define PREFER_VALUE 1000
+SRC
+cat > "$work/inc-first/stddef.h" <<'SRC'
+#define CUSTOM_STDDEF 53
+SRC
+cat > "$work/include-project/main.c" <<'SRC'
+#include "local/prefer.h"
+#include "quoted-fallback.h"
+#include <ordered.h>
+#include <angle-only.h>
+#include <outer.h>
+#include <line-base.h>
+#include <stddef.h>
+#ifndef CUSTOM_STDDEF
+#error -I header did not override builtin angle header
+#endif
+int main(void) {
+    return PREFER_VALUE + QUOTED_FALLBACK + ORDERED_VALUE + ANGLE_VALUE +
+           OUTER_VALUE + LINE_BASE_VALUE + CUSTOM_STDDEF - 295;
+}
+SRC
+
+(
+    cd "$work"
+    "$compiler" -I inc-first -Iinc-second include-project/main.c > include-main.s
+    cc -o include-main include-main.s
+    ./include-main
+)
+echo 'OK(preprocessor -I): ordering, quote precedence, angle lookup, nested lookup, and #line independence'
+
+# A basename input still has the current working directory as its physical
+# source directory, so a local quoted header must beat every -I candidate.
+cat > "$work/basename-main.c" <<'SRC'
+#include "basename-local.h"
+int main(void) { return BASENAME_VALUE == 61 ? 0 : 1; }
+SRC
+cat > "$work/basename-local.h" <<'SRC'
+#define BASENAME_VALUE 61
+SRC
+cat > "$work/inc-first/basename-local.h" <<'SRC'
+#define BASENAME_VALUE 1001
+SRC
+(
+    cd "$work"
+    "$compiler" -Iinc-first basename-main.c > basename-main.s
+    cc -o basename-main basename-main.s
+    ./basename-main
+)
+echo 'OK(preprocessor -I): basename source keeps local quoted-header precedence'
+
+# Reversing -I order must select the other duplicate header. Use preprocessing
+# so the selected macro is directly observable without changing source files.
+(
+    cd "$work"
+    "$compiler" -E -Iinc-second -I inc-first include-project/main.c > include-order.c
+    grep -q 'return 47 + 41 + 99 + 37 +' include-order.c
+)
+echo 'OK(preprocessor -I): argv order is preserved'
+
+# Dependency generation must report resolved physical -I paths and retain
+# device/inode deduplication when aliases reach the same pragma-once header.
+cat > "$work/inc-first/once-i.h" <<'SRC'
+#pragma once
+#define ONCE_I_VALUE 59
+SRC
+mkdir -p "$work/inc-alias"
+ln -s ../inc-first/once-i.h "$work/inc-alias/once-i-alias.h"
+cat > "$work/include-project/deps.c" <<'SRC'
+#include <once-i.h>
+#include <once-i-alias.h>
+#include <outer.h>
+int value = ONCE_I_VALUE + OUTER_VALUE;
+SRC
+(
+    cd "$work"
+    "$compiler" -M -Iinc-first -Iinc-alias include-project/deps.c > include-deps.mk
+    grep -F 'inc-first/once-i.h' include-deps.mk >/dev/null
+    grep -F 'inc-first/outer.h' include-deps.mk >/dev/null
+    grep -F 'inc-first/nested/inner.h' include-deps.mk >/dev/null
+    [ "$(grep -o 'once-i.h' include-deps.mk | wc -l)" -eq 1 ]
+    ! grep -F 'once-i-alias.h' include-deps.mk >/dev/null
+
+    "$compiler" -MD -Iinc-first -Iinc-alias -o include-md.s include-project/deps.c
+    test -s include-md.d
+    grep -F 'inc-first/once-i.h' include-md.d >/dev/null
+    ! grep -F 'once-i-alias.h' include-md.d >/dev/null
+)
+echo 'OK(preprocessor -I): -M/-MD dependency tracking uses resolved physical headers'
+
+# Builtin fallback still works when no -I candidate exists.
+cat > "$work/include-project/builtin.c" <<'SRC'
+#include <stdint.h>
+int main(void) { return sizeof(uint64_t) == 8 ? 0 : 1; }
+SRC
+(
+    cd "$work"
+    "$compiler" -Iinc-first include-project/builtin.c > builtin.s
+    cc -o builtin builtin.s
+    ./builtin
+)
+echo 'OK(preprocessor -I): builtin fallback remains available'
+
+# Driver diagnostics for malformed/unsupported -I forms.
+if "$compiler" -I > "$work/i-missing.out" 2> "$work/i-missing.err"; then
+    echo 'FAIL(preprocessor -I): missing argument unexpectedly succeeded' >&2
+    exit 1
+fi
+grep -F "missing argument after '-I'" "$work/i-missing.err" >/dev/null
+if "$compiler" -I- "$work/project/main.c" > "$work/i-dash.out" 2> "$work/i-dash.err"; then
+    echo 'FAIL(preprocessor -I): -I- unexpectedly succeeded' >&2
+    exit 1
+fi
+grep -F "'-I-' is not supported" "$work/i-dash.err" >/dev/null
+
+echo 'preprocessor command-line -I tests passed'
+
 echo 'preprocessor include path tests passed'

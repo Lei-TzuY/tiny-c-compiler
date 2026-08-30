@@ -49,6 +49,7 @@ static void print_usage(FILE *out, const char *prog) {
             "  -MQ <target>     Add a Make-quoted dependency rule target\n"
             "  -D<macro>[=<value>]  Define a preprocessor macro (default value: 1)\n"
             "  -U<macro>        Undefine a preprocessor macro\n"
+            "  -I<dir>          Add a header search directory\n"
             "  -o <file>        Write output to <file>\n"
             "  -o<file>         Same as '-o <file>'\n"
             "  -h, --help       Show this help and exit\n"
@@ -208,6 +209,18 @@ static DriverOptions parse_options(int argc, char **argv) {
 
         if (!end_options && !strncmp(arg, "-U", 2) && arg[2]) {
             preprocess_v2_add_undef(arg + 2);
+            continue;
+        }
+
+        if (!end_options && !strcmp(arg, "-I")) {
+            if (++i >= argc)
+                error("%s: missing argument after '-I'", argv[0]);
+            preprocess_v2_add_include_path(argv[i]);
+            continue;
+        }
+
+        if (!end_options && !strncmp(arg, "-I", 2) && arg[2]) {
+            preprocess_v2_add_include_path(arg + 2);
             continue;
         }
 

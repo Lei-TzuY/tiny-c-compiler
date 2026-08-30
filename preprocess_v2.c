@@ -67,6 +67,12 @@ struct Dependency {
     char *path;
 };
 
+typedef struct IncludePath IncludePath;
+struct IncludePath {
+    IncludePath *next;
+    char *path;
+};
+
 static void parse_define(char *start);
 
 typedef struct {
@@ -85,6 +91,8 @@ static CliMacroAction *cli_macro_actions_tail;
 static OnceFile *once_files;
 static Dependency *dependencies;
 static Dependency *dependencies_tail;
+static IncludePath *include_paths;
+static IncludePath *include_paths_tail;
 
 static void sb_init(StrBuf *sb, size_t cap) {
     sb->cap = cap < 64 ? 64 : cap;
@@ -263,6 +271,21 @@ void preprocess_v2_add_undef(const char *name) {
     queue_cli_macro_action(CLI_MACRO_UNDEF, name);
 }
 
+void preprocess_v2_add_include_path(const char *path) {
+    if (!path || !*path)
+        error("empty include path in -I option");
+    if (!strcmp(path, "-"))
+        error("'-I-' is not supported");
+
+    IncludePath *entry = calloc(1, sizeof(IncludePath));
+    entry->path = strdup(path);
+    if (include_paths_tail)
+        include_paths_tail->next = entry;
+    else
+        include_paths = entry;
+    include_paths_tail = entry;
+}
+
 static char *trim_copy(const char *s) {
     while (isspace((unsigned char)*s))
         s++;
@@ -380,13 +403,28 @@ static char *source_relative_include_path(const char *source_name,
 
     const char *slash = strrchr(source_name, '/');
     if (!slash)
-        return NULL;
+        return strdup(header);
 
     size_t dir_len = (size_t)(slash - source_name + 1);
     size_t header_len = strlen(header);
     char *path = calloc(1, dir_len + header_len + 1);
     memcpy(path, source_name, dir_len);
     memcpy(path + dir_len, header, header_len);
+    return path;
+}
+
+static char *join_include_path(const char *dir, const char *header) {
+    if (!dir || !*dir || !header || !*header)
+        return NULL;
+    size_t dir_len = strlen(dir);
+    size_t header_len = strlen(header);
+    bool need_slash = dir[dir_len - 1] != '/';
+    char *path = calloc(1, dir_len + (need_slash ? 1 : 0) + header_len + 1);
+    memcpy(path, dir, dir_len);
+    size_t pos = dir_len;
+    if (need_slash)
+        path[pos++] = '/';
+    memcpy(path + pos, header, header_len + 1);
     return path;
 }
 
@@ -413,6 +451,19 @@ static char *read_file_content(char *path) {
     }
     buf[size] = '\0';
     return buf;
+}
+
+static char *read_include_paths(const char *header, char **resolved_path) {
+    for (IncludePath *entry = include_paths; entry; entry = entry->next) {
+        char *candidate = join_include_path(entry->path, header);
+        char *content = read_file_content(candidate);
+        if (content) {
+            *resolved_path = candidate;
+            return content;
+        }
+        free(candidate);
+    }
+    return NULL;
 }
 
 static char *get_builtin_header(char *name) {
@@ -2079,21 +2130,28 @@ char *preprocess_v2_source(char *input, const char *source_name) {
                 char *owned = NULL;
                 char *resolved_path = NULL;
                 const char *content = NULL;
-                if (quote == '"') {
-                    // Quoted headers search next to the physical including file
-                    // first. Preserve the historical current-working-directory
-                    // fallback for callers using stdin or deliberately shared
-                    // project-root headers.
+                if (hname[0] == '/') {
+                    owned = read_file_content(hname);
+                    if (owned)
+                        resolved_path = strdup(hname);
+                } else if (quote == '"') {
+                    // Quoted headers search next to the immutable physical
+                    // including file first; #line must not redirect this base.
                     resolved_path = source_relative_include_path(source_name, hname);
                     if (resolved_path)
                         owned = read_file_content(resolved_path);
-                    if (!owned) {
-                        free(resolved_path);
-                        resolved_path = NULL;
-                        owned = read_file_content(hname);
-                        if (owned)
-                            resolved_path = strdup(hname);
-                    }
+                }
+                if (!owned) {
+                    free(resolved_path);
+                    resolved_path = NULL;
+                    owned = read_include_paths(hname, &resolved_path);
+                }
+                if (!owned && quote == '"') {
+                    // Preserve the historical current-working-directory fallback
+                    // for quoted includes only, after all explicit -I paths.
+                    owned = read_file_content(hname);
+                    if (owned)
+                        resolved_path = strdup(hname);
                 }
                 content = owned ? owned : get_builtin_header(hname);
                 if (!content)
