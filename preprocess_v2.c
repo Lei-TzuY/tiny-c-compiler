@@ -68,12 +68,18 @@ struct Dependency {
     bool is_system;
 };
 
+typedef enum {
+    INCLUDE_PATH_QUOTE,
+    INCLUDE_PATH_USER,
+    INCLUDE_PATH_SYSTEM,
+    INCLUDE_PATH_AFTER,
+} IncludePathKind;
+
 typedef struct IncludePath IncludePath;
 struct IncludePath {
     IncludePath *next;
     char *path;
-    bool is_system;
-    bool quote_only;
+    IncludePathKind kind;
 };
 
 static void parse_define(char *start);
@@ -316,17 +322,16 @@ void preprocess_v2_add_undef(const char *name) {
     queue_cli_macro_action(CLI_MACRO_UNDEF, name);
 }
 
-static void add_include_path(const char *path, bool is_system, bool quote_only,
+static void add_include_path(const char *path, IncludePathKind kind,
                              const char *option_name) {
     if (!path || !*path)
         error("empty include path in %s option", option_name);
-    if (!strcmp(option_name, "-I") && !strcmp(path, "-"))
+    if (kind == INCLUDE_PATH_USER && !strcmp(path, "-"))
         error("'-I-' is not supported");
 
     IncludePath *entry = calloc(1, sizeof(IncludePath));
     entry->path = strdup(path);
-    entry->is_system = is_system;
-    entry->quote_only = quote_only;
+    entry->kind = kind;
     if (include_paths_tail)
         include_paths_tail->next = entry;
     else
@@ -335,15 +340,19 @@ static void add_include_path(const char *path, bool is_system, bool quote_only,
 }
 
 void preprocess_v2_add_include_path(const char *path) {
-    add_include_path(path, false, false, "-I");
+    add_include_path(path, INCLUDE_PATH_USER, "-I");
 }
 
 void preprocess_v2_add_quote_include_path(const char *path) {
-    add_include_path(path, false, true, "-iquote");
+    add_include_path(path, INCLUDE_PATH_QUOTE, "-iquote");
 }
 
 void preprocess_v2_add_system_include_path(const char *path) {
-    add_include_path(path, true, false, "-isystem");
+    add_include_path(path, INCLUDE_PATH_SYSTEM, "-isystem");
+}
+
+void preprocess_v2_add_after_include_path(const char *path) {
+    add_include_path(path, INCLUDE_PATH_AFTER, "-idirafter");
 }
 
 void preprocess_v2_enable_missing_header_dependencies(void) {
@@ -519,25 +528,28 @@ static char *read_file_content(char *path) {
 
 static bool has_matching_system_include_path(const char *path) {
     for (IncludePath *entry = include_paths; entry; entry = entry->next)
-        if (entry->is_system && !strcmp(entry->path, path))
+        if ((entry->kind == INCLUDE_PATH_SYSTEM ||
+             entry->kind == INCLUDE_PATH_AFTER) &&
+            !strcmp(entry->path, path))
             return true;
     return false;
 }
 
-static char *read_quote_include_paths(const char *header, char **resolved_path,
-                                      bool *resolved_is_system) {
+static char *read_quote_include_paths(const char *header, char **resolved_path) {
     for (IncludePath *entry = include_paths; entry; entry = entry->next) {
-        if (!entry->quote_only)
+        if (entry->kind != INCLUDE_PATH_QUOTE)
+            continue;
+
+        // GCC suppresses an earlier user/quote copy when the same directory is
+        // also present in a system include class. Search it only at its normal
+        // -isystem/-idirafter position instead.
+        if (has_matching_system_include_path(entry->path))
             continue;
 
         char *candidate = join_include_path(entry->path, header);
         char *content = read_file_content(candidate);
         if (content) {
             *resolved_path = candidate;
-            // If the same directory is also registered as -isystem, keep
-            // system-header classification even though quote search reaches
-            // it earlier than the system search phase.
-            *resolved_is_system = has_matching_system_include_path(entry->path);
             return content;
         }
         free(candidate);
@@ -545,15 +557,13 @@ static char *read_quote_include_paths(const char *header, char **resolved_path,
     return NULL;
 }
 
-static char *read_include_paths(const char *header, bool system,
+static char *read_include_paths(const char *header, IncludePathKind kind,
                                 char **resolved_path) {
     for (IncludePath *entry = include_paths; entry; entry = entry->next) {
-        if (entry->quote_only || entry->is_system != system)
+        if (entry->kind != kind)
             continue;
-        // GCC treats a directory named by both -I and -isystem as a system
-        // directory, so suppress the user-path copy and search it in the
-        // system-path phase instead.
-        if (!system && has_matching_system_include_path(entry->path))
+        if (kind == INCLUDE_PATH_USER &&
+            has_matching_system_include_path(entry->path))
             continue;
 
         char *candidate = join_include_path(entry->path, header);
@@ -2253,16 +2263,14 @@ static char *preprocess_v2_source_impl(char *input, const char *source_name,
                 if (!owned && quote == '"') {
                     free(resolved_path);
                     resolved_path = NULL;
-                    bool quote_path_is_system = false;
-                    owned = read_quote_include_paths(hname, &resolved_path,
-                                                     &quote_path_is_system);
+                    owned = read_quote_include_paths(hname, &resolved_path);
                     if (owned)
-                        included_is_system = source_is_system || quote_path_is_system;
+                        included_is_system = source_is_system;
                 }
                 if (!owned) {
                     free(resolved_path);
                     resolved_path = NULL;
-                    owned = read_include_paths(hname, false, &resolved_path);
+                    owned = read_include_paths(hname, INCLUDE_PATH_USER, &resolved_path);
                     // Once preprocessing is inside a system header, all of its
                     // indirect includes remain system dependencies even if the
                     // concrete file is found through a user -I directory.
@@ -2271,7 +2279,7 @@ static char *preprocess_v2_source_impl(char *input, const char *source_name,
                 if (!owned) {
                     free(resolved_path);
                     resolved_path = NULL;
-                    owned = read_include_paths(hname, true, &resolved_path);
+                    owned = read_include_paths(hname, INCLUDE_PATH_SYSTEM, &resolved_path);
                     if (owned)
                         included_is_system = true;
                 }
@@ -2285,6 +2293,16 @@ static char *preprocess_v2_source_impl(char *input, const char *source_name,
                     }
                 }
                 content = owned ? owned : get_builtin_header(hname);
+                if (!content) {
+                    free(resolved_path);
+                    resolved_path = NULL;
+                    owned = read_include_paths(hname, INCLUDE_PATH_AFTER,
+                                               &resolved_path);
+                    if (owned) {
+                        included_is_system = true;
+                        content = owned;
+                    }
+                }
                 if (!content) {
                     if (!missing_header_dependencies_enabled)
                         error("cannot include %s", hname);

@@ -57,6 +57,7 @@ static void print_usage(FILE *out, const char *prog) {
             "  -I<dir>          Add a user header search directory\n"
             "  -iquote <dir>    Add a quote-only header search directory\n"
             "  -isystem <dir>   Add a system header search directory\n"
+            "  -idirafter <dir> Add a system header directory searched last\n"
             "  -o <file>        Write output to <file>\n"
             "  -o<file>         Same as '-o <file>'\n"
             "  -h, --help       Show this help and exit\n"
@@ -274,6 +275,18 @@ static DriverOptions parse_options(int argc, char **argv) {
 
         if (!end_options && !strncmp(arg, "-isystem", 8) && arg[8]) {
             preprocess_v2_add_system_include_path(arg + 8);
+            continue;
+        }
+
+        if (!end_options && !strcmp(arg, "-idirafter")) {
+            if (++i >= argc)
+                error("%s: missing argument after '-idirafter'", argv[0]);
+            preprocess_v2_add_after_include_path(argv[i]);
+            continue;
+        }
+
+        if (!end_options && !strncmp(arg, "-idirafter", 10) && arg[10]) {
+            preprocess_v2_add_after_include_path(arg + 10);
             continue;
         }
 

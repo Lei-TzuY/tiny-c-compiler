@@ -8,6 +8,7 @@ void preprocess_v2_add_undef(const char *name);
 void preprocess_v2_add_include_path(const char *path);
 void preprocess_v2_add_quote_include_path(const char *path);
 void preprocess_v2_add_system_include_path(const char *path);
+void preprocess_v2_add_after_include_path(const char *path);
 void preprocess_v2_enable_missing_header_dependencies(void);
 int preprocess_v2_dependency_count(void);
 const char *preprocess_v2_dependency_at(int index);
