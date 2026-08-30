@@ -29,6 +29,7 @@ typedef struct {
     bool dependency_side_effect;
     bool dependency_omit_system;
     bool dependency_missing_generated;
+    bool dump_macros;
     bool exit_after_options;
 } DriverOptions;
 
@@ -61,6 +62,7 @@ static void print_usage(FILE *out, const char *prog) {
             "  -nostdinc        Disable builtin standard header search\n"
             "  -include <file>  Process a header before the primary source\n"
             "  -imacros <file>  Import macros from a header before the source\n"
+            "  -dM              Dump final macro definitions (requires -E)\n"
             "  -o <file>        Write output to <file>\n"
             "  -o<file>         Same as '-o <file>'\n"
             "  -h, --help       Show this help and exit\n"
@@ -122,6 +124,27 @@ static DriverOptions parse_options(int argc, char **argv) {
             puts("minicc (tiny-c-compiler) development");
             opts.exit_after_options = true;
             return opts;
+        }
+
+        if (!end_options && !strcmp(arg, "-dM")) {
+            opts.dump_macros = true;
+            continue;
+        }
+
+        if (!end_options && !strncmp(arg, "--dump=", 7)) {
+            if (strcmp(arg + 7, "M"))
+                error("%s: only macro dump mode M is supported", argv[0]);
+            opts.dump_macros = true;
+            continue;
+        }
+
+        if (!end_options && !strcmp(arg, "--dump")) {
+            if (++i >= argc)
+                error("%s: missing argument after '--dump'", argv[0]);
+            if (strcmp(argv[i], "M"))
+                error("%s: only macro dump mode M is supported", argv[0]);
+            opts.dump_macros = true;
+            continue;
         }
 
         if (!end_options && !strcmp(arg, "-E")) {
@@ -382,6 +405,8 @@ static DriverOptions parse_options(int argc, char **argv) {
         error("%s: '-MF', '-MP', '-MT' and '-MQ' require '-M' or '-MD' (also '-MM' or '-MMD')", argv[0]);
     if (opts.dependency_missing_generated && !dependency_only)
         error("%s: '-MG' requires dependency-only mode '-M' or '-MM'", argv[0]);
+    if (opts.dump_macros && !saw_E)
+        error("%s: '-dM' requires '-E'", argv[0]);
     if (!opts.input_path)
         error("%s: no input file", argv[0]);
     if (dependency_requested && !strcmp(opts.input_path, "-"))
@@ -593,7 +618,13 @@ int main(int argc, char **argv) {
 
     if (opts.mode == DRIVER_PREPROCESS_ONLY) {
         select_output(opts.output_path);
-        fputs(preprocessed, stdout);
+        if (opts.dump_macros) {
+            char *dump = preprocess_v2_dump_macros();
+            fputs(dump, stdout);
+            free(dump);
+        } else {
+            fputs(preprocessed, stdout);
+        }
         finish_output(opts.output_path);
         return 0;
     }

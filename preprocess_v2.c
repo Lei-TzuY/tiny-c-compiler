@@ -2527,6 +2527,48 @@ char *preprocess_v2_source(char *input, const char *source_name) {
     return preprocess_v2_source_impl(input, source_name, false);
 }
 
+char *preprocess_v2_dump_macros(void) {
+    size_t count = 0;
+    for (Macro *m = macros; m; m = m->next)
+        if (m->builtin == BUILTIN_MACRO_NONE)
+            count++;
+
+    Macro **ordered = calloc(count ? count : 1, sizeof(Macro *));
+    size_t index = 0;
+    for (Macro *m = macros; m; m = m->next)
+        if (m->builtin == BUILTIN_MACRO_NONE)
+            ordered[index++] = m;
+
+    StrBuf out;
+    sb_init(&out, count * 48 + 64);
+    while (index > 0) {
+        Macro *m = ordered[--index];
+        sb_puts(&out, "#define ");
+        sb_puts(&out, m->name);
+        if (!m->is_objlike) {
+            sb_putc(&out, '(');
+            for (int i = 0; i < m->num_params; i++) {
+                if (i)
+                    sb_putc(&out, ',');
+                sb_puts(&out, m->params[i]);
+            }
+            if (m->is_variadic) {
+                if (m->num_params)
+                    sb_putc(&out, ',');
+                sb_puts(&out, "...");
+            }
+            sb_putc(&out, ')');
+        }
+        sb_putc(&out, ' ');
+        if (m->body)
+            sb_puts(&out, m->body);
+        sb_putc(&out, '\n');
+    }
+
+    free(ordered);
+    return out.data;
+}
+
 char *preprocess_v2(char *input) {
     return preprocess_v2_source(input, "<stdin>");
 }

@@ -13,6 +13,7 @@ void preprocess_v2_enable_missing_header_dependencies(void);
 void preprocess_v2_disable_standard_includes(void);
 void preprocess_v2_add_forced_include(const char *path);
 void preprocess_v2_add_imacros(const char *path);
+char *preprocess_v2_dump_macros(void);
 int preprocess_v2_dependency_count(void);
 const char *preprocess_v2_dependency_at(int index);
 int preprocess_v2_dependency_is_system(int index);
