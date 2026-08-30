@@ -137,7 +137,7 @@ static int read_escaped_char(char **rest, char *p, char *start) {
     case 'f': return '\f';
     case 'v': return '\v';
     case '?': return '?';
-    default: return (unsigned char)c;
+    default: error_at(start, "unknown escape sequence");
     }
 }
 
