@@ -28,6 +28,8 @@ EOF
 grep -F 'Usage:' tmp-driver-help.txt >/dev/null || fail '--help missing usage'
 grep -F -- '-E' tmp-driver-help.txt >/dev/null || fail '--help missing -E'
 grep -F -- '-fsyntax-only' tmp-driver-help.txt >/dev/null || fail '--help missing -fsyntax-only'
+grep -F -- '-D<macro>' tmp-driver-help.txt >/dev/null || fail '--help missing -D'
+grep -F -- '-U<macro>' tmp-driver-help.txt >/dev/null || fail '--help missing -U'
 grep -F -- '-o <file>' tmp-driver-help.txt >/dev/null || fail '--help missing -o'
 
 ./minicc --version > tmp-driver-version.txt
@@ -48,6 +50,84 @@ cc -o tmp-driver-cli tmp-driver-cli.s
 ./minicc -otmp-driver-cli-attached.s tmp-driver-cli.c
 cc -o tmp-driver-cli-attached tmp-driver-cli-attached.s
 ./tmp-driver-cli-attached
+
+
+# Command-line macro definitions must participate in preprocessing before the
+# source file. Attached and separated forms are both supported, and a missing
+# explicit replacement defaults to 1.
+cat > tmp-driver-macros.c <<'EOF'
+#ifndef FEATURE
+#error FEATURE missing
+#endif
+#ifndef FLAG
+#error FLAG missing
+#endif
+int feature = FEATURE;
+int flag = FLAG;
+EOF
+./minicc -E -DFEATURE=7 -DFLAG tmp-driver-macros.c > tmp-driver-macros.i
+grep -F 'int feature = 7;' tmp-driver-macros.i >/dev/null || fail '-Dname=value did not expand'
+grep -F 'int flag = 1;' tmp-driver-macros.i >/dev/null || fail '-Dname did not default to 1'
+./minicc -E -D FEATURE=8 -D FLAG tmp-driver-macros.c > tmp-driver-macros-separated.i
+grep -F 'int feature = 8;' tmp-driver-macros-separated.i >/dev/null || fail 'separated -D did not expand'
+
+# Function-like command-line macros use the same replacement machinery as
+# source #define directives.
+cat > tmp-driver-function-macro.c <<'EOF'
+int main(void) { return SCALE(4) == 12 ? 0 : 1; }
+EOF
+./minicc '-DSCALE(x)=((x)*3)' -o tmp-driver-function-macro.s tmp-driver-function-macro.c
+cc -o tmp-driver-function-macro tmp-driver-function-macro.s
+./tmp-driver-function-macro
+
+# -D and -U are replayed in their original argv order after the predefined
+# macros are installed and before the source is processed.
+cat > tmp-driver-macro-order.c <<'EOF'
+#if VALUE != 3
+#error wrong VALUE ordering
+#endif
+int main(void) { return VALUE == 3 ? 0 : 1; }
+EOF
+./minicc -DVALUE=1 -UVALUE -DVALUE=3 -o tmp-driver-macro-order.s tmp-driver-macro-order.c
+cc -o tmp-driver-macro-order tmp-driver-macro-order.s
+./tmp-driver-macro-order
+
+# Source definitions occur after command-line actions and therefore may
+# redefine a command-line macro in the normal preprocessing stream.
+cat > tmp-driver-source-redefine.c <<'EOF'
+#define VALUE 9
+#if VALUE != 9
+#error source definition did not win
+#endif
+int main(void) { return 0; }
+EOF
+./minicc -DVALUE=3 -fsyntax-only tmp-driver-source-redefine.c
+
+# Command-line macros are inherited by recursively processed includes, while
+# command actions themselves are only replayed once at the outermost source.
+cat > tmp-driver-macro-header.h <<'EOF'
+#if FEATURE != 11
+#error include did not inherit FEATURE
+#endif
+#define HEADER_VALUE FEATURE
+EOF
+cat > tmp-driver-macro-include.c <<'EOF'
+#include "tmp-driver-macro-header.h"
+int main(void) { return HEADER_VALUE == 11 ? 0 : 1; }
+EOF
+./minicc -DFEATURE=11 -o tmp-driver-macro-include.s tmp-driver-macro-include.c
+cc -o tmp-driver-macro-include tmp-driver-macro-include.s
+./tmp-driver-macro-include
+
+# Because command actions are replayed after predefined macros are installed,
+# -U can intentionally suppress a predefined macro as normal compiler drivers do.
+cat > tmp-driver-undef-stdc.c <<'EOF'
+#ifdef __STDC__
+#error __STDC__ should have been undefined
+#endif
+int main(void) { return 0; }
+EOF
+./minicc -U__STDC__ -fsyntax-only tmp-driver-undef-stdc.c
 
 # Syntax-only mode must run the complete front end without producing assembly or
 # preprocessed output. The input deliberately uses a macro so preprocessing is
@@ -82,6 +162,10 @@ cc -o tmp-driver-dash tmp-driver-dash.s
 ./tmp-driver-dash
 
 assert_reject 'unknown option' ./minicc -Z tmp-driver-cli.c
+assert_reject "missing argument after '-D'" ./minicc -D
+assert_reject "missing argument after '-U'" ./minicc -U
+assert_reject 'invalid macro name in -D option' ./minicc -D9BAD=1 tmp-driver-cli.c
+assert_reject 'invalid macro name in -U option' ./minicc -UBAD=1 tmp-driver-cli.c
 assert_reject "missing argument after '-o'" ./minicc -o
 assert_reject 'multiple input files are not supported' ./minicc tmp-driver-cli.c tmp-driver-cli.c
 assert_reject "'-E', '-S' and '-fsyntax-only' are mutually exclusive" ./minicc -E -S tmp-driver-cli.c
@@ -136,6 +220,11 @@ rm -f tmp-driver-cli.c tmp-driver-cli.i tmp-driver-cli-output.i \
       tmp-driver-stdin.s tmp-driver-stdin tmp-driver-stdin.i \
       tmp-driver-syntax.out tmp-driver-syntax-stdin.out tmp-driver-semantic-bad.c \
       tmp-driver-syntax-output.s \
+      tmp-driver-macros.c tmp-driver-macros.i tmp-driver-macros-separated.i \
+      tmp-driver-function-macro.c tmp-driver-function-macro.s tmp-driver-function-macro \
+      tmp-driver-macro-order.c tmp-driver-macro-order.s tmp-driver-macro-order \
+      tmp-driver-source-redefine.c tmp-driver-macro-header.h tmp-driver-macro-include.c \
+      tmp-driver-macro-include.s tmp-driver-macro-include tmp-driver-undef-stdc.c \
       tmp-driver-help.txt tmp-driver-version.txt tmp-driver-cli.out tmp-driver-cli.err \
       tmp-driver-preserve.s tmp-driver-bad.c ./-driver-dash.c tmp-driver-dash.s tmp-driver-dash \
       tmp-driver-alias-source.c tmp-driver-alias-expected.c tmp-driver-alias-hardlink.s \

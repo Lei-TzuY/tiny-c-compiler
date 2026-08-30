@@ -28,6 +28,8 @@ static void print_usage(FILE *out, const char *prog) {
             "  -E               Preprocess only\n"
             "  -S               Compile to assembly (default)\n"
             "  -fsyntax-only    Check preprocessing, syntax and semantics only\n"
+            "  -D<macro>[=<value>]  Define a preprocessor macro (default value: 1)\n"
+            "  -U<macro>        Undefine a preprocessor macro\n"
             "  -o <file>        Write output to <file>\n"
             "  -o<file>         Same as '-o <file>'\n"
             "  -h, --help       Show this help and exit\n"
@@ -90,6 +92,30 @@ static DriverOptions parse_options(int argc, char **argv) {
         if (!end_options && !strcmp(arg, "-fsyntax-only")) {
             saw_syntax_only = true;
             opts.mode = DRIVER_SYNTAX_ONLY;
+            continue;
+        }
+
+        if (!end_options && !strcmp(arg, "-D")) {
+            if (++i >= argc)
+                error("%s: missing argument after '-D'", argv[0]);
+            preprocess_v2_add_define(argv[i]);
+            continue;
+        }
+
+        if (!end_options && !strncmp(arg, "-D", 2) && arg[2]) {
+            preprocess_v2_add_define(arg + 2);
+            continue;
+        }
+
+        if (!end_options && !strcmp(arg, "-U")) {
+            if (++i >= argc)
+                error("%s: missing argument after '-U'", argv[0]);
+            preprocess_v2_add_undef(argv[i]);
+            continue;
+        }
+
+        if (!end_options && !strncmp(arg, "-U", 2) && arg[2]) {
+            preprocess_v2_add_undef(arg + 2);
             continue;
         }
 

@@ -35,6 +35,20 @@ struct Expansion {
     Macro *macro;
 };
 
+typedef enum {
+    CLI_MACRO_DEFINE,
+    CLI_MACRO_UNDEF,
+} CliMacroKind;
+
+typedef struct CliMacroAction CliMacroAction;
+struct CliMacroAction {
+    CliMacroAction *next;
+    CliMacroKind kind;
+    char *arg;
+};
+
+static void parse_define(char *start);
+
 typedef struct {
     char *data;
     size_t len;
@@ -46,6 +60,8 @@ static CondStack *cond_stack;
 static int preprocess_depth;
 static const char *current_pp_file;
 static int current_pp_line;
+static CliMacroAction *cli_macro_actions;
+static CliMacroAction *cli_macro_actions_tail;
 
 static void sb_init(StrBuf *sb, size_t cap) {
     sb->cap = cap < 64 ? 64 : cap;
@@ -84,6 +100,40 @@ static bool is_ident1_pp(char c) {
 
 static bool is_ident2_pp(char c) {
     return isalnum((unsigned char)c) || c == '_';
+}
+
+static void queue_cli_macro_action(CliMacroKind kind, const char *arg) {
+    CliMacroAction *action = calloc(1, sizeof(CliMacroAction));
+    action->kind = kind;
+    action->arg = strdup(arg);
+    if (cli_macro_actions_tail)
+        cli_macro_actions_tail->next = action;
+    else
+        cli_macro_actions = action;
+    cli_macro_actions_tail = action;
+}
+
+void preprocess_v2_add_define(const char *definition) {
+    if (!definition || !*definition || !is_ident1_pp(*definition))
+        error("invalid macro name in -D option: %s", definition ? definition : "");
+
+    const char *p = definition + 1;
+    while (is_ident2_pp(*p))
+        p++;
+    if (*p && *p != '=' && *p != '(')
+        error("invalid macro name in -D option: %s", definition);
+
+    queue_cli_macro_action(CLI_MACRO_DEFINE, definition);
+}
+
+void preprocess_v2_add_undef(const char *name) {
+    if (!name || !*name || !is_ident1_pp(*name))
+        error("invalid macro name in -U option: %s", name ? name : "");
+    for (const char *p = name + 1; *p; p++)
+        if (!is_ident2_pp(*p))
+            error("invalid macro name in -U option: %s", name);
+
+    queue_cli_macro_action(CLI_MACRO_UNDEF, name);
 }
 
 static char *trim_copy(const char *s) {
@@ -166,6 +216,29 @@ static void add_builtin_macro(const char *name, BuiltinMacroKind builtin) {
     m->body = strdup("");
     m->next = macros;
     macros = m;
+}
+
+static void apply_cli_macro_actions(void) {
+    for (CliMacroAction *action = cli_macro_actions; action; action = action->next) {
+        if (action->kind == CLI_MACRO_UNDEF) {
+            undef_macro(action->arg);
+            continue;
+        }
+
+        char *definition = strdup(action->arg);
+        char *eq = strchr(definition, '=');
+        if (eq) {
+            *eq = ' ';
+        } else {
+            size_t len = strlen(definition);
+            definition = realloc(definition, len + 3);
+            definition[len] = ' ';
+            definition[len + 1] = '1';
+            definition[len + 2] = '\0';
+        }
+        parse_define(definition);
+        free(definition);
+    }
 }
 
 // Resolve a quoted include relative to the physical source file that
@@ -1781,6 +1854,7 @@ char *preprocess_v2_source(char *input, const char *source_name) {
         add_macro(strdup("__STDC_HOSTED__"), true, false, NULL, 0, strdup("1"));
         add_builtin_macro("__LINE__", BUILTIN_MACRO_LINE);
         add_builtin_macro("__FILE__", BUILTIN_MACRO_FILE);
+        apply_cli_macro_actions();
     }
 
     CondStack *base_cond = cond_stack;
