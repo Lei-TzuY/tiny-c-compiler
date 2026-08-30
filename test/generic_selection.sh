@@ -30,12 +30,41 @@ int main(void) {
 }
 EOF
 
+# Only the selected association expression is evaluated.  This is a compile-time
+# selection, not a runtime conditional that may execute both arms or preserve
+# side effects from an unselected arm.
+compile_and_run <<'EOF'
+int main(void) {
+  int selected=0, unselected=0;
+  int value=_Generic(1, int: (++selected, 41), default: (++unselected, 99));
+  return !(value==41 && selected==1 && unselected==0);
+}
+EOF
+
+# The same rule holds when default is selected.
+compile_and_run <<'EOF'
+int main(void) {
+  int typed=0, fallback=0;
+  int value=_Generic(1.0, int: (++typed, 11), default: (++fallback, 22));
+  return !(value==22 && typed==0 && fallback==1);
+}
+EOF
+
 # Generic selection preserves the value category of the selected expression.
 compile_and_run <<'EOF'
 int main(void) {
   int tag=0, a=1, b=2;
   _Generic(tag, int: a, default: b)=42;
   return !(a==42 && b==2);
+}
+EOF
+
+# An unselected lvalue association must not become the result accidentally.
+compile_and_run <<'EOF'
+int main(void) {
+  int tag=0, selected=1, other=2;
+  _Generic(tag, int: selected, default: other)=17;
+  return !(selected==17 && other==2);
 }
 EOF
 
@@ -46,6 +75,16 @@ int main(void) {
   double x=_Generic(i, int: 1.25, default: 9);
   long y=_Generic(i, int: 40L, default: 1) + 2;
   return !(x==1.25 && y==42);
+}
+EOF
+
+# A selected association may have void type and remains usable as an expression
+# statement without forcing the unselected value expression to run.
+compile_and_run <<'EOF'
+int main(void) {
+  int side=0;
+  _Generic(1, int: (void)0, default: ++side);
+  return side != 0;
 }
 EOF
 
@@ -176,6 +215,17 @@ EOF
 
 reject missing-association <<'EOF'
 int main(void){return _Generic(1, );}
+EOF
+
+# Association expressions that are not selected still belong to the program
+# and must pass ordinary semantic analysis.  Selection suppresses evaluation,
+# not parsing/name resolution/type checking.
+reject unselected-undeclared-expression <<'EOF'
+int main(void){return _Generic(1, int:0, default:not_declared);}
+EOF
+
+reject unselected-invalid-dereference <<'EOF'
+int main(void){return _Generic(1, int:0, default:*1);}
 EOF
 
 rm -f tmp-generic.c tmp-generic.s tmp-generic tmp-generic-bad.c tmp-generic.err
