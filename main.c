@@ -11,6 +11,13 @@ typedef enum {
     DRIVER_SYNTAX_ONLY,
 } DriverMode;
 
+typedef enum {
+    MACRO_DUMP_NONE,
+    MACRO_DUMP_FINAL,
+    MACRO_DUMP_DEFINITIONS,
+    MACRO_DUMP_NAMES,
+} MacroDumpMode;
+
 typedef struct DependencyTarget DependencyTarget;
 struct DependencyTarget {
     DependencyTarget *next;
@@ -29,7 +36,7 @@ typedef struct {
     bool dependency_side_effect;
     bool dependency_omit_system;
     bool dependency_missing_generated;
-    bool dump_macros;
+    MacroDumpMode macro_dump;
     bool exit_after_options;
 } DriverOptions;
 
@@ -54,15 +61,21 @@ static void print_usage(FILE *out, const char *prog) {
             "  -MT <target>     Add an exact dependency rule target\n"
             "  -MQ <target>     Add a Make-quoted dependency rule target\n"
             "  -D<macro>[=<value>]  Define a preprocessor macro (default value: 1)\n"
+            "  --define-macro <macro>[=<value>]  Long form of -D\n"
             "  -U<macro>        Undefine a preprocessor macro\n"
+            "  --undefine-macro <macro>  Long form of -U\n"
             "  -I<dir>          Add a user header search directory\n"
+            "  --include-directory <dir>  Long form of -I\n"
             "  -iquote <dir>    Add a quote-only header search directory\n"
             "  -isystem <dir>   Add a system header search directory\n"
             "  -idirafter <dir> Add a system header directory searched last\n"
+            "  --include-directory-after <dir>  Long form of -idirafter\n"
             "  -nostdinc        Disable builtin standard header search\n"
             "  -include <file>  Process a header before the primary source\n"
             "  -imacros <file>  Import macros from a header before the source\n"
-            "  -dM              Dump final macro definitions (requires -E)\n"
+            "  -dM              Dump final macro definitions only (requires -E)\n"
+            "  -dD              Emit macro definitions with -E output (requires -E)\n"
+            "  -dN              Emit macro names with -E output (requires -E)\n"
             "  -o <file>        Write output to <file>\n"
             "  -o<file>         Same as '-o <file>'\n"
             "  -h, --help       Show this help and exit\n"
@@ -93,6 +106,13 @@ static void add_dependency_target(DriverOptions *opts, const char *text,
     else
         opts->dependency_targets = target;
     opts->dependency_targets_tail = target;
+}
+
+static MacroDumpMode parse_macro_dump_mode(const char *mode, const char *prog) {
+    if (!strcmp(mode, "M")) return MACRO_DUMP_FINAL;
+    if (!strcmp(mode, "D")) return MACRO_DUMP_DEFINITIONS;
+    if (!strcmp(mode, "N")) return MACRO_DUMP_NAMES;
+    error("%s: supported macro dump modes are M, D and N", prog);
 }
 
 static DriverOptions parse_options(int argc, char **argv) {
@@ -126,24 +146,23 @@ static DriverOptions parse_options(int argc, char **argv) {
             return opts;
         }
 
-        if (!end_options && !strcmp(arg, "-dM")) {
-            opts.dump_macros = true;
+        if (!end_options && (!strcmp(arg, "-dM") ||
+                             !strcmp(arg, "-dD") ||
+                             !strcmp(arg, "-dN"))) {
+            char mode[2] = {arg[2], '\0'};
+            opts.macro_dump = parse_macro_dump_mode(mode, argv[0]);
             continue;
         }
 
         if (!end_options && !strncmp(arg, "--dump=", 7)) {
-            if (strcmp(arg + 7, "M"))
-                error("%s: only macro dump mode M is supported", argv[0]);
-            opts.dump_macros = true;
+            opts.macro_dump = parse_macro_dump_mode(arg + 7, argv[0]);
             continue;
         }
 
         if (!end_options && !strcmp(arg, "--dump")) {
             if (++i >= argc)
                 error("%s: missing argument after '--dump'", argv[0]);
-            if (strcmp(argv[i], "M"))
-                error("%s: only macro dump mode M is supported", argv[0]);
-            opts.dump_macros = true;
+            opts.macro_dump = parse_macro_dump_mode(argv[i], argv[0]);
             continue;
         }
 
@@ -244,6 +263,18 @@ static DriverOptions parse_options(int argc, char **argv) {
             continue;
         }
 
+        if (!end_options && !strcmp(arg, "--define-macro")) {
+            if (++i >= argc)
+                error("%s: missing argument after '--define-macro'", argv[0]);
+            preprocess_v2_add_define(argv[i]);
+            continue;
+        }
+
+        if (!end_options && !strncmp(arg, "--define-macro=", 15) && arg[15]) {
+            preprocess_v2_add_define(arg + 15);
+            continue;
+        }
+
         if (!end_options && !strcmp(arg, "-D")) {
             if (++i >= argc)
                 error("%s: missing argument after '-D'", argv[0]);
@@ -253,6 +284,18 @@ static DriverOptions parse_options(int argc, char **argv) {
 
         if (!end_options && !strncmp(arg, "-D", 2) && arg[2]) {
             preprocess_v2_add_define(arg + 2);
+            continue;
+        }
+
+        if (!end_options && !strcmp(arg, "--undefine-macro")) {
+            if (++i >= argc)
+                error("%s: missing argument after '--undefine-macro'", argv[0]);
+            preprocess_v2_add_undef(argv[i]);
+            continue;
+        }
+
+        if (!end_options && !strncmp(arg, "--undefine-macro=", 17) && arg[17]) {
+            preprocess_v2_add_undef(arg + 17);
             continue;
         }
 
@@ -308,6 +351,18 @@ static DriverOptions parse_options(int argc, char **argv) {
             continue;
         }
 
+        if (!end_options && !strcmp(arg, "--include-directory")) {
+            if (++i >= argc)
+                error("%s: missing argument after '--include-directory'", argv[0]);
+            preprocess_v2_add_include_path(argv[i]);
+            continue;
+        }
+
+        if (!end_options && !strncmp(arg, "--include-directory=", 20) && arg[20]) {
+            preprocess_v2_add_include_path(arg + 20);
+            continue;
+        }
+
         if (!end_options && !strcmp(arg, "-I")) {
             if (++i >= argc)
                 error("%s: missing argument after '-I'", argv[0]);
@@ -341,6 +396,18 @@ static DriverOptions parse_options(int argc, char **argv) {
 
         if (!end_options && !strncmp(arg, "-isystem", 8) && arg[8]) {
             preprocess_v2_add_system_include_path(arg + 8);
+            continue;
+        }
+
+        if (!end_options && !strcmp(arg, "--include-directory-after")) {
+            if (++i >= argc)
+                error("%s: missing argument after '--include-directory-after'", argv[0]);
+            preprocess_v2_add_after_include_path(argv[i]);
+            continue;
+        }
+
+        if (!end_options && !strncmp(arg, "--include-directory-after=", 26) && arg[26]) {
+            preprocess_v2_add_after_include_path(arg + 26);
             continue;
         }
 
@@ -405,8 +472,11 @@ static DriverOptions parse_options(int argc, char **argv) {
         error("%s: '-MF', '-MP', '-MT' and '-MQ' require '-M' or '-MD' (also '-MM' or '-MMD')", argv[0]);
     if (opts.dependency_missing_generated && !dependency_only)
         error("%s: '-MG' requires dependency-only mode '-M' or '-MM'", argv[0]);
-    if (opts.dump_macros && !saw_E)
+    if (opts.macro_dump == MACRO_DUMP_FINAL && !saw_E)
         error("%s: '-dM' requires '-E'", argv[0]);
+    if ((opts.macro_dump == MACRO_DUMP_DEFINITIONS ||
+         opts.macro_dump == MACRO_DUMP_NAMES) && !saw_E)
+        error("%s: macro dump options require '-E'", argv[0]);
     if (!opts.input_path)
         error("%s: no input file", argv[0]);
     if (dependency_requested && !strcmp(opts.input_path, "-"))
@@ -607,6 +677,11 @@ int main(int argc, char **argv) {
     if (opts.exit_after_options)
         return 0;
 
+    if (opts.macro_dump == MACRO_DUMP_DEFINITIONS)
+        preprocess_v2_set_dump_mode(PREPROCESS_DUMP_DEFINITIONS);
+    else if (opts.macro_dump == MACRO_DUMP_NAMES)
+        preprocess_v2_set_dump_mode(PREPROCESS_DUMP_NAMES);
+
     char *user_input = read_file(opts.input_path);
     const char *source_name = !strcmp(opts.input_path, "-") ? "<stdin>" : opts.input_path;
     char *preprocessed = preprocess_v2_source(user_input, source_name);
@@ -618,7 +693,7 @@ int main(int argc, char **argv) {
 
     if (opts.mode == DRIVER_PREPROCESS_ONLY) {
         select_output(opts.output_path);
-        if (opts.dump_macros) {
+        if (opts.macro_dump == MACRO_DUMP_FINAL) {
             char *dump = preprocess_v2_dump_macros();
             fputs(dump, stdout);
             free(dump);

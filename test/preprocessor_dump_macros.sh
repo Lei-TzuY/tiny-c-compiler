@@ -140,7 +140,7 @@ grep -F "'-dM' requires '-E'" "$work/no-e.err" >/dev/null || fail 'missing -dM/-
 if ./minicc -E --dump X "$work/long.c" > "$work/bad-dump.out" 2> "$work/bad-dump.err"; then
   fail 'unsupported --dump mode unexpectedly succeeded'
 fi
-grep -F 'only macro dump mode M is supported' "$work/bad-dump.err" >/dev/null || fail 'missing unsupported --dump diagnostic'
+grep -F 'supported macro dump modes are M, D and N' "$work/bad-dump.err" >/dev/null || fail 'missing unsupported --dump diagnostic'
 if ./minicc -E --dump > "$work/missing-dump.out" 2> "$work/missing-dump.err"; then
   fail '--dump without argument unexpectedly succeeded'
 fi

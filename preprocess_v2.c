@@ -111,9 +111,11 @@ struct ForcedInput {
 
 static void parse_define(char *start);
 static char *get_builtin_header(char *name);
+static char *expand_text(const char *text, Expansion *stack, bool *in_block_comment);
 static char *preprocess_v2_source_impl(char *input, const char *source_name,
                                        bool source_is_system,
-                                       IncludeOrigin source_origin);
+                                       IncludeOrigin source_origin,
+                                       bool suppress_text_output);
 
 typedef struct {
     char *data;
@@ -126,6 +128,9 @@ static CondStack *cond_stack;
 static int preprocess_depth;
 static const char *current_pp_file;
 static int current_pp_line;
+static const char *current_pp_source_name;
+static bool current_pp_source_is_system;
+static IncludeOrigin current_pp_source_origin;
 static CliMacroAction *cli_macro_actions;
 static CliMacroAction *cli_macro_actions_tail;
 static OnceFile *once_files;
@@ -139,6 +144,7 @@ static ForcedInput *forced_includes;
 static ForcedInput *forced_includes_tail;
 static bool missing_header_dependencies_enabled;
 static bool standard_includes_enabled = true;
+static PreprocessDumpMode dump_mode;
 
 static void sb_init(StrBuf *sb, size_t cap) {
     sb->cap = cap < 64 ? 64 : cap;
@@ -397,6 +403,10 @@ void preprocess_v2_enable_missing_header_dependencies(void) {
 
 void preprocess_v2_disable_standard_includes(void) {
     standard_includes_enabled = false;
+}
+
+void preprocess_v2_set_dump_mode(PreprocessDumpMode mode) {
+    dump_mode = mode;
 }
 
 static void queue_forced_input(ForcedInput **head, ForcedInput **tail,
@@ -1537,6 +1547,94 @@ static PPValue pp_read_char_constant(PPExpr *e) {
 static PPValue eval_pp_expr_depth(const char *text, int depth, bool suppress_eval);
 static PPValue pp_eval_function_macro(PPExpr *e, Macro *m);
 
+static bool pp_builtin_operator_defined(const char *name) {
+    return name && (!strcmp(name, "__has_include") ||
+                    !strcmp(name, "__has_include_next"));
+}
+
+static char *pp_read_parenthesized_operand(PPExpr *e, const char *operator_name) {
+    pp_skip_space(e);
+    if (*e->p != '(')
+        error("%s requires a parenthesized header operand", operator_name);
+    const char *p = ++e->p;
+    const char *start = p;
+    int depth = 1;
+    char quote = 0;
+    while (*p) {
+        if (quote) {
+            if (*p == '\\' && p[1]) {
+                p += 2;
+                continue;
+            }
+            if (*p == quote)
+                quote = 0;
+            p++;
+            continue;
+        }
+        if (*p == '"' || *p == '\'') {
+            quote = *p++;
+            continue;
+        }
+        if (*p == '(') {
+            depth++;
+            p++;
+            continue;
+        }
+        if (*p == ')') {
+            if (--depth == 0) {
+                char *result = strndup(start, (size_t)(p - start));
+                e->p = p + 1;
+                return result;
+            }
+            p++;
+            continue;
+        }
+        p++;
+    }
+    error("unterminated %s operand", operator_name);
+}
+
+static PPValue pp_eval_has_include(PPExpr *e, bool include_next) {
+    const char *operator_name = include_next ? "__has_include_next" : "__has_include";
+    char *raw = pp_read_parenthesized_operand(e, operator_name);
+    bool operand_comment = false;
+    char *expanded = expand_text(raw, NULL, &operand_comment);
+    char *operand = trim_copy(expanded);
+    free(raw);
+    free(expanded);
+
+    char quote = *operand;
+    if (quote != '"' && quote != '<')
+        error("%s requires a header-name operand", operator_name);
+    char end_quote = quote == '"' ? '"' : '>';
+    char *end = strchr(operand + 1, end_quote);
+    if (!end)
+        error("unterminated header name in %s", operator_name);
+    char *tail = end + 1;
+    while (*tail == ' ' || *tail == '\t')
+        tail++;
+    if (*tail)
+        error("extra tokens after header name in %s", operator_name);
+    char *header = strndup(operand + 1, (size_t)(end - operand - 1));
+    free(operand);
+
+    if (e->suppress_eval) {
+        free(header);
+        return pp_bool_value(false);
+    }
+
+    IncludeResolution r = include_next
+        ? resolve_include_next(header, current_pp_source_origin,
+                               current_pp_source_is_system)
+        : resolve_normal_include(header, quote, current_pp_source_name,
+                                 current_pp_source_is_system);
+    bool found = r.content != NULL;
+    free(r.owned);
+    free(r.resolved_path);
+    free(header);
+    return pp_bool_value(found);
+}
+
 static bool pp_integer_constant_is_unsigned(const char *start, uint64_t value,
                                             bool seen_u, int long_count) {
     if (seen_u)
@@ -1573,9 +1671,17 @@ static PPValue pp_primary(PPExpr *e) {
             error("expected identifier after defined");
         if (paren && !pp_consume(e, ")"))
             error("expected ')' after defined");
-        bool result = find_macro(name) != NULL;
+        bool result = pp_builtin_operator_defined(name) || find_macro(name) != NULL;
         free(name);
         return pp_bool_value(result);
+    }
+    if (ident && !strcmp(ident, "__has_include")) {
+        free(ident);
+        return pp_eval_has_include(e, false);
+    }
+    if (ident && !strcmp(ident, "__has_include_next")) {
+        free(ident);
+        return pp_eval_has_include(e, true);
     }
     if (ident) {
         Macro *m = find_macro(ident);
@@ -2422,7 +2528,62 @@ static void parse_define(char *start) {
     add_macro(name, is_objlike, is_variadic, params, num_params, strdup(start));
 }
 
-static char *preprocess_forced_input(const char *name) {
+static void append_macro_definition(StrBuf *out, Macro *m, bool names_only) {
+    if (!m || m->builtin != BUILTIN_MACRO_NONE)
+        return;
+    sb_puts(out, "#define " );
+    sb_puts(out, m->name);
+    if (names_only) {
+        sb_putc(out, '\n');
+        return;
+    }
+    if (!m->is_objlike) {
+        sb_putc(out, '(');
+        for (int i = 0; i < m->num_params; i++) {
+            if (i) sb_putc(out, ',');
+            sb_puts(out, m->params[i]);
+        }
+        if (m->is_variadic) {
+            if (m->num_params) sb_putc(out, ',');
+            sb_puts(out, "...");
+        }
+        sb_putc(out, ')');
+    }
+    sb_putc(out, ' ');
+    if (m->body) sb_puts(out, m->body);
+    sb_putc(out, '\n');
+}
+
+static void append_macro_table(StrBuf *out, bool names_only) {
+    size_t count = 0;
+    for (Macro *m = macros; m; m = m->next)
+        if (m->builtin == BUILTIN_MACRO_NONE) count++;
+    Macro **ordered = calloc(count ? count : 1, sizeof(Macro *));
+    size_t index = 0;
+    for (Macro *m = macros; m; m = m->next)
+        if (m->builtin == BUILTIN_MACRO_NONE) ordered[index++] = m;
+    while (index > 0)
+        append_macro_definition(out, ordered[--index], names_only);
+    free(ordered);
+}
+
+static void append_dumped_define(StrBuf *out, char *definition) {
+    if (dump_mode == PREPROCESS_DUMP_NONE) return;
+    char *cursor = definition;
+    char *name = read_directive_ident(&cursor);
+    Macro *m = name ? find_macro(name) : NULL;
+    append_macro_definition(out, m, dump_mode == PREPROCESS_DUMP_NAMES);
+    free(name);
+}
+
+static void append_dumped_undef(StrBuf *out, const char *name) {
+    if (dump_mode == PREPROCESS_DUMP_NONE) return;
+    sb_puts(out, "#undef " );
+    sb_puts(out, name);
+    sb_putc(out, '\n');
+}
+
+static char *preprocess_forced_input(const char *name, bool suppress_text_output) {
     IncludeResolution r = resolve_forced_include(name);
     if (!r.content) {
         if (!missing_header_dependencies_enabled)
@@ -2439,7 +2600,8 @@ static char *preprocess_forced_input(const char *name) {
     if (!once_contains_source(included_source)) {
         free(result);
         result = preprocess_v2_source_impl((char *)r.content, included_source,
-                                           r.is_system, r.origin);
+                                           r.is_system, r.origin,
+                                           suppress_text_output);
     }
 
     free(r.owned);
@@ -2449,9 +2611,16 @@ static char *preprocess_forced_input(const char *name) {
 
 static char *preprocess_v2_source_impl(char *input, const char *source_name,
                                        bool source_is_system,
-                                       IncludeOrigin source_origin) {
+                                       IncludeOrigin source_origin,
+                                       bool suppress_text_output) {
     const char *saved_file = current_pp_file;
     int saved_line = current_pp_line;
+    const char *saved_source_name = current_pp_source_name;
+    bool saved_source_is_system = current_pp_source_is_system;
+    IncludeOrigin saved_source_origin = current_pp_source_origin;
+    current_pp_source_name = source_name;
+    current_pp_source_is_system = source_is_system;
+    current_pp_source_origin = source_origin;
     bool outermost = preprocess_depth++ == 0;
     if (outermost) {
         clear_once_files();
@@ -2470,15 +2639,20 @@ static char *preprocess_v2_source_impl(char *input, const char *source_name,
     sb_init(&out, strlen(spliced) * 2 + 1024);
     bool in_block_comment = false;
 
+    if (outermost && dump_mode != PREPROCESS_DUMP_NONE)
+        append_macro_table(&out, dump_mode == PREPROCESS_DUMP_NAMES);
+
     if (outermost) {
         // GCC processes every -imacros before every -include, independent of
         // how those option classes were interleaved on the command line.
         for (ForcedInput *forced = forced_imacros; forced; forced = forced->next) {
-            char *discarded = preprocess_forced_input(forced->path);
-            free(discarded);
+            char *dumped = preprocess_forced_input(forced->path, true);
+            sb_puts(&out, dumped);
+            if (out.len && out.data[out.len - 1] != '\n') sb_putc(&out, '\n');
+            free(dumped);
         }
         for (ForcedInput *forced = forced_includes; forced; forced = forced->next) {
-            char *included = preprocess_forced_input(forced->path);
+            char *included = preprocess_forced_input(forced->path, false);
             sb_puts(&out, included);
             if (out.len && out.data[out.len - 1] != '\n')
                 sb_putc(&out, '\n');
@@ -2514,12 +2688,12 @@ static char *preprocess_v2_source_impl(char *input, const char *source_name,
             if (!strcmp(directive, "ifdef")) {
                 char *name = read_directive_ident(&start);
                 if (!name) error("expected identifier after #ifdef");
-                push_cond(find_macro(name) != NULL);
+                push_cond(pp_builtin_operator_defined(name) || find_macro(name) != NULL);
                 free(name);
             } else if (!strcmp(directive, "ifndef")) {
                 char *name = read_directive_ident(&start);
                 if (!name) error("expected identifier after #ifndef");
-                push_cond(find_macro(name) == NULL);
+                push_cond(!pp_builtin_operator_defined(name) && find_macro(name) == NULL);
                 free(name);
             } else if (!strcmp(directive, "if")) {
                 bool parent_active = is_cond_active();
@@ -2534,10 +2708,12 @@ static char *preprocess_v2_source_impl(char *input, const char *source_name,
                 handle_endif();
             } else if (is_cond_active() && !strcmp(directive, "define")) {
                 parse_define(start);
+                append_dumped_define(&out, start);
             } else if (is_cond_active() && !strcmp(directive, "undef")) {
                 char *name = read_directive_ident(&start);
                 if (!name) error("expected identifier after #undef");
                 undef_macro(name);
+                append_dumped_undef(&out, name);
                 free(name);
             } else if (is_cond_active() && !strcmp(directive, "pragma")) {
                 // #pragma is implementation-defined.  Support the ubiquitous
@@ -2598,7 +2774,8 @@ static char *preprocess_v2_source_impl(char *input, const char *source_name,
                 if (!once_contains_source(included_source)) {
                     char *sub = preprocess_v2_source_impl((char *)r.content,
                                                          included_source,
-                                                         r.is_system, r.origin);
+                                                         r.is_system, r.origin,
+                                                         suppress_text_output);
                     sb_puts(&out, sub);
                     if (out.len && out.data[out.len - 1] != '\n')
                         sb_putc(&out, '\n');
@@ -2638,6 +2815,10 @@ static char *preprocess_v2_source_impl(char *input, const char *source_name,
                 free(expanded);
             } else if (is_cond_active() && !strcmp(directive, "error")) {
                 error("#error %s", start);
+            } else if (is_cond_active() && !strcmp(directive, "warning")) {
+                fprintf(stderr, "%s:%d: warning: #warning %s\n",
+                        current_pp_file ? current_pp_file : "<stdin>",
+                        current_pp_line, start);
             }
 
             free(directive);
@@ -2645,7 +2826,7 @@ static char *preprocess_v2_source_impl(char *input, const char *source_name,
             continue;
         }
 
-        if (is_cond_active()) {
+        if (is_cond_active() && !suppress_text_output) {
             char *expanded = expand_text(line, NULL, &in_block_comment);
             sb_puts(&out, expanded);
             sb_putc(&out, '\n');
@@ -2660,6 +2841,9 @@ static char *preprocess_v2_source_impl(char *input, const char *source_name,
     preprocess_depth--;
     current_pp_file = saved_file;
     current_pp_line = saved_line;
+    current_pp_source_name = saved_source_name;
+    current_pp_source_is_system = saved_source_is_system;
+    current_pp_source_origin = saved_source_origin;
     free(logical_file);
     if (outermost)
         clear_once_files();
@@ -2668,48 +2852,13 @@ static char *preprocess_v2_source_impl(char *input, const char *source_name,
 
 char *preprocess_v2_source(char *input, const char *source_name) {
     IncludeOrigin origin = {.kind = INCLUDE_ORIGIN_NONE};
-    return preprocess_v2_source_impl(input, source_name, false, origin);
+    return preprocess_v2_source_impl(input, source_name, false, origin, false);
 }
 
 char *preprocess_v2_dump_macros(void) {
-    size_t count = 0;
-    for (Macro *m = macros; m; m = m->next)
-        if (m->builtin == BUILTIN_MACRO_NONE)
-            count++;
-
-    Macro **ordered = calloc(count ? count : 1, sizeof(Macro *));
-    size_t index = 0;
-    for (Macro *m = macros; m; m = m->next)
-        if (m->builtin == BUILTIN_MACRO_NONE)
-            ordered[index++] = m;
-
     StrBuf out;
-    sb_init(&out, count * 48 + 64);
-    while (index > 0) {
-        Macro *m = ordered[--index];
-        sb_puts(&out, "#define ");
-        sb_puts(&out, m->name);
-        if (!m->is_objlike) {
-            sb_putc(&out, '(');
-            for (int i = 0; i < m->num_params; i++) {
-                if (i)
-                    sb_putc(&out, ',');
-                sb_puts(&out, m->params[i]);
-            }
-            if (m->is_variadic) {
-                if (m->num_params)
-                    sb_putc(&out, ',');
-                sb_puts(&out, "...");
-            }
-            sb_putc(&out, ')');
-        }
-        sb_putc(&out, ' ');
-        if (m->body)
-            sb_puts(&out, m->body);
-        sb_putc(&out, '\n');
-    }
-
-    free(ordered);
+    sb_init(&out, 256);
+    append_macro_table(&out, false);
     return out.data;
 }
 
