@@ -375,8 +375,43 @@ static Type *integer_literal_type(uint64_t val, int base, bool has_u,
     error_at(loc, "invalid integer suffix");
 }
 
+// Translation phase 2 removes every backslash-newline pair before tokenization.
+// Preserve the physical line count by reinserting the removed newlines after
+// the next real newline; they remain whitespace but keep later diagnostics on
+// their original source line.
+static void remove_backslash_newline(char *p) {
+    char *q = p;
+    int pending_newlines = 0;
+
+    while (*p) {
+        if (p[0] == '\\' && p[1] == '\n') {
+            p += 2;
+            pending_newlines++;
+            continue;
+        }
+
+        if (*p == '\n') {
+            *q++ = *p++;
+            while (pending_newlines > 0) {
+                *q++ = '\n';
+                pending_newlines--;
+            }
+            continue;
+        }
+
+        *q++ = *p++;
+    }
+
+    while (pending_newlines > 0) {
+        *q++ = '\n';
+        pending_newlines--;
+    }
+    *q = '\0';
+}
+
 // Tokenize a given string and returns new tokens.
 Token *tokenize(char *p) {
+    remove_backslash_newline(p);
     current_input = p;
     Token head = {};
     Token *cur = &head;
