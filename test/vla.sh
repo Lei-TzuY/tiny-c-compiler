@@ -48,7 +48,7 @@ assert_run 0 'int main(void){int n=3;unsigned long x=sizeof(int[n++]);return x==
 # Unlike sizeof(VLA), _Alignof(type-name) never evaluates a variably-modified
 # bound expression; only the completed element type's alignment is queried.
 assert_run 0 'int main(void){int n=3;unsigned long a=_Alignof(int[n++]);return a==4&&n==3?0:1;}'
-assert_run 0 'int main(void){int n=5;unsigned long a=_Alignof(double[n+=2]);return a==8&&n==5?0:1;}'
+assert_run 0 'int main(void){int n=5;unsigned long a=_Alignof(double[++n]);return a==8&&n==5?0:1;}'
 
 # Outer runtime dimension with a fixed inner stride remains ordinary C pointer
 # arithmetic after decay.
