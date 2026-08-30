@@ -49,6 +49,25 @@ int main(void) {
 }
 EOF
 
+# _Bool is subject to the integer promotions in a variadic tail. Verify that a
+# minicc variadic callee observes canonical _Bool values through va_arg(int).
+compile_and_run <<'EOF'
+#include <stdarg.h>
+int promoted_bool(int tag, ...) {
+  va_list ap;
+  va_start(ap, tag);
+  int t = va_arg(ap, int);
+  int f = va_arg(ap, int);
+  va_end(ap);
+  return t == 1 && f == 0;
+}
+int main(void) {
+  _Bool t = 37;
+  _Bool f = 0;
+  return !promoted_bool(0, t, f);
+}
+EOF
+
 # va_copy duplicates the cursor state, not an alias to mutable offsets.  Consume
 # one list after copying and verify the copy still starts from the same point.
 compile_and_run <<'EOF'
@@ -145,8 +164,35 @@ cc -o tmp-va-host tmp-va-host.c tmp-va-callee.o
 ./tmp-va-host
 echo "OK(sysv va): host caller -> minicc callee"
 
+# Cross the other direction too: a minicc caller must promote _Bool variadic
+# arguments to int before a host-compiled va_arg implementation observes them.
+cat > tmp-va-host-callee.c <<'EOF'
+#include <stdarg.h>
+int host_promoted_bool(int tag, ...) {
+  va_list ap;
+  va_start(ap, tag);
+  int t = va_arg(ap, int);
+  int f = va_arg(ap, int);
+  va_end(ap);
+  return t == 1 && f == 0;
+}
+EOF
+cc -c -o tmp-va-host-callee.o tmp-va-host-callee.c
+cat > tmp-va-minicc-caller.c <<'EOF'
+int host_promoted_bool(int, ...);
+int main(void) {
+  _Bool t = -9;
+  _Bool f = 0;
+  return !host_promoted_bool(0, t, f);
+}
+EOF
+./minicc tmp-va-minicc-caller.c > tmp-va-minicc-caller.s
+cc -o tmp-va-minicc-caller tmp-va-minicc-caller.s tmp-va-host-callee.o
+./tmp-va-minicc-caller
+echo "OK(sysv va): minicc caller -> host _Bool promotion"
+
 # Default promotions make these va_arg requests invalid in a conforming call.
-for badtype in float char short; do
+for badtype in float char short _Bool; do
   cat > tmp-va-bad.c <<EOF
 #include <stdarg.h>
 int f(int n, ...) { va_list ap; va_start(ap,n); return va_arg(ap,$badtype); }
@@ -166,6 +212,8 @@ if ./minicc tmp-va-bad.c >/dev/null 2>&1; then
   exit 1
 fi
 
-rm -f tmp-va.c tmp-va.s tmp-va tmp-va-callee.c tmp-va-callee.s tmp-va-callee.o tmp-va-host.c tmp-va-host tmp-va-bad.c
+rm -f tmp-va.c tmp-va.s tmp-va tmp-va-callee.c tmp-va-callee.s tmp-va-callee.o \
+  tmp-va-host.c tmp-va-host tmp-va-host-callee.c tmp-va-host-callee.o \
+  tmp-va-minicc-caller.c tmp-va-minicc-caller.s tmp-va-minicc-caller tmp-va-bad.c
 
 echo 'All SysV variadic callee tests passed!'
