@@ -147,6 +147,7 @@ test: minicc
 	bash ./test/nested_string_initializers.sh
 	bash ./test/sysv_variadic_callee.sh
 	bash ./test/sysv_variadic_record_va_arg.sh
+	bash ./test/variadic_record_caller_abi.sh
 
 clean:
 	rm -f minicc *.o *~ tmp*
