@@ -45,6 +45,9 @@ struct Scope {
     StructTag *tags;
     TypeDef *typedefs;
     EnumConst *enum_consts;
+    // First VLA in a lexical scope snapshots RSP here. All VLA allocations in
+    // that scope are discarded together when the scope is exited.
+    Obj *vla_stack_save;
 };
 
 static Scope *current_scope;
@@ -370,6 +373,9 @@ struct SwitchContext {
 
 static SwitchContext *current_switch;
 static int current_loop_depth;
+static Scope *current_break_scope;
+static Scope *current_continue_scope;
+static bool current_function_has_vla;
 
 static bool is_typename(Token *tok) {
     if (equal(tok, "int") || equal(tok, "char") || equal(tok, "void") ||
@@ -734,6 +740,36 @@ static Obj *create_lvar(char *name) {
     return var;
 }
 
+static Node *new_vla_stack_node(NodeKind kind, Obj *slot) {
+    Node *node = new_node(kind);
+    node->var = slot;
+    return node;
+}
+
+// Return the outermost VLA stack snapshot among scopes exited when control
+// transfers from `from` to (but not including) `target`.
+static Obj *vla_restore_between(Scope *from, Scope *target) {
+    Obj *restore = NULL;
+    for (Scope *sc = from; sc && sc != target; sc = sc->parent)
+        if (sc->vla_stack_save)
+            restore = sc->vla_stack_save;
+    return restore;
+}
+
+static Node *vla_size_expression(Type *ty) {
+    if (!ty || ty->kind != TY_ARRAY || !ty->is_vla)
+        return new_size_t_num(ty ? ty->size : 0);
+    if (ty->vla_size)
+        return new_var_node(ty->vla_size);
+    if (!ty->vla_len)
+        error("sizeof cannot be applied to an unspecified parameter VLA bound");
+
+    Node *bytes = new_binary(ND_MUL, ty->vla_len,
+                             new_size_t_num(ty->base->size));
+    add_type(bytes);
+    return bytes;
+}
+
 
 static bool supported_record_abi(Type *ty) {
     SysVAbiClass classes[2];
@@ -851,6 +887,31 @@ static bool is_incomplete_object_type(Type *ty) {
     if (ty->kind == TY_ARRAY)
         return ty->array_len == 0 || is_incomplete_object_type(ty->base);
     return false;
+}
+
+static bool type_is_variably_modified(Type *ty) {
+    if (!ty)
+        return false;
+    if (ty->kind == TY_ARRAY) {
+        if (ty->is_vla)
+            return true;
+        return type_is_variably_modified(ty->base);
+    }
+    if (ty->kind == TY_PTR)
+        return type_is_variably_modified(ty->base);
+    return false;
+}
+
+static Type *vla_of(Type *base, Node *bound) {
+    Type *ty = calloc(1, sizeof(Type));
+    ty->kind = TY_ARRAY;
+    ty->size = 0;
+    ty->align = base && base->align > 0 ? base->align : 1;
+    ty->base = base;
+    ty->array_len = -1;
+    ty->is_vla = true;
+    ty->vla_len = bound;
+    return ty;
 }
 
 static bool is_unknown_bound_array_with_complete_element(Type *ty) {
@@ -1004,6 +1065,9 @@ static Type *record_decl(Token **rest, Token *tok, bool is_union) {
             }
 
             if (!is_bitfield) {
+                if (type_is_variably_modified(mty))
+                    error_at(ident ? ident->loc : member_at->loc,
+                             "record member cannot have variably modified type");
                 if (mty->kind == TY_VOID)
                     error_at(ident->loc, "record member cannot have void type");
                 if (mty->kind == TY_FUNC)
@@ -1977,6 +2041,7 @@ static Type *func_params(Token **rest, Token *tok, Type *return_ty) {
     Type *fty = func_type(return_ty);
     fty->has_prototype = !equal(tok, ")");
 
+    enter_scope();
     Obj head = {};
     Obj *cur = &head;
 
@@ -1985,6 +2050,7 @@ static Type *func_params(Token **rest, Token *tok, Type *return_ty) {
         tok = tok->next;
         fty->has_prototype = true;
         *rest = skip(tok, ")");
+        leave_scope();
         return fty;
     }
 
@@ -2016,8 +2082,12 @@ static Type *func_params(Token **rest, Token *tok, Type *return_ty) {
         if (param_attrs.align)
             error_at(param_spec->loc, "_Alignas is not allowed on a parameter");
         Token *name = NULL;
-        Type *param_ty = declarator_impl(&tok, tok, basety, &name, true, true);
-        param_ty = adjust_param_type(param_ty);
+        Type *declared_param_ty =
+            declarator_impl(&tok, tok, basety, &name, true, true);
+        bool param_vla_star = declared_param_ty->kind == TY_ARRAY &&
+                              declared_param_ty->is_vla &&
+                              declared_param_ty->vla_len == NULL;
+        Type *param_ty = adjust_param_type(declared_param_ty);
 
         // The only valid non-pointer use of void in a parameter-type-list is
         // one unqualified, unnamed parameter denoting an empty parameter list.
@@ -2033,6 +2103,7 @@ static Type *func_params(Token **rest, Token *tok, Type *return_ty) {
             fty->params = NULL;
             fty->has_prototype = true;
             *rest = skip(tok, ")");
+            leave_scope();
             return fty;
         }
 
@@ -2045,14 +2116,57 @@ static Type *func_params(Token **rest, Token *tok, Type *return_ty) {
         Obj *param = calloc(1, sizeof(Obj));
         param->ty = param_ty;
         param->is_register = param_attrs.is_register;
-        if (name)
+        param->param_vla_star = param_vla_star;
+        if (name) {
             param->name = strndup(name->loc, name->len);
+            bind_var_in_current_scope(param->name, param, false);
+        }
         cur = cur->param_next = param;
     }
 
     fty->params = head.param_next;
     *rest = skip(tok, ")");
+    leave_scope();
     return fty;
+}
+
+static bool array_bound_is_runtime(Node *node) {
+    if (!node)
+        return false;
+    switch (node->kind) {
+    case ND_NUM:
+        return false;
+    case ND_POS:
+    case ND_NEG:
+    case ND_BITNOT:
+    case ND_NOT:
+    case ND_CAST:
+        return array_bound_is_runtime(node->lhs);
+    case ND_ADD:
+    case ND_SUB:
+    case ND_MUL:
+    case ND_DIV:
+    case ND_MOD:
+    case ND_BITAND:
+    case ND_BITOR:
+    case ND_BITXOR:
+    case ND_SHL:
+    case ND_SHR:
+    case ND_EQ:
+    case ND_NE:
+    case ND_LT:
+    case ND_LE:
+    case ND_LOGAND:
+    case ND_LOGOR:
+        return array_bound_is_runtime(node->lhs) ||
+               array_bound_is_runtime(node->rhs);
+    case ND_TERNARY:
+        return array_bound_is_runtime(node->cond) ||
+               array_bound_is_runtime(node->then) ||
+               array_bound_is_runtime(node->els);
+    default:
+        return true;
+    }
 }
 
 // Parse postfix type constructors. Arrays associate from the inside out, so
@@ -2076,6 +2190,7 @@ static Type *type_suffix(Token **rest, Token *tok, Type *ty,
         bool param_volatile = false;
         bool param_restrict = false;
         bool param_static = false;
+        bool star_bound = false;
 
         if (!allow_parameter_array_syntax &&
             (equal(tok, "const") || equal(tok, "volatile") ||
@@ -2113,32 +2228,44 @@ static Type *type_suffix(Token **rest, Token *tok, Type *ty,
 
             if (equal(tok, "static"))
                 error_at(tok->loc, "duplicate static in parameter array declarator");
-            if (equal(tok, "*"))
-                error_at(tok->loc,
-                         "variable-length parameter array '*' bounds are not supported");
+            if (equal(tok, "*")) {
+                if (param_static)
+                    error_at(tok->loc,
+                             "static parameter array declarator requires an explicit bound");
+                star_bound = true;
+                tok = tok->next;
+            }
             if (param_static && equal(tok, "]"))
                 error_at(bracket->loc,
                          "static parameter array declarator requires an explicit bound");
+        } else if (equal(tok, "*")) {
+            error_at(tok->loc,
+                     "'*' VLA bound is only allowed in function parameter prototype scope");
         }
 
+        Node *bound = NULL;
         int len = 0;
-        if (!equal(tok, "]")) {
-            Node *bound = ternary(&tok, tok);
+        bool runtime_bound = star_bound;
+        if (!star_bound && !equal(tok, "]")) {
+            bound = ternary(&tok, tok);
             add_type(bound);
             if (!is_integer(bound->ty))
                 error_at(bracket->loc, "array bound must have integer type");
 
-            int64_t raw = eval_const_expr(bound);
-            if (bound->ty->is_unsigned) {
-                uint64_t val = (uint64_t)cast_const_integer(raw, bound->ty);
-                if (val == 0 || val > INT32_MAX)
-                    error_at(bracket->loc, "array bound is out of range");
-                len = (int)val;
-            } else {
-                int64_t val = cast_const_integer(raw, bound->ty);
-                if (val <= 0 || val > INT32_MAX)
-                    error_at(bracket->loc, "array bound is out of range");
-                len = (int)val;
+            runtime_bound = array_bound_is_runtime(bound);
+            if (!runtime_bound) {
+                int64_t raw = eval_const_expr(bound);
+                if (bound->ty->is_unsigned) {
+                    uint64_t val = (uint64_t)cast_const_integer(raw, bound->ty);
+                    if (val == 0 || val > INT32_MAX)
+                        error_at(bracket->loc, "array bound is out of range");
+                    len = (int)val;
+                } else {
+                    int64_t val = cast_const_integer(raw, bound->ty);
+                    if (val <= 0 || val > INT32_MAX)
+                        error_at(bracket->loc, "array bound is out of range");
+                    len = (int)val;
+                }
             }
         }
         tok = skip(tok, "]");
@@ -2152,14 +2279,16 @@ static Type *type_suffix(Token **rest, Token *tok, Type *ty,
         if (ty->kind == TY_STRUCT && ty->contains_flexible_array_member)
             error_at(bracket->loc,
                      "array element type contains a flexible array member");
+        if (type_is_variably_modified(ty) || ty->size <= 0)
+            error_at(bracket->loc,
+                     "runtime-sized inner array dimensions are not supported yet");
 
-        Type *arr = array_of(ty, len);
+        Type *arr = runtime_bound ? vla_of(ty, bound) : array_of(ty, len);
         if (allow_parameter_array_syntax) {
             arr->param_array_const = param_const;
             arr->param_array_volatile = param_volatile;
             arr->param_array_restrict = param_restrict;
         }
-        (void)param_static; // `static` is a call-site minimum-bound contract, not type identity.
         return arr;
     }
 
@@ -3832,6 +3961,8 @@ static Token *parse_typedef_declaration(Token *tok, Type *basety,
     for (;;) {
         Token *ident;
         Type *ty = declarator(&tok, tok, basety, &ident);
+        if (type_is_variably_modified(ty))
+            error_at(ident->loc, "variably modified typedefs are not supported yet");
         if (equal(tok, "="))
             error_at(tok->loc, "typedef declaration cannot have an initializer");
         push_typedef(ident, ty);
@@ -3889,6 +4020,13 @@ static Node *declaration(Token **rest, Token *tok) {
             error_at(ident->loc, "function specifier may only declare a function");
         if (ty->kind == TY_VOID)
             error_at(ident->loc, "object cannot have void type");
+        bool is_vla_object = ty->kind == TY_ARRAY && ty->is_vla;
+        if (type_is_variably_modified(ty) && !is_vla_object)
+            error_at(ident->loc,
+                     "only direct outer-dimension VLA objects are supported yet");
+        if (is_vla_object && (is_static || is_extern || attrs.is_thread_local))
+            error_at(ident->loc,
+                     "variable length array requires automatic storage duration");
         bool inferable_array = is_unknown_bound_array_with_complete_element(ty) &&
                                equal(tok, "=");
         if (!is_extern && is_incomplete_object_type(ty) && !inferable_array)
@@ -3915,6 +4053,33 @@ static Node *declaration(Token **rest, Token *tok) {
         apply_object_alignment(var, ty, attrs.align, ident);
         var->is_register = attrs.is_register;
         var->is_thread_local = attrs.is_thread_local;
+
+        if (is_vla_object) {
+            if (equal(tok, "="))
+                error_at(tok->loc, "variable length array may not be initialized");
+            if (!ty->vla_len)
+                error_at(ident->loc, "automatic VLA requires a runtime bound");
+
+            if (!current_scope->vla_stack_save) {
+                Obj *save = create_lvar(new_unique_name());
+                save->ty = ty_ulong;
+                current_scope->vla_stack_save = save;
+                block_cur = block_cur->next = new_vla_stack_node(ND_VLA_SAVE, save);
+            }
+
+            Obj *size = create_lvar(new_unique_name());
+            size->ty = ty_ulong;
+            var->is_vla = true;
+            var->vla_size = size;
+            ty->vla_size = size;
+
+            Node *alloc = new_node(ND_VLA_ALLOC);
+            alloc->var = var;
+            alloc->lhs = ty->vla_len;
+            block_cur = block_cur->next = alloc;
+            current_function_has_vla = true;
+            continue;
+        }
 
         if (!equal(tok, "="))
             continue;
@@ -4266,14 +4431,18 @@ static Node *stmt(Token **rest, Token *tok) {
         if (current_loop_depth == 0 && !current_switch)
             error_at(tok->loc, "break statement not within loop or switch");
         *rest = skip(tok->next, ";");
-        return new_node(ND_BREAK);
+        Node *node = new_node(ND_BREAK);
+        node->var = vla_restore_between(current_scope, current_break_scope);
+        return node;
     }
 
     if (equal(tok, "continue")) {
         if (current_loop_depth == 0)
             error_at(tok->loc, "continue statement not within loop");
         *rest = skip(tok->next, ";");
-        return new_node(ND_CONTINUE);
+        Node *node = new_node(ND_CONTINUE);
+        node->var = vla_restore_between(current_scope, current_continue_scope);
+        return node;
     }
 
     if (equal(tok, "goto")) {
@@ -4293,9 +4462,15 @@ static Node *stmt(Token **rest, Token *tok) {
         Node *node = new_node(ND_DO);
         Token *body_tok = tok->next;
         require_control_substatement(body_tok, "do");
+        Scope *saved_break_scope = current_break_scope;
+        Scope *saved_continue_scope = current_continue_scope;
+        current_break_scope = current_scope;
+        current_continue_scope = current_scope;
         current_loop_depth++;
         node->then = stmt(&tok, body_tok);
         current_loop_depth--;
+        current_break_scope = saved_break_scope;
+        current_continue_scope = saved_continue_scope;
         tok = skip(tok, "while");
         tok = skip(tok, "(");
         node->cond = expr(&tok, tok);
@@ -4324,9 +4499,12 @@ static Node *stmt(Token **rest, Token *tok) {
         SwitchContext ctx = {};
         ctx.ty = node->ty;
         ctx.prev = current_switch;
+        Scope *saved_break_scope = current_break_scope;
+        current_break_scope = current_scope;
         current_switch = &ctx;
         node->then = stmt(rest, tok);
         current_switch = ctx.prev;
+        current_break_scope = saved_break_scope;
         return node;
     }
 
@@ -4402,9 +4580,15 @@ static Node *stmt(Token **rest, Token *tok) {
         require_scalar_condition(node->cond, while_tok, "while");
         tok = skip(tok, ")");
         require_control_substatement(tok, "while");
+        Scope *saved_break_scope = current_break_scope;
+        Scope *saved_continue_scope = current_continue_scope;
+        current_break_scope = current_scope;
+        current_continue_scope = current_scope;
         current_loop_depth++;
         node->then = stmt(&tok, tok);
         current_loop_depth--;
+        current_break_scope = saved_break_scope;
+        current_continue_scope = saved_continue_scope;
         *rest = tok;
         return node;
     }
@@ -4413,7 +4597,9 @@ static Node *stmt(Token **rest, Token *tok) {
         Token *for_tok = tok;
         Node *node = new_node(ND_FOR);
         tok = skip(tok->next, "(");
+        Scope *outer_for_scope = current_scope;
         enter_scope();
+        Scope *for_scope = current_scope;
 
         if (equal(tok, ";")) {
             tok = skip(tok, ";");
@@ -4439,15 +4625,23 @@ static Node *stmt(Token **rest, Token *tok) {
         tok = skip(tok, ")");
         require_control_substatement(tok, "for");
 
+        Scope *saved_break_scope = current_break_scope;
+        Scope *saved_continue_scope = current_continue_scope;
+        current_break_scope = outer_for_scope;
+        current_continue_scope = for_scope;
         current_loop_depth++;
         node->then = stmt(rest, tok);
         current_loop_depth--;
+        current_break_scope = saved_break_scope;
+        current_continue_scope = saved_continue_scope;
+        node->var = for_scope->vla_stack_save;
         leave_scope();
         return node;
     }
 
     if (equal(tok, "{")) {
         enter_scope();
+        Scope *block_scope = current_scope;
         Node head = {};
         Node *cur = &head;
         tok = tok->next;
@@ -4457,6 +4651,9 @@ static Node *stmt(Token **rest, Token *tok) {
                 cur = cur->next = n;
         }
         *rest = skip(tok, "}");
+        if (block_scope->vla_stack_save)
+            cur = cur->next = new_vla_stack_node(ND_VLA_RESTORE,
+                                                 block_scope->vla_stack_save);
         Node *node = new_node(ND_BLOCK);
         node->body = head.next;
         leave_scope();
@@ -5457,6 +5654,8 @@ static Node *primary(Token **rest, Token *tok) {
             if (invalid_sizeof_type(ty))
                 error_at(tok->loc, "invalid operand type for sizeof");
             *rest = skip(tok, ")");
+            if (ty->kind == TY_ARRAY && ty->is_vla)
+                return vla_size_expression(ty);
             return new_size_t_num(ty->size);
         }
         Node *n = unary(rest, tok);
@@ -5465,6 +5664,8 @@ static Node *primary(Token **rest, Token *tok) {
             error_at(tok->loc, "sizeof may not be applied to a bit-field");
         if (invalid_sizeof_type(n->ty))
             error_at(tok->loc, "invalid operand type for sizeof");
+        if (n->ty->kind == TY_ARRAY && n->ty->is_vla)
+            return vla_size_expression(n->ty);
         return new_size_t_num(n->ty->size);
     }
 
@@ -5555,6 +5756,9 @@ static Node *compound_stmt(Token **rest, Token *tok) {
         if (n->kind != ND_EXPR_STMT || n->lhs)
             cur = cur->next = n;
     }
+    if (current_scope->vla_stack_save)
+        cur = cur->next = new_vla_stack_node(ND_VLA_RESTORE,
+                                             current_scope->vla_stack_save);
 
     *rest = skip(tok, "}");
     Node *node = new_node(ND_BLOCK);
@@ -5563,6 +5767,8 @@ static Node *compound_stmt(Token **rest, Token *tok) {
 }
 
 static void resolve_gotos(void) {
+    if (current_function_has_vla && current_gotos)
+        error("goto in a function containing variable length arrays is not supported yet");
     for (Node *g = current_gotos; g; g = g->goto_next) {
         bool found = false;
         for (Node *l = current_labels; l; l = l->label_next) {
@@ -5837,10 +6043,14 @@ Program *parse(Token *tok) {
                 if (is_incomplete_object_type(ty->return_ty))
                     error_at(ident->loc,
                              "function definition has incomplete return type");
-                for (Obj *meta = ty->params; meta; meta = meta->param_next)
+                for (Obj *meta = ty->params; meta; meta = meta->param_next) {
                     if (is_incomplete_object_type(meta->ty))
                         error_at(ident->loc,
                                  "function definition has incomplete parameter type");
+                    if (meta->param_vla_star)
+                        error_at(ident->loc,
+                                 "[*] VLA bound is only allowed in function prototype scope");
+                }
                 check_supported_function_abi(ty, ident);
             }
 
@@ -5858,6 +6068,9 @@ Program *parse(Token *tok) {
             locals = NULL;
             current_gotos = NULL;
             current_labels = NULL;
+            current_function_has_vla = false;
+            current_break_scope = NULL;
+            current_continue_scope = NULL;
             enter_scope();
 
             Obj param_head = {};
@@ -5902,6 +6115,9 @@ Program *parse(Token *tok) {
                 error_at(ident->loc, "_Noreturn may only declare a function");
             // Global variable(s) (possibly with initializer)
             for (;;) {
+                if (type_is_variably_modified(ty))
+                    error_at(ident->loc,
+                             "variably modified object type is not allowed at file scope");
                 if (!is_extern && is_incomplete_object_type(ty) &&
                     !is_unknown_bound_array_with_complete_element(ty))
                     error_at(ident->loc, "variable has incomplete type");

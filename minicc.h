@@ -89,7 +89,10 @@ struct Type {
     bool has_flexible_array_member; // complete struct itself ends in a flexible array member
     bool contains_flexible_array_member; // direct-FAM struct or union recursively containing one
     Type *base;       // Pointer or array
-    int array_len;    // Array
+    int array_len;    // Array: >0 fixed, 0 unknown bound, -1 VLA
+    bool is_vla;      // runtime-sized array type
+    Node *vla_len;    // runtime bound expression (NULL for parameter [*])
+    Obj *vla_size;    // hidden saved byte-size object for a materialized VLA
     // Parameter-array qualifiers written inside the outermost [] apply
     // to the pointer produced by C's array-parameter adjustment. These
     // fields exist only until func_params() performs that adjustment.
@@ -225,6 +228,9 @@ typedef enum {
     ND_MEMBER,    // struct member (. and ->)
     ND_COMMA,     // , (comma operator)
     ND_COMPOUND_LITERAL, // (type-name){ initializer-list }
+    ND_VLA_SAVE,  // save the current dynamic-stack cursor for a lexical scope
+    ND_VLA_ALLOC, // evaluate bound and materialize an automatic VLA
+    ND_VLA_RESTORE, // restore the dynamic-stack cursor on normal scope exit
     ND_GOTO,      // "goto"
     ND_LABEL,     // labeled statement
 } NodeKind;
@@ -282,6 +288,9 @@ struct Obj {
 
     // Local variable
     int offset;    // Offset from RBP
+    bool is_vla;   // slot contains a runtime data address instead of inline storage
+    Obj *vla_size; // hidden size_t slot holding the allocation's byte extent
+    bool param_vla_star; // parameter was declared with a prototype-scope [*] bound
 
     // Global variable or string literal
     char *init_data;

@@ -83,8 +83,9 @@ assert_reject 'struct S { int n; int data[]; }; struct S a[2]; int main(void){ r
 # Qualified forward-declaration clones carry the same FAM restriction after completion.
 assert_reject 'struct S; typedef const struct S CS; struct S { int n; int data[]; }; struct T { CS s; }; int main(void){ return 0; }'
 
-# Existing positive-bound/constant-expression constraints remain enforced.
+# Zero bounds remain invalid. A runtime-sized automatic array is now a C99 VLA
+# rather than an incomplete array, so verify it has real runtime extent/storage.
 assert_reject 'int a[0]; int main(void){ return 0; }'
-assert_reject 'int main(void){ int n=3; int a[n]; return 0; }'
+assert_run 0 'int main(void){ int n=3; int a[n]; a[2]=7; return sizeof(a)!=12 || a[2]!=7; }'
 
 echo 'incomplete/flexible array tests passed'

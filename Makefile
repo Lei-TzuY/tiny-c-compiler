@@ -62,6 +62,7 @@ test: minicc
 	bash ./test/pointer_abi.sh
 	bash ./test/prototype_params.sh
 	bash ./test/parameter_array_qualifiers.sh
+	bash ./test/vla.sh
 	bash ./test/function_pointer_prototype.sh
 	bash ./test/callable_declarators.sh
 	bash ./test/prototype_arity.sh

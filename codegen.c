@@ -383,7 +383,9 @@ static void gen_addr(Node *node) {
         return;
     }
     if (node->kind == ND_VAR) {
-        if (node->var->is_local)
+        if (node->var->is_local && node->var->is_vla)
+            printf("  mov %d(%%rbp), %%rax\n", node->var->offset);
+        else if (node->var->is_local)
             printf("  lea %d(%%rbp), %%rax\n", node->var->offset);
         else if (node->var->is_thread_local) {
             // Linux x86-64 local-exec TLS: obtain the thread pointer from FS
@@ -1514,6 +1516,32 @@ static void emit_switch_dispatch(Node *node, Node **default_case) {
 }
 
 static void gen_stmt(Node *node) {
+    if (node->kind == ND_VLA_SAVE) {
+        printf("  mov %%rsp, %d(%%rbp)\n", node->var->offset);
+        return;
+    }
+
+    if (node->kind == ND_VLA_ALLOC) {
+        gen_expr(node->lhs);
+        if (!node->var || !node->var->vla_size || !node->var->ty ||
+            !node->var->ty->base || node->var->ty->base->size <= 0)
+            error("invalid VLA allocation metadata");
+        printf("  imul $%d, %%rax\n", node->var->ty->base->size);
+        printf("  mov %%rax, %d(%%rbp)\n", node->var->vla_size->offset);
+        // The backend supports object alignments through 16 bytes. Rounding
+        // each dynamic allocation to 16 also keeps SysV call alignment stable.
+        printf("  add $15, %%rax\n");
+        printf("  and $-16, %%rax\n");
+        printf("  sub %%rax, %%rsp\n");
+        printf("  mov %%rsp, %d(%%rbp)\n", node->var->offset);
+        return;
+    }
+
+    if (node->kind == ND_VLA_RESTORE) {
+        printf("  mov %d(%%rbp), %%rsp\n", node->var->offset);
+        return;
+    }
+
     if (node->kind == ND_RETURN) {
         if (node->lhs) {
             gen_expr(node->lhs);
@@ -1528,12 +1556,16 @@ static void gen_stmt(Node *node) {
 
     if (node->kind == ND_BREAK) {
         if (!brk_label) error("break outside loop");
+        if (node->var)
+            printf("  mov %d(%%rbp), %%rsp\n", node->var->offset);
         printf("  jmp %s\n", brk_label);
         return;
     }
 
     if (node->kind == ND_CONTINUE) {
         if (!cnt_label) error("continue outside loop");
+        if (node->var)
+            printf("  mov %d(%%rbp), %%rsp\n", node->var->offset);
         printf("  jmp %s\n", cnt_label);
         return;
     }
@@ -1644,6 +1676,8 @@ static void gen_stmt(Node *node) {
         if (node->inc) gen_expr(node->inc);
         printf("  jmp .L.begin.%d\n", c);
         printf(".L.end.%d:\n", c);
+        if (node->var)
+            printf("  mov %d(%%rbp), %%rsp\n", node->var->offset);
 
         brk_label = old_brk; cnt_label = old_cnt;
         return;
@@ -1718,9 +1752,11 @@ static void assign_lvar_offsets(Program *prog) {
         }
 
         for (Obj *var = fn->locals; var; var = var->next) {
-            int align = var->align > 0 ? var->align
-                                       : (var->ty->align > 0 ? var->ty->align : 1);
-            offset += var->ty->size;
+            int align = var->is_vla ? 8
+                                    : (var->align > 0 ? var->align
+                                       : (var->ty->align > 0 ? var->ty->align : 1));
+            int size = var->is_vla ? 8 : var->ty->size;
+            offset += size;
             offset = align_up_cg(offset, align);
             var->offset = -offset;
         }

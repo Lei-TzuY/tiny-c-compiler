@@ -66,7 +66,9 @@ assert_run 1 'int main(){unsigned long x=(unsigned long)-1; switch(x){case 0xfff
 assert_run 1 'int main(){unsigned long x=6148914691236517205ULL; switch(x){case 0xffffffffffffffffULL/3ULL:return 1;} return 0;}'
 assert_reject 'int main(){unsigned int x=0; switch(x){case -1:return 1; case 0xffffffffU:return 2;} return 0;}'
 
-# Array bounds are now parsed as integer constant expressions.
+# Fixed array bounds retain the shared typed integer-constant-expression evaluator.
+# Non-constant positive bounds at automatic block scope are C99 VLAs and are
+# exercised separately by test/vla.sh.
 assert_run 3 'int main(){int a[(0xffffffffU >> 31)+2]; return sizeof(a)/sizeof(int);}'
 assert_run 4 'int main(){enum { N=(0xffffffffffffffffULL>>63)+3 }; int a[N]; return sizeof(a)/sizeof(int);}'
 assert_run 3 'int main(){int a[1 ? 3 : 1/0]; return sizeof(a)/sizeof(int);}'
@@ -94,7 +96,9 @@ assert_reject 'int a[2147483647 + 1]; int main(){return 0;}'
 assert_reject 'int main(){switch(0){case 2147483647 + 1:return 1;}return 0;}'
 assert_reject 'static int x = 2147483647 + 1; int main(){return x;}'
 assert_reject '_Alignas(2147483647 + 1) int x; int main(){return 0;}'
-assert_reject 'int main(){int x=3; int a[x]; return 0;}'
+# A runtime bound is still invalid at file scope; only automatic block-scope
+# arrays may become VLAs in this implementation.
+assert_reject 'int x=3; int a[x]; int main(){return 0;}'
 assert_reject 'int main(){int a[0]; return 0;}'
 assert_reject 'int main(){int a[-1]; return 0;}'
 assert_reject 'int main(){int a[0xffffffffffffffffULL]; return 0;}'
