@@ -52,13 +52,15 @@ assert_run 63 "int main(){return '\\?';}"
 assert_run 34 'int main(){char *s="\"";return s[0];}'
 assert_run 92 'int main(){char *s="\\\\";return s[0];}'
 
-# Ill-formed or out-of-range numeric escapes are diagnosed lexically.
+# Ill-formed, unknown, or out-of-range escapes are diagnosed lexically.
 assert_fail "int main(){return '\\\\x';}\n"
 assert_fail "int main(){return '\\\\400';}\n"
 assert_fail "int main(){return '\\\\x100';}\n"
+assert_fail "int main(){return '\\\\q';}\n"
 assert_fail 'int main(){char *s="\x";return 0;}\n'
 assert_fail 'int main(){char *s="\400";return 0;}\n'
 assert_fail 'int main(){char *s="\x100";return 0;}\n'
+assert_fail 'int main(){char *s="\q";return 0;}\n'
 
 # Raw newlines cannot appear inside ordinary character/string literals.
 assert_fail $'int main(){char *s="abc\ndef";return 0;}\n'
