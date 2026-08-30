@@ -117,6 +117,9 @@ struct Member {
     char *name;
     Type *ty;
     bool is_anonymous; // unnamed C11 struct/union member; nested names are promoted
+    bool is_bitfield;  // integer bit-field (named or unnamed)
+    int bit_width;     // declared width in bits
+    int bit_offset;    // bit offset within the allocation unit at offset
     int align;      // explicit _Alignas requirement, 0 = natural type alignment
     int offset;
 };
@@ -156,6 +159,8 @@ Type *array_of(Type *base, int size);
 Type *func_type(Type *return_ty);
 Type *qualify_type(Type *ty, bool is_const, bool is_volatile, bool is_restrict);
 Type *get_common_type(Type *ty1, Type *ty2);
+Type *get_common_type_for_nodes(Node *lhs, Node *rhs);
+Type *integer_promotion_for_node(Node *node);
 int64_t eval_const_expr(Node *node);
 bool is_null_pointer_constant(Node *node);
 void add_type(Node *node);

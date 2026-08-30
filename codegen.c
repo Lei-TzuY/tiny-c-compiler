@@ -110,6 +110,110 @@ static void store(Type *ty) {
     }
 }
 
+static uint64_t bitfield_mask(int width) {
+    return width == 64 ? UINT64_MAX : ((UINT64_C(1) << width) - 1);
+}
+
+// RAX holds the address of the declared allocation unit. Load it as raw
+// unsigned bits, extract the field, then sign-extend from the field width when
+// the declared base type is signed. _Bool remains the canonical 0/1 value.
+static void load_bitfield(Member *member) {
+    Type *ty = member->ty;
+    if (ty->size == 1)
+        printf("  movzbq (%%rax), %%rax\n");
+    else if (ty->size == 2)
+        printf("  movzwq (%%rax), %%rax\n");
+    else if (ty->size == 4)
+        printf("  mov (%%rax), %%eax\n");
+    else if (ty->size == 8)
+        printf("  mov (%%rax), %%rax\n");
+    else
+        error("unsupported bit-field allocation unit");
+
+    if (member->bit_offset)
+        printf("  shr $%d, %%rax\n", member->bit_offset);
+    if (member->bit_width < 64) {
+        uint64_t mask = bitfield_mask(member->bit_width);
+        printf("  movabs $0x%016" PRIx64 ", %%rdx\n", mask);
+        printf("  and %%rdx, %%rax\n");
+    }
+
+    if (!ty->is_unsigned && ty->kind != TY_BOOL && member->bit_width < 64) {
+        int shift = 64 - member->bit_width;
+        printf("  shl $%d, %%rax\n", shift);
+        printf("  sar $%d, %%rax\n", shift);
+    }
+}
+
+// The address is on the expression stack and RAX holds the value to assign.
+// Merge only the selected bits into the allocation unit so neighboring fields
+// and ordinary bytes sharing that unit remain unchanged. Leave RAX as the
+// converted/truncated value of the assignment expression.
+static void store_bitfield(Member *member) {
+    Type *ty = member->ty;
+    if (ty->kind == TY_BOOL) {
+        printf("  cmp $0, %%rax\n");
+        printf("  setne %%al\n");
+        printf("  movzb %%al, %%rax\n");
+    }
+    uint64_t mask = bitfield_mask(member->bit_width);
+    if (member->bit_width < 64) {
+        printf("  movabs $0x%016" PRIx64 ", %%r10\n", mask);
+        printf("  and %%r10, %%rax\n");
+    }
+
+    pop("%rdi");
+    printf("  mov %%rax, %%rsi\n");
+
+    if (ty->size == 1)
+        printf("  movzbq (%%rdi), %%rdx\n");
+    else if (ty->size == 2)
+        printf("  movzwq (%%rdi), %%rdx\n");
+    else if (ty->size == 4)
+        printf("  mov (%%rdi), %%edx\n");
+    else if (ty->size == 8)
+        printf("  mov (%%rdi), %%rdx\n");
+    else
+        error("unsupported bit-field allocation unit");
+
+    uint64_t shifted = mask << member->bit_offset;
+    uint64_t clear = ~shifted;
+    printf("  movabs $0x%016" PRIx64 ", %%r11\n", clear);
+    printf("  and %%r11, %%rdx\n");
+    if (member->bit_offset)
+        printf("  shl $%d, %%rsi\n", member->bit_offset);
+    printf("  or %%rsi, %%rdx\n");
+
+    if (ty->size == 1)
+        printf("  mov %%dl, (%%rdi)\n");
+    else if (ty->size == 2)
+        printf("  mov %%dx, (%%rdi)\n");
+    else if (ty->size == 4)
+        printf("  mov %%edx, (%%rdi)\n");
+    else
+        printf("  mov %%rdx, (%%rdi)\n");
+
+    if (!ty->is_unsigned && ty->kind != TY_BOOL && member->bit_width < 64) {
+        int shift = 64 - member->bit_width;
+        printf("  shl $%d, %%rax\n", shift);
+        printf("  sar $%d, %%rax\n", shift);
+    }
+}
+
+static void load_lvalue(Node *node) {
+    if (node->kind == ND_MEMBER && node->member && node->member->is_bitfield)
+        load_bitfield(node->member);
+    else
+        load(node->ty);
+}
+
+static void store_lvalue(Node *node) {
+    if (node->kind == ND_MEMBER && node->member && node->member->is_bitfield)
+        store_bitfield(node->member);
+    else
+        store(node->ty);
+}
+
 static void normalize(Type *ty) {
     if (ty->kind == TY_BOOL) {
         printf("  cmp $0, %%rax\n");
@@ -344,19 +448,21 @@ static void gen_inc_dec(Node *node, bool increment, bool return_old) {
 
     gen_addr(node->lhs);
     push();
-    load(node->ty);
+    load_lvalue(node->lhs);
+    bool bitfield = node->lhs->kind == ND_MEMBER && node->lhs->member &&
+                    node->lhs->member->is_bitfield;
     if (return_old)
-        printf("  mov %%rax, %%rsi\n");
+        printf(bitfield ? "  mov %%rax, %%r8\n" : "  mov %%rax, %%rsi\n");
 
     if (increment)
         printf("  add $%d, %%rax\n", step);
     else
         printf("  sub $%d, %%rax\n", step);
 
-    store(node->ty);
+    store_lvalue(node->lhs);
     normalize(node->ty);
     if (return_old)
-        printf("  mov %%rsi, %%rax\n");
+        printf(bitfield ? "  mov %%r8, %%rax\n" : "  mov %%rsi, %%rax\n");
 }
 
 static void gen_compound_assign(Node *node) {
@@ -400,15 +506,15 @@ static void gen_compound_assign(Node *node) {
 
     Type *operation_ty = NULL;
     if (node->kind == ND_DIV_EQ || node->kind == ND_MOD_EQ)
-        operation_ty = get_common_type(node->lhs->ty, node->rhs->ty);
+        operation_ty = get_common_type_for_nodes(node->lhs, node->rhs);
     else if (node->kind == ND_SHR_EQ)
         // Integer promotion of the left operand.  Using int as the second
         // operand is a compact way to request exactly that promotion here.
-        operation_ty = get_common_type(node->lhs->ty, ty_int);
+        operation_ty = integer_promotion_for_node(node->lhs);
 
     gen_addr(node->lhs);
     push();
-    load(node->ty);
+    load_lvalue(node->lhs);
     if (operation_ty)
         cast_value(node->lhs->ty, operation_ty);
     push();
@@ -459,7 +565,7 @@ static void gen_compound_assign(Node *node) {
     default: error("invalid compound assignment");
     }
 
-    store(node->ty);
+    store_lvalue(node->lhs);
     normalize(node->ty);
 }
 
@@ -1016,7 +1122,7 @@ static void gen_expr(Node *node) {
     if (node->kind == ND_MEMBER) {
         gen_addr(node);
         if (node->ty->kind != TY_ARRAY && node->ty->kind != TY_STRUCT)
-            load(node->ty);
+            load_lvalue(node);
         return;
     }
 
@@ -1091,7 +1197,7 @@ static void gen_expr(Node *node) {
         push();
         gen_expr(node->rhs);
         cast_value(node->rhs->ty, node->ty);
-        store(node->ty);
+        store_lvalue(node->lhs);
         normalize(node->ty);
         return;
     }
@@ -1212,7 +1318,7 @@ static void gen_expr(Node *node) {
     Type *common = NULL;
     if ((arithmetic || comparison) && node->lhs->ty && node->rhs->ty &&
         is_numeric(node->lhs->ty) && is_numeric(node->rhs->ty))
-        common = get_common_type(node->lhs->ty, node->rhs->ty);
+        common = get_common_type_for_nodes(node->lhs, node->rhs);
 
     if (common && is_flonum(common)) {
         gen_expr(node->rhs);

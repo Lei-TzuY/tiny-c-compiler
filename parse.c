@@ -541,6 +541,9 @@ static void reject_register_array_decay(Node *node) {
 static bool is_addressable_expr(Node *node) {
     add_type(node);
 
+    if (node->kind == ND_MEMBER && node->member && node->member->is_bitfield)
+        return false;
+
     // A function designator is not an lvalue in C, but unary & is explicitly
     // permitted on one. Both a named function and *function_pointer reach
     // here with TY_FUNC.
@@ -864,6 +867,25 @@ static Type *new_record_type(bool is_union) {
     return ty;
 }
 
+static int parse_bitfield_width(Token **rest, Token *tok, Type *ty,
+                                Token *where) {
+    if (!is_integer(ty))
+        error_at(where->loc, "bit-field has non-integer type");
+
+    Node *width_expr = ternary(&tok, tok);
+    add_type(width_expr);
+    if (!is_integer(width_expr->ty))
+        error_at(where->loc, "bit-field width must be an integer constant expression");
+    int64_t width = eval_const_expr(width_expr);
+    int max_width = ty->kind == TY_BOOL ? 1 : ty->size * 8;
+    if (width < 0)
+        error_at(where->loc, "negative width in bit-field");
+    if (width > max_width)
+        error_at(where->loc, "bit-field width exceeds its type");
+    *rest = tok;
+    return (int)width;
+}
+
 // Parse both struct and union specifiers. A tagged record is inserted into the
 // current tag scope before its body is parsed so self-referential pointers work.
 // Completing a forward declaration mutates the same Type object, which keeps
@@ -958,42 +980,70 @@ static Type *record_decl(Token **rest, Token *tok, bool is_union) {
             if (!first)
                 tok = skip(tok, ",");
 
-            Token *ident;
-            Type *mty = declarator(&tok, tok, basety, &ident);
-            if (mty->kind == TY_VOID)
-                error_at(ident->loc, "record member cannot have void type");
-            if (mty->kind == TY_FUNC)
-                error_at(ident->loc, "record member cannot have function type");
-            bool flexible = mty->kind == TY_ARRAY && mty->array_len == 0;
+            Token *ident = NULL;
+            Type *mty = basety;
+            Token *member_at = tok;
+            bool is_bitfield = false;
+            int bit_width = 0;
 
-            if (flexible) {
-                if (is_union)
-                    error_at(ident->loc, "flexible array member is not allowed in a union");
-                if (!head.next)
-                    error_at(ident->loc,
-                             "flexible array member requires a preceding named member");
-                if (!equal(tok, ";") || !equal(tok->next, "}"))
-                    error_at(ident->loc, "flexible array member must be the last member");
-                has_flexible_member = true;
-            } else {
-                if (is_incomplete_object_type(mty))
-                    error_at(ident->loc, "field has incomplete type");
-                if (!is_union && mty->kind == TY_STRUCT &&
-                    mty->contains_flexible_array_member)
-                    error_at(ident->loc,
-                             "record recursively containing a flexible array member cannot be embedded in a struct");
+            // struct-declarator permits an omitted declarator for an unnamed
+            // bit-field: `unsigned : 3`. Otherwise parse the ordinary member
+            // declarator first and then its optional `: constant-expression`.
+            if (!equal(tok, ":"))
+                mty = declarator(&tok, tok, basety, &ident);
+
+            if (equal(tok, ":")) {
+                Token *colon = tok;
+                tok = tok->next;
+                bit_width = parse_bitfield_width(&tok, tok, mty, colon);
+                is_bitfield = true;
+                if (attrs.align)
+                    error_at(member_at->loc, "_Alignas is not allowed on a bit-field");
+                if (bit_width == 0 && ident)
+                    error_at(ident->loc, "zero-width bit-field must be unnamed");
             }
 
-            MemberPath *duplicate =
-                find_record_member_path_in_list(head.next, ident);
-            if (duplicate)
-                error_at(ident->loc, "duplicate record member name");
-            free_member_path(duplicate);
+            if (!is_bitfield) {
+                if (mty->kind == TY_VOID)
+                    error_at(ident->loc, "record member cannot have void type");
+                if (mty->kind == TY_FUNC)
+                    error_at(ident->loc, "record member cannot have function type");
+                bool flexible = mty->kind == TY_ARRAY && mty->array_len == 0;
+
+                if (flexible) {
+                    if (is_union)
+                        error_at(ident->loc, "flexible array member is not allowed in a union");
+                    if (!head.next)
+                        error_at(ident->loc,
+                                 "flexible array member requires a preceding named member");
+                    if (!equal(tok, ";") || !equal(tok->next, "}"))
+                        error_at(ident->loc, "flexible array member must be the last member");
+                    has_flexible_member = true;
+                } else {
+                    if (is_incomplete_object_type(mty))
+                        error_at(ident->loc, "field has incomplete type");
+                    if (!is_union && mty->kind == TY_STRUCT &&
+                        mty->contains_flexible_array_member)
+                        error_at(ident->loc,
+                                 "record recursively containing a flexible array member cannot be embedded in a struct");
+                }
+            }
+
+            if (ident) {
+                MemberPath *duplicate =
+                    find_record_member_path_in_list(head.next, ident);
+                if (duplicate)
+                    error_at(ident->loc, "duplicate record member name");
+                free_member_path(duplicate);
+            }
 
             Member *m = calloc(1, sizeof(Member));
-            m->name = strndup(ident->loc, ident->len);
+            if (ident)
+                m->name = strndup(ident->loc, ident->len);
             m->ty = mty;
-            m->align = validate_requested_alignment(mty, attrs.align, ident);
+            m->is_bitfield = is_bitfield;
+            m->bit_width = bit_width;
+            m->align = is_bitfield ? 0 : validate_requested_alignment(mty, attrs.align, ident);
             cur = cur->next = m;
         }
     }
@@ -1003,6 +1053,19 @@ static Type *record_decl(Token **rest, Token *tok, bool is_union) {
     if (is_union) {
         int size = 0;
         for (Member *m = head.next; m; m = m->next) {
+            if (m->is_bitfield) {
+                m->offset = 0;
+                m->bit_offset = 0;
+                if (!m->name || m->bit_width == 0)
+                    continue;
+                if (m->ty->size > size)
+                    size = m->ty->size;
+                int ma = m->ty->align > 0 ? m->ty->align : 1;
+                if (ma > align)
+                    align = ma;
+                continue;
+            }
+
             if (m->ty->size > size)
                 size = m->ty->size;
             int ma = m->align > 0 ? m->align : (m->ty->align > 0 ? m->ty->align : 1);
@@ -1012,16 +1075,43 @@ static Type *record_decl(Token **rest, Token *tok, bool is_union) {
         }
         ty->size = align_up(size, align);
     } else {
-        int offset = 0;
+        int bitpos = 0;
         for (Member *m = head.next; m; m = m->next) {
+            if (m->is_bitfield) {
+                int unit_bits = m->ty->size * 8;
+                if (m->bit_width == 0) {
+                    bitpos = align_up(bitpos, unit_bits);
+                    m->offset = bitpos / 8;
+                    m->bit_offset = 0;
+                    continue;
+                }
+
+                int unit_start = (bitpos / unit_bits) * unit_bits;
+                if (bitpos + m->bit_width > unit_start + unit_bits) {
+                    bitpos = align_up(bitpos, unit_bits);
+                    unit_start = bitpos;
+                }
+                m->offset = unit_start / 8;
+                m->bit_offset = bitpos - unit_start;
+                bitpos += m->bit_width;
+
+                if (m->name) {
+                    int ma = m->ty->align > 0 ? m->ty->align : 1;
+                    if (ma > align)
+                        align = ma;
+                }
+                continue;
+            }
+
+            int offset = (bitpos + 7) / 8;
             int ma = m->align > 0 ? m->align : (m->ty->align > 0 ? m->ty->align : 1);
             offset = align_up(offset, ma);
             m->offset = offset;
-            offset += m->ty->size;
+            bitpos = (offset + m->ty->size) * 8;
             if (ma > align)
                 align = ma;
         }
-        ty->size = align_up(offset, align);
+        ty->size = align_up((bitpos + 7) / 8, align);
     }
 
     bool contains_flexible_member = has_flexible_member;
@@ -2642,6 +2732,16 @@ static void append_automatic_scalar_initializer(Node **tail, Node *lhs,
 }
 
 
+static bool is_initializable_record_member(Member *m) {
+    return m && !(m->is_bitfield && !m->name);
+}
+
+static Member *next_initializable_record_member(Member *m) {
+    while (m && !is_initializable_record_member(m))
+        m = m->next;
+    return m;
+}
+
 // Append zero-initialization statements for an automatic aggregate subobject.
 // C requires omitted array elements and record members to be initialized as if
 // they had static storage duration. Recurse so omitted nested aggregates are
@@ -2657,7 +2757,7 @@ static void append_zero_initializer(Node **tail, Node *lhs, Type *ty, Token *whe
 
     if (ty->kind == TY_STRUCT) {
         if (ty->is_union) {
-            Member *m = ty->members;
+            Member *m = next_initializable_record_member(ty->members);
             if (m) {
                 Node *member = new_node(ND_MEMBER);
                 member->lhs = lhs;
@@ -2668,6 +2768,8 @@ static void append_zero_initializer(Node **tail, Node *lhs, Type *ty, Token *whe
         }
 
         for (Member *m = ty->members; m; m = m->next) {
+            if (!is_initializable_record_member(m))
+                continue;
             Node *member = new_node(ND_MEMBER);
             member->lhs = lhs;
             member->member = m;
@@ -2919,6 +3021,44 @@ static void write_static_integer_bytes(Obj *var, int offset, Type *ty, int64_t v
         var->init_image[offset + i] = (char)(bits >> (i * 8));
 }
 
+static void write_static_bitfield(Obj *var, int offset, Member *member,
+                                  int64_t val) {
+    int bytes = member->ty->size;
+    int width = member->bit_width;
+    ensure_static_image(var, offset + bytes);
+
+    uint64_t unit = 0;
+    for (int i = 0; i < bytes; i++)
+        unit |= (uint64_t)(unsigned char)var->init_image[offset + i] << (i * 8);
+
+    uint64_t mask = width == 64 ? UINT64_MAX : ((UINT64_C(1) << width) - 1);
+    uint64_t shifted = mask << member->bit_offset;
+    unit = (unit & ~shifted) |
+           ((((uint64_t)val) & mask) << member->bit_offset);
+
+    for (int i = 0; i < bytes; i++)
+        var->init_image[offset + i] = (char)(unit >> (i * 8));
+}
+
+static void parse_static_bitfield_initializer(Obj *var, Token **rest, Token *tok,
+                                              Member *member, int offset) {
+    if (equal(tok, "{")) {
+        Token *brace = tok;
+        tok = tok->next;
+        if (equal(tok, "}"))
+            error_at(brace->loc, "empty scalar initializer");
+        parse_static_bitfield_initializer(var, &tok, tok, member, offset);
+        if (equal(tok, ","))
+            tok = tok->next;
+        *rest = skip(tok, "}");
+        return;
+    }
+
+    int64_t val = parse_static_integer_initializer(&tok, tok, member->ty);
+    write_static_bitfield(var, offset, member, val);
+    *rest = tok;
+}
+
 static void parse_static_image_scalar(Obj *var, Token **rest, Token *tok,
                                       Type *ty, int offset) {
     reset_static_subobject(var, offset, ty->size);
@@ -2974,6 +3114,7 @@ typedef struct {
     Type *target_ty;
     int first_index;
     Member *first_member;
+    Member *last_member;
     int depth;
 } InitializerDesignatorPath;
 
@@ -3012,6 +3153,7 @@ parse_initializer_designator_path(Token **rest, Token *tok, Type *root_ty) {
             step->result_ty = cur->base;
             if (path.depth == 0)
                 path.first_index = index;
+            path.last_member = NULL;
             cur = cur->base;
             append_initializer_designator_step(&path, step);
             continue;
@@ -3036,6 +3178,7 @@ parse_initializer_designator_path(Token **rest, Token *tok, Type *root_ty) {
             step->result_ty = mp->member->ty;
             if (path.depth == 0)
                 path.first_member = mp->member;
+            path.last_member = mp->member;
             cur = mp->member->ty;
             append_initializer_designator_step(&path, step);
         }
@@ -3171,6 +3314,8 @@ static void parse_static_image_elided(Obj *var, Token **rest, Token *tok,
     ensure_static_image(var, offset + ty->size);
     int initialized = 0;
     for (Member *m = ty->members; m; m = m->next) {
+        if (!is_initializable_record_member(m))
+            continue;
         if (initialized > 0) {
             if (equal(tok, "}"))
                 break;
@@ -3183,23 +3328,28 @@ static void parse_static_image_elided(Obj *var, Token **rest, Token *tok,
 
         if (ty->is_union)
             select_static_union_member(var, ty, offset, m);
-        else
-            reset_static_subobject(var, offset + m->offset, m->ty->size);
 
         int child_offset = offset + m->offset;
-        if (parse_static_string_array_initializer(var, &tok, tok,
-                                                   m->ty, child_offset)) {
-            initialized++;
-        } else if (is_initializer_aggregate(m->ty) && !equal(tok, "{")) {
-            parse_static_image_elided(var, &tok, tok, m->ty,
-                                      child_offset, where);
+        if (m->is_bitfield) {
+            parse_static_bitfield_initializer(var, &tok, tok, m, child_offset);
             initialized++;
         } else {
-            Type *parsed = parse_static_image_initializer(var, &tok, tok,
-                                                          m->ty, child_offset);
-            if (parsed != m->ty)
-                error_at(where->loc, "incomplete array record members are not supported");
-            initialized++;
+            if (!ty->is_union)
+                reset_static_subobject(var, child_offset, m->ty->size);
+            if (parse_static_string_array_initializer(var, &tok, tok,
+                                                       m->ty, child_offset)) {
+                initialized++;
+            } else if (is_initializer_aggregate(m->ty) && !equal(tok, "{")) {
+                parse_static_image_elided(var, &tok, tok, m->ty,
+                                          child_offset, where);
+                initialized++;
+            } else {
+                Type *parsed = parse_static_image_initializer(var, &tok, tok,
+                                                              m->ty, child_offset);
+                if (parsed != m->ty)
+                    error_at(where->loc, "incomplete array record members are not supported");
+                initialized++;
+            }
         }
 
         if (ty->is_union)
@@ -3264,12 +3414,18 @@ static Type *parse_static_image_initializer(Obj *var, Token **rest, Token *tok,
 
                 int index = path.first_index;
                 Type *target_ty = path.target_ty;
+                Member *target_member = path.last_member;
                 int target_offset = apply_static_designator_path(var, ty, offset, &path);
-                reset_static_subobject(var, target_offset, target_ty->size);
+                bool target_bitfield = target_member && target_member->is_bitfield;
+                if (!target_bitfield)
+                    reset_static_subobject(var, target_offset, target_ty->size);
                 free_initializer_designator_path(&path);
 
-                if (parse_static_string_array_initializer(var, &tok, tok,
-                                                           target_ty, target_offset)) {
+                if (target_bitfield) {
+                    parse_static_bitfield_initializer(var, &tok, tok,
+                                                      target_member, target_offset);
+                } else if (parse_static_string_array_initializer(var, &tok, tok,
+                                                                  target_ty, target_offset)) {
                     // String literal consumed as the designated character array.
                 } else {
                     Type *parsed = parse_static_image_initializer(var, &tok, tok,
@@ -3321,7 +3477,7 @@ static Type *parse_static_image_initializer(Obj *var, Token **rest, Token *tok,
     }
 
     ensure_static_image(var, offset + ty->size);
-    Member *next_member = ty->members;
+    Member *next_member = next_initializable_record_member(ty->members);
     bool first = true;
     int initialized_members = 0;
     while (!equal(tok, "}")) {
@@ -3342,13 +3498,19 @@ static Type *parse_static_image_initializer(Obj *var, Token **rest, Token *tok,
                 error_at(brace->loc, "record initializer designator must start with a member");
 
             Member *member = path.first_member;
+            Member *target_member = path.last_member;
             Type *target_ty = path.target_ty;
             int target_offset = apply_static_designator_path(var, ty, offset, &path);
-            reset_static_subobject(var, target_offset, target_ty->size);
+            bool target_bitfield = target_member && target_member->is_bitfield;
+            if (!target_bitfield)
+                reset_static_subobject(var, target_offset, target_ty->size);
             free_initializer_designator_path(&path);
 
-            if (parse_static_string_array_initializer(var, &tok, tok,
-                                                       target_ty, target_offset)) {
+            if (target_bitfield) {
+                parse_static_bitfield_initializer(var, &tok, tok,
+                                                  target_member, target_offset);
+            } else if (parse_static_string_array_initializer(var, &tok, tok,
+                                                              target_ty, target_offset)) {
                 // String literal consumed as the designated character array.
             } else {
                 Type *parsed = parse_static_image_initializer(var, &tok, tok,
@@ -3358,7 +3520,7 @@ static Type *parse_static_image_initializer(Obj *var, Token **rest, Token *tok,
             }
 
             initialized_members++;
-            next_member = member->next;
+            next_member = next_initializable_record_member(member->next);
             continue;
         }
 
@@ -3370,24 +3532,28 @@ static Type *parse_static_image_initializer(Obj *var, Token **rest, Token *tok,
         // member participates in the same active-member state as designators.
         if (ty->is_union)
             select_static_union_member(var, ty, offset, member);
-        else
-            reset_static_subobject(var, offset + member->offset, member->ty->size);
 
         int member_offset = offset + member->offset;
-        if (parse_static_string_array_initializer(var, &tok, tok,
-                                                   member->ty, member_offset)) {
-            // Character-array string initializer consumed as one subobject.
-        } else if (is_initializer_aggregate(member->ty) && !equal(tok, "{")) {
-            parse_static_image_elided(var, &tok, tok, member->ty,
-                                      member_offset, brace);
+        if (member->is_bitfield) {
+            parse_static_bitfield_initializer(var, &tok, tok, member, member_offset);
         } else {
-            Type *parsed = parse_static_image_initializer(var, &tok, tok,
-                                                          member->ty, member_offset);
-            if (parsed != member->ty)
-                error_at(brace->loc, "incomplete array record members are not supported");
+            if (!ty->is_union)
+                reset_static_subobject(var, member_offset, member->ty->size);
+            if (parse_static_string_array_initializer(var, &tok, tok,
+                                                       member->ty, member_offset)) {
+                // Character-array string initializer consumed as one subobject.
+            } else if (is_initializer_aggregate(member->ty) && !equal(tok, "{")) {
+                parse_static_image_elided(var, &tok, tok, member->ty,
+                                          member_offset, brace);
+            } else {
+                Type *parsed = parse_static_image_initializer(var, &tok, tok,
+                                                              member->ty, member_offset);
+                if (parsed != member->ty)
+                    error_at(brace->loc, "incomplete array record members are not supported");
+            }
         }
         initialized_members++;
-        next_member = member->next;
+        next_member = next_initializable_record_member(member->next);
     }
 
     *rest = skip(tok, "}");
@@ -3498,7 +3664,7 @@ static void parse_automatic_aggregate_subobject(Node **tail, Node *lhs, Type *ty
                 before_init->next = zero_head.next;
             }
         } else {
-            Member *next_member = ty->members;
+            Member *next_member = next_initializable_record_member(ty->members);
             bool first = true;
             int initialized_union_members = 0;
 
@@ -3530,7 +3696,7 @@ static void parse_automatic_aggregate_subobject(Node **tail, Node *lhs, Type *ty
                                                             where);
                     if (ty->is_union)
                         initialized_union_members++;
-                    next_member = member->next;
+                    next_member = next_initializable_record_member(member->next);
                     continue;
                 }
 
@@ -3554,7 +3720,7 @@ static void parse_automatic_aggregate_subobject(Node **tail, Node *lhs, Type *ty
 
                 if (ty->is_union)
                     initialized_union_members++;
-                next_member = next_member->next;
+                next_member = next_initializable_record_member(next_member->next);
             }
         }
 
@@ -3595,6 +3761,8 @@ static void parse_automatic_aggregate_subobject(Node **tail, Node *lhs, Type *ty
     } else {
         int initialized = 0;
         for (Member *m = ty->members; m; m = m->next) {
+            if (!is_initializable_record_member(m))
+                continue;
             if (initialized > 0) {
                 if (equal(tok, "}"))
                     break;
@@ -3814,7 +3982,9 @@ static Node *declaration(Token **rest, Token *tok) {
             bool *elem_init = ty->kind == TY_ARRAY ? calloc(elem_cap, sizeof(bool)) : NULL;
             int member_count = ty->kind == TY_STRUCT ? record_member_count(ty) : 0;
             bool *member_init = member_count ? calloc(member_count, sizeof(bool)) : NULL;
-            Member *cur_mem = (ty->kind == TY_STRUCT) ? ty->members : NULL;
+            Member *cur_mem = (ty->kind == TY_STRUCT)
+                                  ? next_initializable_record_member(ty->members)
+                                  : NULL;
             Member *active_union_member = NULL;
             Node *before_init = block_cur;
             int initialized_union_members = 0;
@@ -3875,7 +4045,7 @@ static Node *declaration(Token **rest, Token *tok) {
                             was_initialized = member_init[mi];
                         }
                         member_init[mi] = true;
-                        cur_mem = member->next;
+                        cur_mem = next_initializable_record_member(member->next);
                         if (ty->is_union)
                             initialized_union_members++;
                     }
@@ -3943,7 +4113,7 @@ static Node *declaration(Token **rest, Token *tok) {
                     }
                     if (ty->is_union)
                         initialized_union_members++;
-                    cur_mem = cur_mem->next;
+                    cur_mem = next_initializable_record_member(cur_mem->next);
                 }
             }
             tok = skip(tok, "}");
@@ -3969,8 +4139,8 @@ static Node *declaration(Token **rest, Token *tok) {
                     append_zero_initializer(&zero_cur, lhs, ty->base, brace);
                 }
             } else if (ty->is_union) {
-                if (!initialized_union_members && ty->members) {
-                    Member *m = ty->members;
+                Member *m = next_initializable_record_member(ty->members);
+                if (!initialized_union_members && m) {
                     Node *member = new_node(ND_MEMBER);
                     member->lhs = new_var_node(var);
                     member->member = m;
@@ -3979,6 +4149,7 @@ static Node *declaration(Token **rest, Token *tok) {
             } else {
                 int mi = 0;
                 for (Member *m = ty->members; m; m = m->next, mi++) {
+                    if (!is_initializable_record_member(m)) continue;
                     if (mi < member_count && member_init[mi]) continue;
                     Node *member = new_node(ND_MEMBER);
                     member->lhs = new_var_node(var);
@@ -4146,7 +4317,7 @@ static Node *stmt(Token **rest, Token *tok) {
         // The controlling expression undergoes integer promotion.  Using int
         // as the second operand requests exactly that promotion for the small
         // integer types supported by this LP64 target.
-        node->ty = get_common_type(node->cond->ty, ty_int);
+        node->ty = integer_promotion_for_node(node->cond);
         tok = skip(tok, ")");
         require_control_substatement(tok, "switch");
 
@@ -5290,6 +5461,8 @@ static Node *primary(Token **rest, Token *tok) {
         }
         Node *n = unary(rest, tok);
         add_type(n);
+        if (n->kind == ND_MEMBER && n->member && n->member->is_bitfield)
+            error_at(tok->loc, "sizeof may not be applied to a bit-field");
         if (invalid_sizeof_type(n->ty))
             error_at(tok->loc, "invalid operand type for sizeof");
         return new_size_t_num(n->ty->size);

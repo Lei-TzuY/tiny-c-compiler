@@ -98,9 +98,27 @@ static bool classify_sysv_type(Type *ty, int offset, SysVAbiClass classes[2]) {
     if (ty->kind == TY_STRUCT) {
         if (ty->is_incomplete || !ty->members)
             return false;
-        for (Member *m = ty->members; m; m = m->next)
+        for (Member *m = ty->members; m; m = m->next) {
+            if (m->is_bitfield) {
+                // Unnamed bit-fields are padding, not value-bearing members.
+                // A named bit-field contributes INTEGER only to the eightbytes
+                // containing its actual bits, rather than pessimistically
+                // classifying the complete declared allocation unit.
+                if (!m->name || m->bit_width == 0)
+                    continue;
+                int first_bit = (offset + m->offset) * 8 + m->bit_offset;
+                int last_bit = first_bit + m->bit_width - 1;
+                int first = first_bit / 64;
+                int last = last_bit / 64;
+                if (first < 0 || last >= 2)
+                    return false;
+                for (int i = first; i <= last; i++)
+                    classes[i] = merge_sysv_class(classes[i], SYSV_ABI_INTEGER);
+                continue;
+            }
             if (!classify_sysv_type(m->ty, offset + m->offset, classes))
                 return false;
+        }
         return true;
     }
 
@@ -275,6 +293,34 @@ Type *get_common_type(Type *ty1, Type *ty2) {
         return s;
 
     return unsigned_integer_type(s);
+}
+
+// C integer promotions treat a bit-field according to the range represented by
+// its declared width, not merely the nominal base type. In particular, narrow
+// unsigned int/long extension bit-fields whose values all fit in int promote to
+// int. This is observable in mixed signed arithmetic and comparisons.
+Type *integer_promotion_for_node(Node *node) {
+    if (!node || !node->ty || !is_integer(node->ty))
+        return node ? node->ty : NULL;
+
+    if (node->kind == ND_MEMBER && node->member && node->member->is_bitfield) {
+        int width = node->member->bit_width;
+        if (width < 32)
+            return ty_int;
+        if (width == 32)
+            return node->ty->is_unsigned ? ty_uint : ty_int;
+    }
+    return integer_promotion(node->ty);
+}
+
+Type *get_common_type_for_nodes(Node *lhs, Node *rhs) {
+    Type *a = lhs ? lhs->ty : NULL;
+    Type *b = rhs ? rhs->ty : NULL;
+    if (a && is_integer(a))
+        a = integer_promotion_for_node(lhs);
+    if (b && is_integer(b))
+        b = integer_promotion_for_node(rhs);
+    return get_common_type(a, b);
 }
 
 static bool is_scalar_operand(Type *ty) {
@@ -462,7 +508,7 @@ void add_type(Node *node) {
         }
         if (!is_numeric(node->lhs->ty) || !is_numeric(node->rhs->ty))
             error("invalid arithmetic operands");
-        node->ty = get_common_type(node->lhs->ty, node->rhs->ty);
+        node->ty = get_common_type_for_nodes(node->lhs, node->rhs);
         return;
 
     case ND_SUB:
@@ -479,14 +525,14 @@ void add_type(Node *node) {
             error("invalid arithmetic operands");
         if (!is_numeric(node->lhs->ty) || !is_numeric(node->rhs->ty))
             error("invalid arithmetic operands");
-        node->ty = get_common_type(node->lhs->ty, node->rhs->ty);
+        node->ty = get_common_type_for_nodes(node->lhs, node->rhs);
         return;
 
     case ND_MUL:
     case ND_DIV:
         if (!is_numeric(node->lhs->ty) || !is_numeric(node->rhs->ty))
             error("invalid arithmetic operands");
-        node->ty = get_common_type(node->lhs->ty, node->rhs->ty);
+        node->ty = get_common_type_for_nodes(node->lhs, node->rhs);
         return;
 
     case ND_MOD:
@@ -495,7 +541,7 @@ void add_type(Node *node) {
     case ND_BITXOR:
         if (!is_integer(node->lhs->ty) || !is_integer(node->rhs->ty))
             error("integer operands required");
-        node->ty = get_common_type(node->lhs->ty, node->rhs->ty);
+        node->ty = get_common_type_for_nodes(node->lhs, node->rhs);
         return;
 
     case ND_SHL:
@@ -505,7 +551,7 @@ void add_type(Node *node) {
         // Each operand is integer-promoted independently; unlike ordinary
         // arithmetic there is no common type, and the result has the promoted
         // type of the left operand.
-        node->ty = integer_promotion(node->lhs->ty);
+        node->ty = integer_promotion_for_node(node->lhs);
         return;
 
     case ND_POS:
@@ -520,7 +566,7 @@ void add_type(Node *node) {
     case ND_BITNOT:
         if (!is_integer(node->lhs->ty))
             error("integer operand required");
-        node->ty = integer_promotion(node->lhs->ty);
+        node->ty = integer_promotion_for_node(node->lhs);
         return;
 
     case ND_LOGAND:
@@ -576,7 +622,7 @@ void add_type(Node *node) {
             error("scalar condition required for conditional operator");
 
         if (is_numeric(node->then->ty) && is_numeric(node->els->ty)) {
-            node->ty = get_common_type(node->then->ty, node->els->ty);
+            node->ty = get_common_type_for_nodes(node->then, node->els);
             return;
         }
 
