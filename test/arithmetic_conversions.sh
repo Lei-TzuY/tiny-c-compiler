@@ -34,6 +34,19 @@ assert_run 1 'int main(){return ((long)-1)<(unsigned int)1;}'
 assert_run 1 'int main(){unsigned int a=4;long b=-2;return a/b==-2;}'
 assert_run 1 'int main(){unsigned int a=5;long b=-2;return a%b==1;}'
 
+# When the unsigned operand has the same or greater conversion rank and the
+# signed type cannot represent its full range, both operands convert to the
+# corresponding unsigned type.  This must affect both instruction selection
+# and the value actually carried in the register.
+assert_run 0 'int main(){long a=-1;unsigned long b=1;return a<b;}'
+assert_run 1 'int main(){long a=-1;unsigned long b=1;return a>b;}'
+assert_run 1 'int main(){unsigned long a=4;long b=-2;return a/b==0;}'
+assert_run 1 'int main(){unsigned long a=5;long b=-2;return a%b==5;}'
+assert_run 0 'int main(){long long a=-1;unsigned long b=1;return a<b;}'
+assert_run 1 'int main(){long long a=-1;unsigned long b=1;return a>b;}'
+assert_run 1 'int main(){return (1?(long)-1:(unsigned long)1)==(unsigned long)-1;}'
+assert_run 1 'int main(){return (1?(long long)-1:(unsigned long)1)==(unsigned long long)-1;}'
+
 # Conditional arithmetic alternatives use the same converted result type.
 assert_run 1 'int main(){return (1?(long)-1:(unsigned int)1)<0;}'
 
