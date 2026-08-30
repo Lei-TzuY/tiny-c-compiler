@@ -30,7 +30,9 @@ trap cleanup EXIT
 grep -F -- '-M' tmp-deps-help.out >/dev/null || fail '--help missing -M'
 grep -F -- '-MD' tmp-deps-help.out >/dev/null || fail '--help missing -MD'
 grep -F -- '-MF <file>' tmp-deps-help.out >/dev/null || fail '--help missing -MF'
+grep -F -- '-MP' tmp-deps-help.out >/dev/null || fail '--help missing -MP'
 grep -F -- '-MT <target>' tmp-deps-help.out >/dev/null || fail '--help missing -MT'
+grep -F -- '-MQ <target>' tmp-deps-help.out >/dev/null || fail '--help missing -MQ'
 
 mkdir -p tmp-deps-tree/sub 'tmp-deps-space dir'
 cat > tmp-deps-tree/sub/leaf.h <<'EOF'
@@ -69,11 +71,11 @@ EOF
 # Repeated path aliases of the same inode collapse to one prerequisite, builtin
 # headers are not fabricated as filesystem dependencies, and Make metacharacters
 # in paths/targets are escaped.
-./minicc -M -MT 'build target.s' tmp-deps-main.c > tmp-deps-basic.mk
+./minicc -M -MQ 'build target.s' tmp-deps-main.c > tmp-deps-basic.mk
 first=$(head -n 1 tmp-deps-basic.mk)
 case "$first" in
   'build\ target.s:'*) ;;
-  *) fail "-MT target was not Make-escaped: $first" ;;
+  *) fail "-MQ target was not Make-escaped: $first" ;;
 esac
 grep -F 'tmp-deps-main.c' tmp-deps-basic.mk >/dev/null || fail 'source prerequisite missing'
 grep -F 'tmp-deps-tree/root.h' tmp-deps-basic.mk >/dev/null || fail 'root dependency missing'
@@ -84,6 +86,28 @@ grep -F 'tmp-deps-space\ dir/space\ header.h' tmp-deps-basic.mk >/dev/null || fa
 ! grep -F 'root-hard.h' tmp-deps-basic.mk >/dev/null || fail 'hardlink alias leaked into dependency list'
 ! grep -F 'extra.h' tmp-deps-basic.mk >/dev/null || fail 'inactive include became a dependency'
 ! grep -F 'stddef.h' tmp-deps-basic.mk >/dev/null || fail 'builtin header became a filesystem dependency'
+
+
+# -MT is intentionally exact while -MQ performs Make quoting. Repeated and
+# mixed target options are additive and retain argv order, matching CPP.
+./minicc -M -MT '$(objpfx)raw.o' -MQ 'quoted target.o' -MT plain.o tmp-deps-main.c > tmp-deps-targets.mk
+target_line=$(head -n 1 tmp-deps-targets.mk)
+case "$target_line" in
+  '$(objpfx)raw.o quoted\ target.o plain.o:'*) ;;
+  *) fail "mixed -MT/-MQ target ordering or quoting is wrong: $target_line" ;;
+esac
+./minicc -M '-MQattached target.o' tmp-deps-main.c > tmp-deps-mq-attached.mk
+grep -F 'attached\ target.o:' tmp-deps-mq-attached.mk >/dev/null || fail 'attached -MQ form failed'
+
+# -MP emits one empty phony rule for every unique physical header prerequisite,
+# but never for the main source or compiler-provided builtin headers.
+./minicc -M -MP -MF tmp-deps-phony.mk tmp-deps-main.c
+grep -Fx 'tmp-deps-tree/root.h:' tmp-deps-phony.mk >/dev/null || fail '-MP root phony rule missing'
+grep -Fx 'tmp-deps-tree/sub/leaf.h:' tmp-deps-phony.mk >/dev/null || fail '-MP nested phony rule missing'
+grep -Fx 'tmp-deps-space\ dir/space\ header.h:' tmp-deps-phony.mk >/dev/null || fail '-MP escaped phony rule missing'
+[ "$(grep -Fx -c 'tmp-deps-tree/root.h:' tmp-deps-phony.mk || true)" -eq 1 ] || fail '-MP duplicated a physical header rule'
+! grep -Fx 'tmp-deps-main.c:' tmp-deps-phony.mk >/dev/null || fail '-MP emitted a phony rule for the main source'
+! grep -Fx 'stddef.h:' tmp-deps-phony.mk >/dev/null || fail '-MP emitted a phony rule for a builtin header'
 
 # Command-line macros influence conditional dependency discovery because -M uses
 # the same preprocessor as ordinary compilation.
@@ -129,10 +153,13 @@ grep -F 'tmp-deps-tree/build.v1/program.s:' tmp-deps-tree/build.v1/program.d >/d
 assert_reject "'-M' and '-MD' are mutually exclusive" ./minicc -M -MD tmp-deps-main.c
 assert_reject "'-M' is mutually exclusive" ./minicc -M -S tmp-deps-main.c
 assert_reject "'-MD' is not supported with '-E' or '-fsyntax-only'" ./minicc -MD -E tmp-deps-main.c
-assert_reject "'-MF' and '-MT' require '-M' or '-MD'" ./minicc -MF tmp-deps-orphan.mk tmp-deps-main.c
-assert_reject "'-MF' and '-MT' require '-M' or '-MD'" ./minicc -MT orphan tmp-deps-main.c
+assert_reject "'-MF', '-MP', '-MT' and '-MQ' require '-M' or '-MD'" ./minicc -MF tmp-deps-orphan.mk tmp-deps-main.c
+assert_reject "'-MF', '-MP', '-MT' and '-MQ' require '-M' or '-MD'" ./minicc -MP tmp-deps-main.c
+assert_reject "'-MF', '-MP', '-MT' and '-MQ' require '-M' or '-MD'" ./minicc -MT orphan tmp-deps-main.c
+assert_reject "'-MF', '-MP', '-MT' and '-MQ' require '-M' or '-MD'" ./minicc -MQ orphan tmp-deps-main.c
 assert_reject "missing argument after '-MF'" ./minicc -M -MF
 assert_reject "missing argument after '-MT'" ./minicc -M -MT
+assert_reject "missing argument after '-MQ'" ./minicc -M -MQ
 assert_reject "'-o' is not supported with '-M'; use '-MF'" ./minicc -M -o tmp-deps-bad.mk tmp-deps-main.c
 assert_reject 'dependency generation requires a named input file' ./minicc -M -
 assert_reject 'dependency output and compiler output cannot both use standard output' \

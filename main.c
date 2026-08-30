@@ -11,12 +11,21 @@ typedef enum {
     DRIVER_SYNTAX_ONLY,
 } DriverMode;
 
+typedef struct DependencyTarget DependencyTarget;
+struct DependencyTarget {
+    DependencyTarget *next;
+    char *text;
+    bool quote_for_make;
+};
+
 typedef struct {
     DriverMode mode;
     char *input_path;
     char *output_path;
     char *dependency_output_path;
-    char *dependency_target;
+    DependencyTarget *dependency_targets;
+    DependencyTarget *dependency_targets_tail;
+    bool dependency_phony;
     bool dependency_side_effect;
     bool exit_after_options;
 } DriverOptions;
@@ -35,7 +44,9 @@ static void print_usage(FILE *out, const char *prog) {
             "  -M               Emit Make dependencies only\n"
             "  -MD              Compile and also emit a .d dependency file\n"
             "  -MF <file>       Write dependencies to <file>\n"
-            "  -MT <target>     Set the dependency rule target\n"
+            "  -MP              Add phony rules for header prerequisites\n"
+            "  -MT <target>     Add an exact dependency rule target\n"
+            "  -MQ <target>     Add a Make-quoted dependency rule target\n"
             "  -D<macro>[=<value>]  Define a preprocessor macro (default value: 1)\n"
             "  -U<macro>        Undefine a preprocessor macro\n"
             "  -o <file>        Write output to <file>\n"
@@ -56,6 +67,18 @@ static bool same_existing_file(const char *lhs, const char *rhs) {
         return false;
 
     return a.st_dev == b.st_dev && a.st_ino == b.st_ino;
+}
+
+static void add_dependency_target(DriverOptions *opts, const char *text,
+                                  bool quote_for_make) {
+    DependencyTarget *target = calloc(1, sizeof(DependencyTarget));
+    target->text = strdup(text);
+    target->quote_for_make = quote_for_make;
+    if (opts->dependency_targets_tail)
+        opts->dependency_targets_tail->next = target;
+    else
+        opts->dependency_targets = target;
+    opts->dependency_targets_tail = target;
 }
 
 static DriverOptions parse_options(int argc, char **argv) {
@@ -118,6 +141,12 @@ static DriverOptions parse_options(int argc, char **argv) {
             continue;
         }
 
+
+        if (!end_options && !strcmp(arg, "-MP")) {
+            opts.dependency_phony = true;
+            continue;
+        }
+
         if (!end_options && !strcmp(arg, "-MF")) {
             if (++i >= argc)
                 error("%s: missing argument after '-MF'", argv[0]);
@@ -137,16 +166,24 @@ static DriverOptions parse_options(int argc, char **argv) {
         if (!end_options && !strcmp(arg, "-MT")) {
             if (++i >= argc)
                 error("%s: missing argument after '-MT'", argv[0]);
-            if (opts.dependency_target)
-                error("%s: dependency target specified more than once", argv[0]);
-            opts.dependency_target = argv[i];
+            add_dependency_target(&opts, argv[i], false);
             continue;
         }
 
         if (!end_options && !strncmp(arg, "-MT", 3) && arg[3]) {
-            if (opts.dependency_target)
-                error("%s: dependency target specified more than once", argv[0]);
-            opts.dependency_target = arg + 3;
+            add_dependency_target(&opts, arg + 3, false);
+            continue;
+        }
+
+        if (!end_options && !strcmp(arg, "-MQ")) {
+            if (++i >= argc)
+                error("%s: missing argument after '-MQ'", argv[0]);
+            add_dependency_target(&opts, argv[i], true);
+            continue;
+        }
+
+        if (!end_options && !strncmp(arg, "-MQ", 3) && arg[3]) {
+            add_dependency_target(&opts, arg + 3, true);
             continue;
         }
 
@@ -206,8 +243,9 @@ static DriverOptions parse_options(int argc, char **argv) {
         error("%s: '-M' is mutually exclusive with '-E', '-S' and '-fsyntax-only'", argv[0]);
     if (saw_MD && (saw_E || saw_syntax_only))
         error("%s: '-MD' is not supported with '-E' or '-fsyntax-only'", argv[0]);
-    if ((opts.dependency_output_path || opts.dependency_target) && !saw_M && !saw_MD)
-        error("%s: '-MF' and '-MT' require '-M' or '-MD'", argv[0]);
+    if ((opts.dependency_output_path || opts.dependency_targets || opts.dependency_phony) &&
+        !saw_M && !saw_MD)
+        error("%s: '-MF', '-MP', '-MT' and '-MQ' require '-M' or '-MD'", argv[0]);
     if (!opts.input_path)
         error("%s: no input file", argv[0]);
     if ((saw_M || saw_MD) && !strcmp(opts.input_path, "-"))
@@ -329,8 +367,7 @@ static char *default_dependency_output(const DriverOptions *opts) {
 }
 
 static void emit_dependency_rule(const DriverOptions *opts) {
-    char *target = opts->dependency_target ? strdup(opts->dependency_target)
-                                           : default_dependency_target(opts);
+    char *default_target = opts->dependency_targets ? NULL : default_dependency_target(opts);
     char *path = default_dependency_output(opts);
 
     if (path && strcmp(path, "-") &&
@@ -349,7 +386,20 @@ static void emit_dependency_rule(const DriverOptions *opts) {
         close_out = true;
     }
 
-    write_make_escaped(out, target);
+    if (opts->dependency_targets) {
+        bool first = true;
+        for (DependencyTarget *target = opts->dependency_targets; target; target = target->next) {
+            if (!first)
+                fputc(' ', out);
+            if (target->quote_for_make)
+                write_make_escaped(out, target->text);
+            else
+                fputs(target->text, out);
+            first = false;
+        }
+    } else {
+        write_make_escaped(out, default_target);
+    }
     fputc(':', out);
     fputc(' ', out);
     write_make_escaped(out, opts->input_path);
@@ -363,6 +413,17 @@ static void emit_dependency_rule(const DriverOptions *opts) {
     }
     fputc('\n', out);
 
+    if (opts->dependency_phony) {
+        for (int i = 0; i < count; i++) {
+            const char *dep = preprocess_v2_dependency_at(i);
+            if (!dep)
+                continue;
+            fputc('\n', out);
+            write_make_escaped(out, dep);
+            fputs(":\n", out);
+        }
+    }
+
     if (fflush(out) == EOF || ferror(out)) {
         if (path && strcmp(path, "-"))
             error("failed to write dependency output %s", path);
@@ -371,7 +432,7 @@ static void emit_dependency_rule(const DriverOptions *opts) {
     if (close_out && fclose(out) == EOF)
         error("failed to close dependency output %s", path);
 
-    free(target);
+    free(default_target);
     free(path);
 }
 
