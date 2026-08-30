@@ -55,6 +55,7 @@ static void print_usage(FILE *out, const char *prog) {
             "  -D<macro>[=<value>]  Define a preprocessor macro (default value: 1)\n"
             "  -U<macro>        Undefine a preprocessor macro\n"
             "  -I<dir>          Add a user header search directory\n"
+            "  -iquote <dir>    Add a quote-only header search directory\n"
             "  -isystem <dir>   Add a system header search directory\n"
             "  -o <file>        Write output to <file>\n"
             "  -o<file>         Same as '-o <file>'\n"
@@ -249,6 +250,18 @@ static DriverOptions parse_options(int argc, char **argv) {
 
         if (!end_options && !strncmp(arg, "-I", 2) && arg[2]) {
             preprocess_v2_add_include_path(arg + 2);
+            continue;
+        }
+
+        if (!end_options && !strcmp(arg, "-iquote")) {
+            if (++i >= argc)
+                error("%s: missing argument after '-iquote'", argv[0]);
+            preprocess_v2_add_quote_include_path(argv[i]);
+            continue;
+        }
+
+        if (!end_options && !strncmp(arg, "-iquote", 7) && arg[7]) {
+            preprocess_v2_add_quote_include_path(arg + 7);
             continue;
         }
 
