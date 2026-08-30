@@ -1,0 +1,70 @@
+name: Apply VLA assignment-expression bound fix
+
+on:
+  push:
+    branches:
+      - fix-vla-assignment-expression-bound
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Apply focused parser fix and regressions
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          parse = Path('parse.c')
+          text = parse.read_text()
+          old = '''        if (!star_bound && !equal(tok, "]")) {
+              bound = ternary(&tok, tok);
+              add_type(bound);
+          '''
+          new = '''        if (!star_bound && !equal(tok, "]")) {
+              // C11 6.7.6.2 specifies assignment-expression here, not the
+              // narrower conditional-expression.  This matters for VLA bounds
+              // such as `a[n += 2]`, whose side effect is part of the bound
+              // evaluation and must occur exactly once at allocation time.
+              bound = assign(&tok, tok);
+              add_type(bound);
+          '''
+          if old not in text:
+              raise SystemExit('target array-bound parser block not found')
+          if text.count(old) != 1:
+              raise SystemExit('target array-bound parser block is not unique')
+          parse.write_text(text.replace(old, new, 1))
+
+          test = Path('test/vla.sh')
+          text = test.read_text()
+          marker = '''# Dynamic allocations satisfy the element alignment and preserve call ABI
+'''
+          addition = '''# Array declarator bounds use the full C assignment-expression grammar.  VLA
+# side effects execute exactly once, sizeof(type-name) evaluates its bound, and
+# _Alignof(type-name) accepts the syntax without evaluating the VM bound.
+assert_run 0 'int main(void){int n=2;int a[n+=2];return n==4&&sizeof a==16?0:1;}'
+assert_run 0 'int main(void){int n=2;unsigned long s=sizeof(int[n=5]);return s==20&&n==5?0:1;}'
+assert_run 0 'int main(void){int n=3;unsigned long a=_Alignof(int[n+=2]);return a==4&&n==3?0:1;}'
+
+'''
+          if marker not in text:
+              raise SystemExit('VLA test insertion marker not found')
+          if 'int a[n+=2]' in text:
+              raise SystemExit('VLA assignment-expression regressions already present')
+          test.write_text(text.replace(marker, addition + marker, 1))
+          PY
+      - name: Run complete test suite
+        run: make test
+      - name: Commit focused change
+        run: |
+          rm .github/workflows/apply-vla-assignment-bound-fix.yml
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add parse.c test/vla.sh .github/workflows/apply-vla-assignment-bound-fix.yml
+          git commit -m 'Support assignment expressions in VLA bounds'
+          git push origin HEAD:fix-vla-assignment-expression-bound
