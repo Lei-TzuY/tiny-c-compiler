@@ -117,6 +117,13 @@ grep -F 'tmp-deps-main.s:' tmp-deps-main.d >/dev/null || fail '-MD default targe
 grep -F 'custom-target:' tmp-deps-custom.d >/dev/null || fail '-MF/-MT did not override -MD defaults'
 test -s tmp-deps-custom.s || fail '-MD -MF/-MT lost compiler output'
 
+# Only the final path component contributes an extension. A dotted directory
+# name must be preserved when deriving the default .d sidecar from -o.
+mkdir -p tmp-deps-tree/build.v1
+./minicc -MD -o tmp-deps-tree/build.v1/program.s tmp-deps-main.c
+test -s tmp-deps-tree/build.v1/program.d || fail 'dotted output directory corrupted .d path derivation'
+grep -F 'tmp-deps-tree/build.v1/program.s:' tmp-deps-tree/build.v1/program.d >/dev/null ||   fail 'dotted output directory corrupted dependency target'
+
 # Invalid combinations are diagnosed rather than silently producing ambiguous
 # mixed output or truncating unrelated files.
 assert_reject "'-M' and '-MD' are mutually exclusive" ./minicc -M -MD tmp-deps-main.c

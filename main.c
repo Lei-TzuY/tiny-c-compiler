@@ -288,15 +288,11 @@ static void finish_output(char *path) {
 
 static char *path_with_extension(const char *path, const char *extension,
                                  bool basename_only) {
-    const char *base = path;
-    if (basename_only) {
-        const char *slash = strrchr(path, '/');
-        if (slash)
-            base = slash + 1;
-    }
-
-    const char *dot = strrchr(base, '.');
-    size_t stem_len = (dot && dot != base) ? (size_t)(dot - base) : strlen(base);
+    const char *slash = strrchr(path, '/');
+    const char *component = slash ? slash + 1 : path;
+    const char *base = basename_only ? component : path;
+    const char *dot = strrchr(component, '.');
+    size_t stem_len = (dot && dot != component) ? (size_t)(dot - base) : strlen(base);
     size_t ext_len = strlen(extension);
     char *result = calloc(1, stem_len + ext_len + 1);
     memcpy(result, base, stem_len);
