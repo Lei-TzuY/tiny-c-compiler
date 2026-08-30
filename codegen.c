@@ -1239,12 +1239,15 @@ static void gen_expr(Node *node) {
     if (node->kind == ND_NEG) {
         gen_expr(node->lhs);
         printf("  neg %%rax\n");
+        if (is_integer(node->ty))
+            normalize(node->ty);
         return;
     }
 
     if (node->kind == ND_BITNOT) {
         gen_expr(node->lhs);
         printf("  not %%rax\n");
+        normalize(node->ty);
         return;
     }
 
@@ -1532,9 +1535,9 @@ static void gen_stmt(Node *node) {
     if (node->kind == ND_VLA_ALLOC) {
         if (!node->var || !node->var->vla_size)
             error("invalid VLA allocation metadata");
-        printf("  mov %d(%%rbp), %%rax\n", node->var->vla_size->offset);
         // The backend supports object alignments through 16 bytes. Rounding
         // each dynamic allocation to 16 also keeps SysV call alignment stable.
+        printf("  mov %d(%%rbp), %%rax\n", node->var->vla_size->offset);
         printf("  add $15, %%rax\n");
         printf("  and $-16, %%rax\n");
         printf("  sub %%rax, %%rsp\n");
