@@ -70,6 +70,26 @@ int main(void) {
 SRC
 assert_run 5 'extends line comments before comment removal'
 
+# Translation phase 1 normalizes CRLF before phase-2 splicing. This matters for
+# Windows-authored source files: the backslash is immediately followed by the
+# logical newline only after CRLF has been mapped to '\n'.
+printf '%s\r\n' \
+  'int ma\' \
+  'in(void) {' \
+  '  ret\' \
+  'urn 9;' \
+  '}' > tmp-line-splicing.c
+assert_run 9 'normalizes CRLF before token splicing'
+
+# The same ordering must hold for preprocessor directive continuation.
+printf '%s\r\n' \
+  '#define VALUE 11 + \' \
+  '31' \
+  'int main(void) {' \
+  '  return VALUE;' \
+  '}' > tmp-line-splicing.c
+assert_run 42 'normalizes CRLF before macro continuation'
+
 rm -f tmp-line-splicing.c tmp-line-splicing.s tmp-line-splicing
 
 echo 'All C translation-phase line-splicing tests passed!'
