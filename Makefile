@@ -13,6 +13,7 @@ test: minicc
 	bash ./test/driver_cli.sh
 	bash ./test/preprocessor.sh
 	bash ./test/preprocessor_advanced.sh
+	bash ./test/preprocessor_inactive_branches.sh
 	bash ./test/preprocessor_recursive_macros.sh
 	bash ./test/preprocessor_integer_semantics.sh
 	bash ./test/preprocessor_function_invocation.sh
