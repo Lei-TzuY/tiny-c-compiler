@@ -82,7 +82,15 @@ struct IncludePath {
     IncludePathKind kind;
 };
 
+typedef struct ForcedInput ForcedInput;
+struct ForcedInput {
+    ForcedInput *next;
+    char *path;
+};
+
 static void parse_define(char *start);
+static char *preprocess_v2_source_impl(char *input, const char *source_name,
+                                       bool source_is_system);
 
 typedef struct {
     char *data;
@@ -102,6 +110,10 @@ static Dependency *dependencies;
 static Dependency *dependencies_tail;
 static IncludePath *include_paths;
 static IncludePath *include_paths_tail;
+static ForcedInput *forced_imacros;
+static ForcedInput *forced_imacros_tail;
+static ForcedInput *forced_includes;
+static ForcedInput *forced_includes_tail;
 static bool missing_header_dependencies_enabled;
 static bool standard_includes_enabled = true;
 
@@ -362,6 +374,28 @@ void preprocess_v2_enable_missing_header_dependencies(void) {
 
 void preprocess_v2_disable_standard_includes(void) {
     standard_includes_enabled = false;
+}
+
+static void queue_forced_input(ForcedInput **head, ForcedInput **tail,
+                               const char *path, const char *option_name) {
+    if (!path || !*path)
+        error("empty file name in %s option", option_name);
+
+    ForcedInput *input = calloc(1, sizeof(ForcedInput));
+    input->path = strdup(path);
+    if (*tail)
+        (*tail)->next = input;
+    else
+        *head = input;
+    *tail = input;
+}
+
+void preprocess_v2_add_forced_include(const char *path) {
+    queue_forced_input(&forced_includes, &forced_includes_tail, path, "-include");
+}
+
+void preprocess_v2_add_imacros(const char *path) {
+    queue_forced_input(&forced_imacros, &forced_imacros_tail, path, "-imacros");
 }
 
 static char *trim_copy(const char *s) {
@@ -2138,6 +2172,74 @@ static void parse_define(char *start) {
     add_macro(name, is_objlike, is_variadic, params, num_params, strdup(start));
 }
 
+static char *preprocess_forced_input(const char *name) {
+    char *owned = NULL;
+    char *resolved_path = NULL;
+    const char *content = NULL;
+    bool included_is_system = false;
+
+    if (name[0] == '/') {
+        owned = read_file_content((char *)name);
+        if (owned)
+            resolved_path = strdup(name);
+    } else {
+        // GCC searches the preprocessor working directory first for -include
+        // and -imacros, rather than the primary source file's directory.
+        owned = read_file_content((char *)name);
+        if (owned)
+            resolved_path = strdup(name);
+    }
+
+    if (!owned && name[0] != '/') {
+        owned = read_quote_include_paths(name, &resolved_path);
+    }
+    if (!owned && name[0] != '/') {
+        owned = read_include_paths(name, INCLUDE_PATH_USER, &resolved_path);
+    }
+    if (!owned && name[0] != '/') {
+        owned = read_include_paths(name, INCLUDE_PATH_SYSTEM, &resolved_path);
+        if (owned)
+            included_is_system = true;
+    }
+
+    content = owned ? owned :
+              (standard_includes_enabled ? get_builtin_header((char *)name) : NULL);
+    if (content && !owned)
+        included_is_system = true;
+
+    if (!content && name[0] != '/') {
+        owned = read_include_paths(name, INCLUDE_PATH_AFTER, &resolved_path);
+        if (owned) {
+            included_is_system = true;
+            content = owned;
+        }
+    }
+
+    if (!content) {
+        if (!missing_header_dependencies_enabled)
+            error("cannot include %s", name);
+        record_missing_dependency(name, false);
+        free(owned);
+        free(resolved_path);
+        return strdup("");
+    }
+
+    const char *included_source = owned ? resolved_path : name;
+    if (owned)
+        record_dependency(included_source, included_is_system);
+
+    char *result = strdup("");
+    if (!once_contains_source(included_source)) {
+        free(result);
+        result = preprocess_v2_source_impl((char *)content, included_source,
+                                           included_is_system);
+    }
+
+    free(owned);
+    free(resolved_path);
+    return result;
+}
+
 static char *preprocess_v2_source_impl(char *input, const char *source_name,
                                        bool source_is_system) {
     const char *saved_file = current_pp_file;
@@ -2159,6 +2261,22 @@ static char *preprocess_v2_source_impl(char *input, const char *source_name,
     StrBuf out;
     sb_init(&out, strlen(spliced) * 2 + 1024);
     bool in_block_comment = false;
+
+    if (outermost) {
+        // GCC processes every -imacros before every -include, independent of
+        // how those option classes were interleaved on the command line.
+        for (ForcedInput *forced = forced_imacros; forced; forced = forced->next) {
+            char *discarded = preprocess_forced_input(forced->path);
+            free(discarded);
+        }
+        for (ForcedInput *forced = forced_includes; forced; forced = forced->next) {
+            char *included = preprocess_forced_input(forced->path);
+            sb_puts(&out, included);
+            if (out.len && out.data[out.len - 1] != '\n')
+                sb_putc(&out, '\n');
+            free(included);
+        }
+    }
 
     char *p = spliced;
     int line_no = 0;

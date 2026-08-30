@@ -59,6 +59,8 @@ static void print_usage(FILE *out, const char *prog) {
             "  -isystem <dir>   Add a system header search directory\n"
             "  -idirafter <dir> Add a system header directory searched last\n"
             "  -nostdinc        Disable builtin standard header search\n"
+            "  -include <file>  Process a header before the primary source\n"
+            "  -imacros <file>  Import macros from a header before the source\n"
             "  -o <file>        Write output to <file>\n"
             "  -o<file>         Same as '-o <file>'\n"
             "  -h, --help       Show this help and exit\n"
@@ -246,6 +248,40 @@ static DriverOptions parse_options(int argc, char **argv) {
         if (!end_options &&
             (!strcmp(arg, "-nostdinc") || !strcmp(arg, "--no-standard-includes"))) {
             preprocess_v2_disable_standard_includes();
+            continue;
+        }
+
+        if (!end_options && (!strcmp(arg, "-include") || !strcmp(arg, "--include"))) {
+            if (++i >= argc)
+                error("%s: missing argument after '-include'", argv[0]);
+            preprocess_v2_add_forced_include(argv[i]);
+            continue;
+        }
+
+        if (!end_options && !strncmp(arg, "--include=", 10) && arg[10]) {
+            preprocess_v2_add_forced_include(arg + 10);
+            continue;
+        }
+
+        if (!end_options && !strncmp(arg, "-include", 8) && arg[8]) {
+            preprocess_v2_add_forced_include(arg + 8);
+            continue;
+        }
+
+        if (!end_options && (!strcmp(arg, "-imacros") || !strcmp(arg, "--imacros"))) {
+            if (++i >= argc)
+                error("%s: missing argument after '-imacros'", argv[0]);
+            preprocess_v2_add_imacros(argv[i]);
+            continue;
+        }
+
+        if (!end_options && !strncmp(arg, "--imacros=", 10) && arg[10]) {
+            preprocess_v2_add_imacros(arg + 10);
+            continue;
+        }
+
+        if (!end_options && !strncmp(arg, "-imacros", 8) && arg[8]) {
+            preprocess_v2_add_imacros(arg + 8);
             continue;
         }
 
