@@ -53,6 +53,7 @@ test: minicc
 	bash ./test/abi_stack_args.sh
 	bash ./test/integer_parameter_abi.sh
 	bash ./test/enum_abi.sh
+	bash ./test/pointer_abi.sh
 	bash ./test/prototype_params.sh
 	bash ./test/parameter_array_qualifiers.sh
 	bash ./test/function_pointer_prototype.sh
