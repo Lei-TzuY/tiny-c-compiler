@@ -16,8 +16,8 @@ int main(void) {
   /* The # operator must preserve the spelling of quoted preprocessing tokens,
      escaping embedded quotes and backslashes so the result is a valid string. */
   if (!streq(STR("a\\b\"c"), "\"a\\\\b\\\"c\"")) return 1;
-  if (!streq(STR('\n'), "'\\\\n'")) return 2;
-  if (!streq(STR('\\'), "'\\\\\\\\'")) return 3;
+  if (!streq(STR('\n'), "'\\n'")) return 2;
+  if (!streq(STR('\\'), "'\\\\'")) return 3;
 
   /* Whitespace outside quoted tokens collapses, while whitespace inside a
      string-literal preprocessing token remains part of that token spelling. */
