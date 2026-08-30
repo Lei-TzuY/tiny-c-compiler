@@ -39,6 +39,11 @@ assert_run 7 'int main(void){int n=5;int a[n];a[0]=3;a[4]=4;return a[0]+a[n-1];}
 # allocation extent even when the source variable changes afterward.
 assert_run 0 'int main(void){int n=3;int a[n++];if(n!=4)return 1;n=8;return sizeof a==12?0:2;}'
 
+# C99 array declarators accept a full assignment-expression as a VLA bound.
+# Compound assignments both determine the saved extent and execute exactly once.
+assert_run 0 'int main(void){int n=3;int a[n+=2];a[4]=17;return n==5&&sizeof a==20&&a[4]==17?0:1;}'
+assert_run 0 'int main(void){int n=2;unsigned long s=sizeof(int[n*=3]);return n==6&&s==24?0:1;}'
+
 # sizeof(VLA) keeps the target LP64 size_t type, while a VLA type-name evaluates
 # its bound when the sizeof expression executes.
 assert_run 0 'int main(void){int n=6;int a[n];return _Generic(sizeof a,unsigned long:0,default:1);}'
@@ -49,6 +54,7 @@ assert_run 0 'int main(void){int n=3;unsigned long x=sizeof(int[n++]);return x==
 # bound expression; only the completed element type's alignment is queried.
 assert_run 0 'int main(void){int n=3;unsigned long a=_Alignof(int[n++]);return a==4&&n==3?0:1;}'
 assert_run 0 'int main(void){int n=5;unsigned long a=_Alignof(double[++n]);return a==8&&n==5?0:1;}'
+assert_run 0 'int main(void){int n=4;unsigned long a=_Alignof(int[n+=3]);return a==4&&n==4?0:1;}'
 
 # Outer runtime dimension with a fixed inner stride remains ordinary C pointer
 # arithmetic after decay.
