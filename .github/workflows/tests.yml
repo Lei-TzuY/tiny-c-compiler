@@ -1,29 +1,16 @@
-name: Apply datetime builtin patch
+name: Tests
 
 on:
   push:
-    branches:
-      - fix-predefined-date-time
+  pull_request:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  patch-and-test:
-    if: github.actor != 'github-actions[bot]'
+  test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: fix-predefined-date-time
-      - name: Apply patch
-        run: python3 .github/apply_datetime_patch.py
       - name: Test
         run: make test
-      - name: Commit validated patch
-        run: |
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add preprocess_v2.c Makefile test/predefined_datetime_macros.sh
-          git commit -m 'Implement __DATE__ and __TIME__ predefined macros'
-          git push origin HEAD:fix-predefined-date-time
