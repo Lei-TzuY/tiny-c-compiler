@@ -375,6 +375,29 @@ static Type *integer_literal_type(uint64_t val, int base, bool has_u,
     error_at(loc, "invalid integer suffix");
 }
 
+// Translation phase 1 maps the host's common physical line endings to the
+// compiler's internal newline representation before backslash-newline removal.
+// Treat both CRLF and a lone CR as one source newline so Windows-authored files
+// participate in all later translation phases exactly like LF-authored files.
+static void normalize_newlines(char *p) {
+    char *q = p;
+
+    while (*p) {
+        if (p[0] == '\r' && p[1] == '\n') {
+            *q++ = '\n';
+            p += 2;
+            continue;
+        }
+        if (*p == '\r') {
+            *q++ = '\n';
+            p++;
+            continue;
+        }
+        *q++ = *p++;
+    }
+    *q = '\0';
+}
+
 // Translation phase 2 removes every backslash-newline pair before tokenization.
 // Preserve the physical line count by reinserting the removed newlines after
 // the next real newline; they remain whitespace but keep later diagnostics on
@@ -411,6 +434,7 @@ static void remove_backslash_newline(char *p) {
 
 // Tokenize a given string and returns new tokens.
 Token *tokenize(char *p) {
+    normalize_newlines(p);
     remove_backslash_newline(p);
     current_input = p;
     Token head = {};
