@@ -7,6 +7,7 @@ void validate_program(Program *prog);
 typedef enum {
     DRIVER_COMPILE_ASSEMBLY,
     DRIVER_PREPROCESS_ONLY,
+    DRIVER_DEPENDENCIES_ONLY,
     DRIVER_SYNTAX_ONLY,
 } DriverMode;
 
@@ -14,6 +15,9 @@ typedef struct {
     DriverMode mode;
     char *input_path;
     char *output_path;
+    char *dependency_output_path;
+    char *dependency_target;
+    bool dependency_side_effect;
     bool exit_after_options;
 } DriverOptions;
 
@@ -28,6 +32,10 @@ static void print_usage(FILE *out, const char *prog) {
             "  -E               Preprocess only\n"
             "  -S               Compile to assembly (default)\n"
             "  -fsyntax-only    Check preprocessing, syntax and semantics only\n"
+            "  -M               Emit Make dependencies only\n"
+            "  -MD              Compile and also emit a .d dependency file\n"
+            "  -MF <file>       Write dependencies to <file>\n"
+            "  -MT <target>     Set the dependency rule target\n"
             "  -D<macro>[=<value>]  Define a preprocessor macro (default value: 1)\n"
             "  -U<macro>        Undefine a preprocessor macro\n"
             "  -o <file>        Write output to <file>\n"
@@ -55,6 +63,8 @@ static DriverOptions parse_options(int argc, char **argv) {
     bool end_options = false;
     bool saw_E = false;
     bool saw_S = false;
+    bool saw_M = false;
+    bool saw_MD = false;
     bool saw_syntax_only = false;
 
     for (int i = 1; i < argc; i++) {
@@ -92,6 +102,51 @@ static DriverOptions parse_options(int argc, char **argv) {
         if (!end_options && !strcmp(arg, "-fsyntax-only")) {
             saw_syntax_only = true;
             opts.mode = DRIVER_SYNTAX_ONLY;
+            continue;
+        }
+
+
+        if (!end_options && !strcmp(arg, "-M")) {
+            saw_M = true;
+            opts.mode = DRIVER_DEPENDENCIES_ONLY;
+            continue;
+        }
+
+        if (!end_options && !strcmp(arg, "-MD")) {
+            saw_MD = true;
+            opts.dependency_side_effect = true;
+            continue;
+        }
+
+        if (!end_options && !strcmp(arg, "-MF")) {
+            if (++i >= argc)
+                error("%s: missing argument after '-MF'", argv[0]);
+            if (opts.dependency_output_path)
+                error("%s: dependency output file specified more than once", argv[0]);
+            opts.dependency_output_path = argv[i];
+            continue;
+        }
+
+        if (!end_options && !strncmp(arg, "-MF", 3) && arg[3]) {
+            if (opts.dependency_output_path)
+                error("%s: dependency output file specified more than once", argv[0]);
+            opts.dependency_output_path = arg + 3;
+            continue;
+        }
+
+        if (!end_options && !strcmp(arg, "-MT")) {
+            if (++i >= argc)
+                error("%s: missing argument after '-MT'", argv[0]);
+            if (opts.dependency_target)
+                error("%s: dependency target specified more than once", argv[0]);
+            opts.dependency_target = argv[i];
+            continue;
+        }
+
+        if (!end_options && !strncmp(arg, "-MT", 3) && arg[3]) {
+            if (opts.dependency_target)
+                error("%s: dependency target specified more than once", argv[0]);
+            opts.dependency_target = arg + 3;
             continue;
         }
 
@@ -145,10 +200,25 @@ static DriverOptions parse_options(int argc, char **argv) {
 
     if ((saw_E ? 1 : 0) + (saw_S ? 1 : 0) + (saw_syntax_only ? 1 : 0) > 1)
         error("%s: '-E', '-S' and '-fsyntax-only' are mutually exclusive", argv[0]);
+    if (saw_M && saw_MD)
+        error("%s: '-M' and '-MD' are mutually exclusive", argv[0]);
+    if (saw_M && (saw_E || saw_S || saw_syntax_only))
+        error("%s: '-M' is mutually exclusive with '-E', '-S' and '-fsyntax-only'", argv[0]);
+    if (saw_MD && (saw_E || saw_syntax_only))
+        error("%s: '-MD' is not supported with '-E' or '-fsyntax-only'", argv[0]);
+    if ((opts.dependency_output_path || opts.dependency_target) && !saw_M && !saw_MD)
+        error("%s: '-MF' and '-MT' require '-M' or '-MD'", argv[0]);
     if (!opts.input_path)
         error("%s: no input file", argv[0]);
+    if ((saw_M || saw_MD) && !strcmp(opts.input_path, "-"))
+        error("%s: dependency generation requires a named input file", argv[0]);
+    if (saw_M && opts.output_path)
+        error("%s: '-o' is not supported with '-M'; use '-MF'", argv[0]);
     if (opts.mode == DRIVER_SYNTAX_ONLY && opts.output_path)
         error("%s: '-o' is not supported with '-fsyntax-only'", argv[0]);
+    if (saw_MD && opts.dependency_output_path && !strcmp(opts.dependency_output_path, "-") &&
+        (!opts.output_path || !strcmp(opts.output_path, "-")))
+        error("%s: dependency output and compiler output cannot both use standard output", argv[0]);
     if (opts.output_path && strcmp(opts.output_path, "-") &&
         (!strcmp(opts.output_path, opts.input_path) ||
          same_existing_file(opts.output_path, opts.input_path)))
@@ -216,6 +286,99 @@ static void finish_output(char *path) {
     }
 }
 
+static char *path_with_extension(const char *path, const char *extension,
+                                 bool basename_only) {
+    const char *base = path;
+    if (basename_only) {
+        const char *slash = strrchr(path, '/');
+        if (slash)
+            base = slash + 1;
+    }
+
+    const char *dot = strrchr(base, '.');
+    size_t stem_len = (dot && dot != base) ? (size_t)(dot - base) : strlen(base);
+    size_t ext_len = strlen(extension);
+    char *result = calloc(1, stem_len + ext_len + 1);
+    memcpy(result, base, stem_len);
+    memcpy(result + stem_len, extension, ext_len + 1);
+    return result;
+}
+
+static void write_make_escaped(FILE *out, const char *text) {
+    for (const char *p = text; *p; p++) {
+        if (*p == '$') {
+            fputs("$$", out);
+            continue;
+        }
+        if (*p == ' ' || *p == '\t' || *p == '#' || *p == ':' || *p == '\\')
+            fputc('\\', out);
+        fputc(*p, out);
+    }
+}
+
+static char *default_dependency_target(const DriverOptions *opts) {
+    if (opts->output_path && strcmp(opts->output_path, "-"))
+        return strdup(opts->output_path);
+    return path_with_extension(opts->input_path, ".s", true);
+}
+
+static char *default_dependency_output(const DriverOptions *opts) {
+    if (opts->dependency_output_path)
+        return strdup(opts->dependency_output_path);
+    if (opts->mode == DRIVER_DEPENDENCIES_ONLY)
+        return NULL;
+    if (opts->output_path && strcmp(opts->output_path, "-"))
+        return path_with_extension(opts->output_path, ".d", false);
+    return path_with_extension(opts->input_path, ".d", true);
+}
+
+static void emit_dependency_rule(const DriverOptions *opts) {
+    char *target = opts->dependency_target ? strdup(opts->dependency_target)
+                                           : default_dependency_target(opts);
+    char *path = default_dependency_output(opts);
+
+    if (path && strcmp(path, "-") &&
+        (!strcmp(path, opts->input_path) || same_existing_file(path, opts->input_path)))
+        error("input and dependency output files must be different");
+    if (path && strcmp(path, "-") && opts->output_path && strcmp(opts->output_path, "-") &&
+        (!strcmp(path, opts->output_path) || same_existing_file(path, opts->output_path)))
+        error("dependency output and compiler output files must be different");
+
+    FILE *out = stdout;
+    bool close_out = false;
+    if (path && strcmp(path, "-")) {
+        out = fopen(path, "w");
+        if (!out)
+            error("cannot open dependency output %s", path);
+        close_out = true;
+    }
+
+    write_make_escaped(out, target);
+    fputc(':', out);
+    fputc(' ', out);
+    write_make_escaped(out, opts->input_path);
+    int count = preprocess_v2_dependency_count();
+    for (int i = 0; i < count; i++) {
+        const char *dep = preprocess_v2_dependency_at(i);
+        if (!dep)
+            continue;
+        fputc(' ', out);
+        write_make_escaped(out, dep);
+    }
+    fputc('\n', out);
+
+    if (fflush(out) == EOF || ferror(out)) {
+        if (path && strcmp(path, "-"))
+            error("failed to write dependency output %s", path);
+        error("failed to write dependency output");
+    }
+    if (close_out && fclose(out) == EOF)
+        error("failed to close dependency output %s", path);
+
+    free(target);
+    free(path);
+}
+
 int main(int argc, char **argv) {
     DriverOptions opts = parse_options(argc, argv);
     if (opts.exit_after_options)
@@ -224,6 +387,11 @@ int main(int argc, char **argv) {
     char *user_input = read_file(opts.input_path);
     const char *source_name = !strcmp(opts.input_path, "-") ? "<stdin>" : opts.input_path;
     char *preprocessed = preprocess_v2_source(user_input, source_name);
+
+    if (opts.mode == DRIVER_DEPENDENCIES_ONLY) {
+        emit_dependency_rule(&opts);
+        return 0;
+    }
 
     if (opts.mode == DRIVER_PREPROCESS_ONLY) {
         select_output(opts.output_path);
@@ -235,6 +403,9 @@ int main(int argc, char **argv) {
     Token *tok = tokenize(preprocessed);
     Program *prog = parse(tok);
     validate_program(prog);
+
+    if (opts.dependency_side_effect)
+        emit_dependency_rule(&opts);
 
     if (opts.mode == DRIVER_SYNTAX_ONLY)
         return 0;

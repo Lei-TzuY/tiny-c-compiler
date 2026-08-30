@@ -58,6 +58,15 @@ struct OnceFile {
     char *name;
 };
 
+typedef struct Dependency Dependency;
+struct Dependency {
+    Dependency *next;
+    bool has_stat;
+    dev_t dev;
+    ino_t ino;
+    char *path;
+};
+
 static void parse_define(char *start);
 
 typedef struct {
@@ -74,6 +83,8 @@ static int current_pp_line;
 static CliMacroAction *cli_macro_actions;
 static CliMacroAction *cli_macro_actions_tail;
 static OnceFile *once_files;
+static Dependency *dependencies;
+static Dependency *dependencies_tail;
 
 static void sb_init(StrBuf *sb, size_t cap) {
     sb->cap = cap < 64 ? 64 : cap;
@@ -159,6 +170,63 @@ static void clear_once_files(void) {
         free(once_files);
         once_files = next;
     }
+}
+
+
+static void clear_dependencies(void) {
+    while (dependencies) {
+        Dependency *next = dependencies->next;
+        free(dependencies->path);
+        free(dependencies);
+        dependencies = next;
+    }
+    dependencies_tail = NULL;
+}
+
+static void record_dependency(const char *path) {
+    if (!path || !*path)
+        return;
+
+    struct stat st;
+    bool has_stat = stat_source(path, &st);
+    for (Dependency *dep = dependencies; dep; dep = dep->next) {
+        if (has_stat && dep->has_stat) {
+            if (dep->dev == st.st_dev && dep->ino == st.st_ino)
+                return;
+            continue;
+        }
+        if (!has_stat && !dep->has_stat && !strcmp(dep->path, path))
+            return;
+    }
+
+    Dependency *dep = calloc(1, sizeof(Dependency));
+    dep->has_stat = has_stat;
+    if (has_stat) {
+        dep->dev = st.st_dev;
+        dep->ino = st.st_ino;
+    }
+    dep->path = strdup(path);
+    if (dependencies_tail)
+        dependencies_tail->next = dep;
+    else
+        dependencies = dep;
+    dependencies_tail = dep;
+}
+
+int preprocess_v2_dependency_count(void) {
+    int count = 0;
+    for (Dependency *dep = dependencies; dep; dep = dep->next)
+        count++;
+    return count;
+}
+
+const char *preprocess_v2_dependency_at(int index) {
+    if (index < 0)
+        return NULL;
+    for (Dependency *dep = dependencies; dep; dep = dep->next)
+        if (index-- == 0)
+            return dep->path;
+    return NULL;
 }
 
 static void queue_cli_macro_action(CliMacroKind kind, const char *arg) {
@@ -1909,6 +1977,7 @@ char *preprocess_v2_source(char *input, const char *source_name) {
     bool outermost = preprocess_depth++ == 0;
     if (outermost) {
         clear_once_files();
+        clear_dependencies();
         add_macro(strdup("__STDC__"), true, false, NULL, 0, strdup("1"));
         add_macro(strdup("__STDC_VERSION__"), true, false, NULL, 0, strdup("201112L"));
         add_macro(strdup("__STDC_HOSTED__"), true, false, NULL, 0, strdup("1"));
@@ -2036,6 +2105,8 @@ char *preprocess_v2_source(char *input, const char *source_name) {
                 // already executed #pragma once is skipped by physical identity
                 // (device/inode when available), not merely by path spelling.
                 const char *included_source = owned ? resolved_path : hname;
+                if (owned)
+                    record_dependency(included_source);
                 if (!once_contains_source(included_source)) {
                     char *sub = preprocess_v2_source((char *)content, included_source);
                     sb_puts(&out, sub);
