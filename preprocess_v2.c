@@ -65,12 +65,14 @@ struct Dependency {
     dev_t dev;
     ino_t ino;
     char *path;
+    bool is_system;
 };
 
 typedef struct IncludePath IncludePath;
 struct IncludePath {
     IncludePath *next;
     char *path;
+    bool is_system;
 };
 
 static void parse_define(char *start);
@@ -191,20 +193,26 @@ static void clear_dependencies(void) {
     dependencies_tail = NULL;
 }
 
-static void record_dependency(const char *path) {
+static void record_dependency(const char *path, bool is_system) {
     if (!path || !*path)
         return;
 
     struct stat st;
     bool has_stat = stat_source(path, &st);
     for (Dependency *dep = dependencies; dep; dep = dep->next) {
-        if (has_stat && dep->has_stat) {
-            if (dep->dev == st.st_dev && dep->ino == st.st_ino)
-                return;
+        bool same = false;
+        if (has_stat && dep->has_stat)
+            same = dep->dev == st.st_dev && dep->ino == st.st_ino;
+        else if (!has_stat && !dep->has_stat)
+            same = !strcmp(dep->path, path);
+        if (!same)
             continue;
-        }
-        if (!has_stat && !dep->has_stat && !strcmp(dep->path, path))
-            return;
+
+        // If a physical header is reachable through both a system and a user
+        // path, keep one prerequisite but retain the stronger user dependency.
+        if (!is_system)
+            dep->is_system = false;
+        return;
     }
 
     Dependency *dep = calloc(1, sizeof(Dependency));
@@ -214,6 +222,7 @@ static void record_dependency(const char *path) {
         dep->ino = st.st_ino;
     }
     dep->path = strdup(path);
+    dep->is_system = is_system;
     if (dependencies_tail)
         dependencies_tail->next = dep;
     else
@@ -235,6 +244,15 @@ const char *preprocess_v2_dependency_at(int index) {
         if (index-- == 0)
             return dep->path;
     return NULL;
+}
+
+int preprocess_v2_dependency_is_system(int index) {
+    if (index < 0)
+        return 0;
+    for (Dependency *dep = dependencies; dep; dep = dep->next)
+        if (index-- == 0)
+            return dep->is_system ? 1 : 0;
+    return 0;
 }
 
 static void queue_cli_macro_action(CliMacroKind kind, const char *arg) {
@@ -271,19 +289,29 @@ void preprocess_v2_add_undef(const char *name) {
     queue_cli_macro_action(CLI_MACRO_UNDEF, name);
 }
 
-void preprocess_v2_add_include_path(const char *path) {
+static void add_include_path(const char *path, bool is_system,
+                             const char *option_name) {
     if (!path || !*path)
-        error("empty include path in -I option");
-    if (!strcmp(path, "-"))
+        error("empty include path in %s option", option_name);
+    if (!is_system && !strcmp(path, "-"))
         error("'-I-' is not supported");
 
     IncludePath *entry = calloc(1, sizeof(IncludePath));
     entry->path = strdup(path);
+    entry->is_system = is_system;
     if (include_paths_tail)
         include_paths_tail->next = entry;
     else
         include_paths = entry;
     include_paths_tail = entry;
+}
+
+void preprocess_v2_add_include_path(const char *path) {
+    add_include_path(path, false, "-I");
+}
+
+void preprocess_v2_add_system_include_path(const char *path) {
+    add_include_path(path, true, "-isystem");
 }
 
 static char *trim_copy(const char *s) {
@@ -453,8 +481,24 @@ static char *read_file_content(char *path) {
     return buf;
 }
 
-static char *read_include_paths(const char *header, char **resolved_path) {
+static bool has_matching_system_include_path(const char *path) {
+    for (IncludePath *entry = include_paths; entry; entry = entry->next)
+        if (entry->is_system && !strcmp(entry->path, path))
+            return true;
+    return false;
+}
+
+static char *read_include_paths(const char *header, bool system,
+                                char **resolved_path) {
     for (IncludePath *entry = include_paths; entry; entry = entry->next) {
+        if (entry->is_system != system)
+            continue;
+        // GCC treats a directory named by both -I and -isystem as a system
+        // directory, so suppress the user-path copy and search it in the
+        // system-path phase instead.
+        if (!system && has_matching_system_include_path(entry->path))
+            continue;
+
         char *candidate = join_include_path(entry->path, header);
         char *content = read_file_content(candidate);
         if (content) {
@@ -2022,7 +2066,8 @@ static void parse_define(char *start) {
     add_macro(name, is_objlike, is_variadic, params, num_params, strdup(start));
 }
 
-char *preprocess_v2_source(char *input, const char *source_name) {
+static char *preprocess_v2_source_impl(char *input, const char *source_name,
+                                       bool source_is_system) {
     const char *saved_file = current_pp_file;
     int saved_line = current_pp_line;
     bool outermost = preprocess_depth++ == 0;
@@ -2130,43 +2175,64 @@ char *preprocess_v2_source(char *input, const char *source_name) {
                 char *owned = NULL;
                 char *resolved_path = NULL;
                 const char *content = NULL;
+                bool included_is_system = false;
                 if (hname[0] == '/') {
                     owned = read_file_content(hname);
-                    if (owned)
+                    if (owned) {
                         resolved_path = strdup(hname);
+                        included_is_system = source_is_system;
+                    }
                 } else if (quote == '"') {
-                    // Quoted headers search next to the immutable physical
-                    // including file first; #line must not redirect this base.
+                    // A quoted include found next to the current physical file
+                    // inherits that file's system classification. This is what
+                    // makes -MM/-MMD omit a system header's private subheaders.
                     resolved_path = source_relative_include_path(source_name, hname);
-                    if (resolved_path)
+                    if (resolved_path) {
                         owned = read_file_content(resolved_path);
+                        if (owned)
+                            included_is_system = source_is_system;
+                    }
                 }
                 if (!owned) {
                     free(resolved_path);
                     resolved_path = NULL;
-                    owned = read_include_paths(hname, &resolved_path);
+                    owned = read_include_paths(hname, false, &resolved_path);
+                    // Once preprocessing is inside a system header, all of its
+                    // indirect includes remain system dependencies even if the
+                    // concrete file is found through a user -I directory.
+                    included_is_system = source_is_system;
+                }
+                if (!owned) {
+                    free(resolved_path);
+                    resolved_path = NULL;
+                    owned = read_include_paths(hname, true, &resolved_path);
+                    if (owned)
+                        included_is_system = true;
                 }
                 if (!owned && quote == '"') {
                     // Preserve the historical current-working-directory fallback
-                    // for quoted includes only, after all explicit -I paths.
+                    // after explicit user and system include directories.
                     owned = read_file_content(hname);
-                    if (owned)
+                    if (owned) {
                         resolved_path = strdup(hname);
+                        included_is_system = source_is_system;
+                    }
                 }
                 content = owned ? owned : get_builtin_header(hname);
                 if (!content)
                     error("cannot include %s", hname);
+                if (!owned)
+                    included_is_system = true;
 
-                // Recursive quoted includes must inherit the resolved physical
-                // path so their own relative header names are based on the
-                // directory of the header that contains them.  A file that has
-                // already executed #pragma once is skipped by physical identity
-                // (device/inode when available), not merely by path spelling.
+                // Recursive includes inherit both the resolved physical path and
+                // system-header classification. Physical dependency deduplication
+                // remains device/inode based, independent of path spelling.
                 const char *included_source = owned ? resolved_path : hname;
                 if (owned)
-                    record_dependency(included_source);
+                    record_dependency(included_source, included_is_system);
                 if (!once_contains_source(included_source)) {
-                    char *sub = preprocess_v2_source((char *)content, included_source);
+                    char *sub = preprocess_v2_source_impl((char *)content, included_source,
+                                                         included_is_system);
                     sb_puts(&out, sub);
                     if (out.len && out.data[out.len - 1] != '\n')
                         sb_putc(&out, '\n');
@@ -2232,6 +2298,10 @@ char *preprocess_v2_source(char *input, const char *source_name) {
     if (outermost)
         clear_once_files();
     return out.data;
+}
+
+char *preprocess_v2_source(char *input, const char *source_name) {
+    return preprocess_v2_source_impl(input, source_name, false);
 }
 
 char *preprocess_v2(char *input) {

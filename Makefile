@@ -18,6 +18,7 @@ test: minicc
 	bash ./test/preprocessor_function_invocation.sh
 	bash ./test/preprocessor_char_constants.sh
 	bash ./test/preprocessor_include_paths.sh
+	bash ./test/preprocessor_system_includes.sh
 	bash ./test/preprocessor_pragma_once.sh
 	bash ./test/dependency_generation.sh
 	bash ./test/dependency_failure_safety.sh

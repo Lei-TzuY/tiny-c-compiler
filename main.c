@@ -27,6 +27,7 @@ typedef struct {
     DependencyTarget *dependency_targets_tail;
     bool dependency_phony;
     bool dependency_side_effect;
+    bool dependency_omit_system;
     bool exit_after_options;
 } DriverOptions;
 
@@ -41,15 +42,18 @@ static void print_usage(FILE *out, const char *prog) {
             "  -E               Preprocess only\n"
             "  -S               Compile to assembly (default)\n"
             "  -fsyntax-only    Check preprocessing, syntax and semantics only\n"
-            "  -M               Emit Make dependencies only\n"
-            "  -MD              Compile and also emit a .d dependency file\n"
+            "  -M               Emit all Make dependencies only\n"
+            "  -MM              Emit non-system Make dependencies only\n"
+            "  -MD              Compile and also emit all .d dependencies\n"
+            "  -MMD             Compile and emit non-system .d dependencies\n"
             "  -MF <file>       Write dependencies to <file>\n"
             "  -MP              Add phony rules for header prerequisites\n"
             "  -MT <target>     Add an exact dependency rule target\n"
             "  -MQ <target>     Add a Make-quoted dependency rule target\n"
             "  -D<macro>[=<value>]  Define a preprocessor macro (default value: 1)\n"
             "  -U<macro>        Undefine a preprocessor macro\n"
-            "  -I<dir>          Add a header search directory\n"
+            "  -I<dir>          Add a user header search directory\n"
+            "  -isystem <dir>   Add a system header search directory\n"
             "  -o <file>        Write output to <file>\n"
             "  -o<file>         Same as '-o <file>'\n"
             "  -h, --help       Show this help and exit\n"
@@ -88,7 +92,9 @@ static DriverOptions parse_options(int argc, char **argv) {
     bool saw_E = false;
     bool saw_S = false;
     bool saw_M = false;
+    bool saw_MM = false;
     bool saw_MD = false;
+    bool saw_MMD = false;
     bool saw_syntax_only = false;
 
     for (int i = 1; i < argc; i++) {
@@ -136,9 +142,23 @@ static DriverOptions parse_options(int argc, char **argv) {
             continue;
         }
 
+        if (!end_options && !strcmp(arg, "-MM")) {
+            saw_MM = true;
+            opts.mode = DRIVER_DEPENDENCIES_ONLY;
+            opts.dependency_omit_system = true;
+            continue;
+        }
+
         if (!end_options && !strcmp(arg, "-MD")) {
             saw_MD = true;
             opts.dependency_side_effect = true;
+            continue;
+        }
+
+        if (!end_options && !strcmp(arg, "-MMD")) {
+            saw_MMD = true;
+            opts.dependency_side_effect = true;
+            opts.dependency_omit_system = true;
             continue;
         }
 
@@ -224,6 +244,18 @@ static DriverOptions parse_options(int argc, char **argv) {
             continue;
         }
 
+        if (!end_options && !strcmp(arg, "-isystem")) {
+            if (++i >= argc)
+                error("%s: missing argument after '-isystem'", argv[0]);
+            preprocess_v2_add_system_include_path(argv[i]);
+            continue;
+        }
+
+        if (!end_options && !strncmp(arg, "-isystem", 8) && arg[8]) {
+            preprocess_v2_add_system_include_path(arg + 8);
+            continue;
+        }
+
         if (!end_options && !strcmp(arg, "-o")) {
             if (++i >= argc)
                 error("%s: missing argument after '-o'", argv[0]);
@@ -248,26 +280,41 @@ static DriverOptions parse_options(int argc, char **argv) {
         opts.input_path = arg;
     }
 
+    int dependency_mode_count = (saw_M ? 1 : 0) + (saw_MM ? 1 : 0) +
+                                (saw_MD ? 1 : 0) + (saw_MMD ? 1 : 0);
+    bool dependency_requested = dependency_mode_count != 0;
+    bool dependency_only = saw_M || saw_MM;
+    bool dependency_side_effect_requested = saw_MD || saw_MMD;
+
     if ((saw_E ? 1 : 0) + (saw_S ? 1 : 0) + (saw_syntax_only ? 1 : 0) > 1)
         error("%s: '-E', '-S' and '-fsyntax-only' are mutually exclusive", argv[0]);
     if (saw_M && saw_MD)
         error("%s: '-M' and '-MD' are mutually exclusive", argv[0]);
+    if (dependency_mode_count > 1)
+        error("%s: '-M', '-MM', '-MD' and '-MMD' are mutually exclusive", argv[0]);
     if (saw_M && (saw_E || saw_S || saw_syntax_only))
         error("%s: '-M' is mutually exclusive with '-E', '-S' and '-fsyntax-only'", argv[0]);
+    if (saw_MM && (saw_E || saw_S || saw_syntax_only))
+        error("%s: '-MM' is mutually exclusive with '-E', '-S' and '-fsyntax-only'", argv[0]);
     if (saw_MD && (saw_E || saw_syntax_only))
         error("%s: '-MD' is not supported with '-E' or '-fsyntax-only'", argv[0]);
+    if (saw_MMD && (saw_E || saw_syntax_only))
+        error("%s: '-MMD' is not supported with '-E' or '-fsyntax-only'", argv[0]);
     if ((opts.dependency_output_path || opts.dependency_targets || opts.dependency_phony) &&
-        !saw_M && !saw_MD)
-        error("%s: '-MF', '-MP', '-MT' and '-MQ' require '-M' or '-MD'", argv[0]);
+        !dependency_requested)
+        error("%s: '-MF', '-MP', '-MT' and '-MQ' require '-M' or '-MD' (also '-MM' or '-MMD')", argv[0]);
     if (!opts.input_path)
         error("%s: no input file", argv[0]);
-    if ((saw_M || saw_MD) && !strcmp(opts.input_path, "-"))
+    if (dependency_requested && !strcmp(opts.input_path, "-"))
         error("%s: dependency generation requires a named input file", argv[0]);
     if (saw_M && opts.output_path)
         error("%s: '-o' is not supported with '-M'; use '-MF'", argv[0]);
+    if (saw_MM && opts.output_path)
+        error("%s: '-o' is not supported with '-MM'; use '-MF'", argv[0]);
     if (opts.mode == DRIVER_SYNTAX_ONLY && opts.output_path)
         error("%s: '-o' is not supported with '-fsyntax-only'", argv[0]);
-    if (saw_MD && opts.dependency_output_path && !strcmp(opts.dependency_output_path, "-") &&
+    if (dependency_side_effect_requested && opts.dependency_output_path &&
+        !strcmp(opts.dependency_output_path, "-") &&
         (!opts.output_path || !strcmp(opts.output_path, "-")))
         error("%s: dependency output and compiler output cannot both use standard output", argv[0]);
     if (opts.output_path && strcmp(opts.output_path, "-") &&
@@ -419,7 +466,8 @@ static void emit_dependency_rule(const DriverOptions *opts) {
     int count = preprocess_v2_dependency_count();
     for (int i = 0; i < count; i++) {
         const char *dep = preprocess_v2_dependency_at(i);
-        if (!dep)
+        if (!dep || (opts->dependency_omit_system &&
+                     preprocess_v2_dependency_is_system(i)))
             continue;
         fputc(' ', out);
         write_make_escaped(out, dep);
@@ -429,7 +477,8 @@ static void emit_dependency_rule(const DriverOptions *opts) {
     if (opts->dependency_phony) {
         for (int i = 0; i < count; i++) {
             const char *dep = preprocess_v2_dependency_at(i);
-            if (!dep)
+            if (!dep || (opts->dependency_omit_system &&
+                         preprocess_v2_dependency_is_system(i)))
                 continue;
             fputc('\n', out);
             write_make_escaped(out, dep);
