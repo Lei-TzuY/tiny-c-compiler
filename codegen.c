@@ -277,6 +277,11 @@ static void cast_value(Type *from, Type *to) {
     }
 
     if (is_integer(from) && is_flonum(to)) {
+        // SSE2 only provides signed 64-bit integer-to-float conversion.  For
+        // unsigned long values with the high bit set, halve the value while
+        // preserving the dropped low bit, convert the now-signed-positive
+        // integer, then double the floating result.  This is the standard
+        // exact-rounding reduction used for the full uint64_t domain.
         if (from->size == 8 && from->is_unsigned) {
             int c = count();
             printf("  test %%rax, %%rax\n");
@@ -310,6 +315,11 @@ static void cast_value(Type *from, Type *to) {
     }
 
     if (is_flonum(from) && is_integer(to)) {
+        // cvtt{s,d}2si also targets signed 64-bit integers.  Values in the
+        // upper half of uint64_t are converted after subtracting 2^63, then
+        // the high bit is restored in the integer result.  C leaves negative,
+        // NaN, and out-of-range floating conversions undefined, so only the
+        // representable unsigned range needs a defined lowering here.
         if (to->size == 8 && to->is_unsigned) {
             int c = count();
             if (from->kind == TY_FLOAT) {
@@ -378,10 +388,17 @@ static void gen_addr(Node *node) {
         else if (node->var->is_local)
             printf("  lea %d(%%rbp), %%rax\n", node->var->offset);
         else if (node->var->is_thread_local) {
+            // Linux x86-64 local-exec TLS: obtain the thread pointer from FS
+            // and add the linker's per-symbol TPOFF relocation. This works for
+            // executable-local definitions and external TLS symbols resolved at
+            // final link time.
             printf("  mov %%fs:0, %%rax\n");
             printf("  lea %s@tpoff(%%rax), %%rax\n", node->var->name);
         }
         else if (node->var->is_function && !node->var->is_static)
+            // A default-visible function may be interposed, so materialize its
+            // address through the GOT. This is valid in PIE code and also works
+            // for functions defined in the current translation unit.
             printf("  mov %s@GOTPCREL(%%rip), %%rax\n", node->var->name);
         else
             printf("  lea %s(%%rip), %%rax\n", node->var->name);
@@ -392,6 +409,9 @@ static void gen_addr(Node *node) {
         return;
     }
     if (node->kind == ND_MEMBER) {
+        // Aggregate values are represented by address throughout this backend.
+        // gen_expr therefore works for both ordinary record lvalues and
+        // materialized record-returning calls such as make().field.
         gen_expr(node->lhs);
         printf("  add $%d, %%rax\n", node->member->offset);
         return;
@@ -498,6 +518,8 @@ static void gen_compound_assign(Node *node) {
     if (node->kind == ND_DIV_EQ || node->kind == ND_MOD_EQ)
         operation_ty = get_common_type_for_nodes(node->lhs, node->rhs);
     else if (node->kind == ND_SHR_EQ)
+        // Integer promotion of the left operand.  Using int as the second
+        // operand is a compact way to request exactly that promotion here.
         operation_ty = integer_promotion_for_node(node->lhs);
 
     gen_addr(node->lhs);
@@ -565,6 +587,9 @@ typedef struct {
     SysVAbiClass classes[2];
 } RecordAbi;
 
+// Parser and backend share the same ABI frontier. Small records use the shared
+// per-eightbyte classifier; complete records larger than 16 bytes are MEMORY
+// class and therefore occupy rounded stack slots instead of GP/SSE registers.
 static RecordAbi require_record_abi(Type *ty) {
     RecordAbi abi = {};
     if (sysv_record_is_memory(ty)) {
@@ -587,6 +612,9 @@ static RecordAbi require_record_abi(Type *ty) {
     return abi;
 }
 
+// Spill an aggregate expression value from the address in RAX. Zeroing the
+// rounded eightbyte area keeps partial final slots deterministic and avoids
+// reading bytes beyond the C object merely to fill an ABI stack slot/register.
 static void push_record_value(Type *ty) {
     RecordAbi abi = require_record_abi(ty);
     printf("  sub $%d, %%rsp\n", abi.slots * 8);
@@ -682,11 +710,16 @@ static void save_record_parameter(Obj *var, int *gp, int *fp, int *stack_arg) {
         return;
     }
 
+    // A small aggregate also reverts entirely to memory if either required
+    // register class is short; do not consume the other class partially.
     int src = 16 + *stack_arg * 8;
     copy_stack_record_to_local(var->ty, src, var->offset);
     *stack_arg += abi.slots;
 }
 
+// Load exactly `bytes` little-endian bytes from the record address in R10 into
+// one GP register. Partial eightbytes are built bytewise so no read crosses the
+// source object's bounds.
 static void load_record_bytes_to_reg(int offset, int bytes,
                                      const char *dst64, const char *dst32) {
     if (bytes == 8) {
@@ -707,6 +740,8 @@ static void emit_memory_record_return(Type *ty) {
     if (!current_fn_obj || !current_fn_obj->sret_offset)
         error("missing hidden record return pointer");
 
+    // Source aggregate address arrives in RAX. The incoming hidden destination
+    // was saved in the frame because arbitrary expressions/calls may clobber RDI.
     printf("  mov %%rax, %%r10\n");
     printf("  mov %d(%%rbp), %%r11\n", current_fn_obj->sret_offset);
 
@@ -730,6 +765,8 @@ static void emit_memory_record_return(Type *ty) {
         printf("  mov %%cl, %d(%%r11)\n", i);
     }
 
+    // SysV requires MEMORY-returning functions to also return the destination
+    // address in RAX.
     printf("  mov %%r11, %%rax\n");
 }
 
@@ -766,6 +803,7 @@ static void materialize_record_call(Node *node) {
         error("missing record call return buffer");
 
     if (abi.memory) {
+        // The callee wrote directly into this hidden destination.
         printf("  lea %d(%%rbp), %%rax\n", node->ret_buffer->offset);
         return;
     }
@@ -785,6 +823,9 @@ static void materialize_record_call(Node *node) {
     printf("  lea %d(%%rbp), %%rax\n", node->ret_buffer->offset);
 }
 
+// Generate a function call (direct or indirect via function pointer). Small
+// records draw independently from GP/SSE pools; MEMORY records always use the
+// stack. A MEMORY return reserves RDI for the hidden caller-owned destination.
 static void gen_funcall(Node *node) {
     bool indirect = (node->funcname == NULL);
     bool memory_return = node->ty && node->ty->kind == TY_STRUCT &&
@@ -792,7 +833,7 @@ static void gen_funcall(Node *node) {
 
     if (indirect) {
         gen_expr(node->lhs);
-        push();
+        push(); // function address remains above the argument spills
     }
 
     Node *args[32];
@@ -902,6 +943,8 @@ static void gen_funcall(Node *node) {
     if (indirect)
         printf("  mov %d(%%r11), %%r10\n", total_spill_slots * 8);
 
+    // Keep alignment padding above the stack argument area, preserving the
+    // first stack-passed argument at 0(%rsp) immediately before call.
     int pad = (depth + stack_count) & 1;
     if (pad) {
         printf("  sub $8, %%rsp\n");
@@ -930,6 +973,8 @@ static void gen_funcall(Node *node) {
         printf("  lea %d(%%rbp), %%rdi\n", node->ret_buffer->offset);
     }
 
+    // For variadic calls AL counts every XMM register used by named/unnamed
+    // scalar or small-record arguments. MEMORY records contribute no XMM regs.
     printf("  mov $%d, %%eax\n", fp_count);
     if (indirect)
         printf("  call *%%r10\n");
@@ -951,6 +996,11 @@ static void gen_funcall(Node *node) {
         depth -= spill_count;
     }
 
+    // SysV places scalar integer return values in the low part of RAX. For
+    // types narrower than 64 bits the remaining bits are not a C value and
+    // must be interpreted according to the declared return type at the call
+    // site. Canonicalize signed/unsigned bool/char/short/int exactly as loads
+    // and casts do before any enclosing expression consumes the result.
     if (node->ty && node->ty->kind != TY_STRUCT)
         normalize(node->ty);
 
@@ -958,6 +1008,8 @@ static void gen_funcall(Node *node) {
         materialize_record_call(node);
 }
 
+// Copy one low eightbyte from the variadic register-save area into a
+// record result local. Only bytes belonging to the C object are stored.
 static void copy_va_register_slot_to_local(const char *index_reg,
                                            int dst, int bytes) {
     printf("  mov (%%rdx,%s), %%r10\n", index_reg);
@@ -975,6 +1027,10 @@ static void copy_va_stack_record_to_local(Type *ty, int dst) {
     }
 }
 
+// Aggregate va_arg mirrors the ordinary SysV classifier. Small records consume
+// independent GP/SSE save slots only when every required class is available;
+// otherwise the whole value comes from overflow_arg_area. MEMORY records always
+// come from overflow_arg_area and do not consume either register cursor.
 static void gen_record_va_arg(Node *node) {
     RecordAbi abi = require_record_abi(node->ty);
     if (!node->ret_buffer)
@@ -1083,7 +1139,7 @@ static void gen_expr(Node *node) {
     if (node->kind == ND_VA_START) {
         if (!current_fn_obj || !current_fn_obj->is_variadic)
             error("va_start outside variadic function");
-        gen_expr(node->lhs);
+        gen_expr(node->lhs); // RAX = &va_list
         printf("  movl $%d, 0(%%rax)\n", current_fn_obj->va_gp_offset);
         printf("  movl $%d, 4(%%rax)\n", current_fn_obj->va_fp_offset);
         printf("  lea %d(%%rbp), %%rdx\n", current_fn_obj->va_stack_offset);
@@ -1099,7 +1155,7 @@ static void gen_expr(Node *node) {
             return;
         }
 
-        gen_expr(node->lhs);
+        gen_expr(node->lhs); // RAX = &va_list
         printf("  mov %%rax, %%rdi\n");
         int c = count();
 
@@ -1183,15 +1239,12 @@ static void gen_expr(Node *node) {
     if (node->kind == ND_NEG) {
         gen_expr(node->lhs);
         printf("  neg %%rax\n");
-        if (is_integer(node->ty))
-            normalize(node->ty);
         return;
     }
 
     if (node->kind == ND_BITNOT) {
         gen_expr(node->lhs);
         printf("  not %%rax\n");
-        normalize(node->ty);
         return;
     }
 
@@ -1315,13 +1368,19 @@ static void gen_expr(Node *node) {
         if (common->kind == TY_FLOAT) {
             if (node->kind == ND_ADD) printf("  addss %%xmm1, %%xmm0\n");
             else if (node->kind == ND_MUL) printf("  mulss %%xmm1, %%xmm0\n");
-            else if (node->kind == ND_SUB) printf("  subss %%xmm1, %%xmm0\n");
-            else if (node->kind == ND_DIV) printf("  divss %%xmm1, %%xmm0\n");
+            else if (node->kind == ND_SUB) {
+                printf("  subss %%xmm1, %%xmm0\n");
+            } else if (node->kind == ND_DIV) {
+                printf("  divss %%xmm1, %%xmm0\n");
+            }
         } else {
             if (node->kind == ND_ADD) printf("  addsd %%xmm1, %%xmm0\n");
             else if (node->kind == ND_MUL) printf("  mulsd %%xmm1, %%xmm0\n");
-            else if (node->kind == ND_SUB) printf("  subsd %%xmm1, %%xmm0\n");
-            else if (node->kind == ND_DIV) printf("  divsd %%xmm1, %%xmm0\n");
+            else if (node->kind == ND_SUB) {
+                printf("  subsd %%xmm1, %%xmm0\n");
+            } else if (node->kind == ND_DIV) {
+                printf("  divsd %%xmm1, %%xmm0\n");
+            }
         }
         return;
     }
@@ -1422,8 +1481,11 @@ static int count(void) {
 static void emit_switch_dispatch(Node *node, Node **default_case) {
     if (!node)
         return;
+
+    // A nested switch owns its own case/default labels.
     if (node->kind == ND_SWITCH)
         return;
+
     if (node->kind == ND_CASE) {
         printf("  movabs $%" PRId64 ", %%rdi\n", node->val);
         printf("  cmp %%rdi, %%rax\n");
@@ -1431,25 +1493,30 @@ static void emit_switch_dispatch(Node *node, Node **default_case) {
         emit_switch_dispatch(node->lhs, default_case);
         return;
     }
+
     if (node->kind == ND_DEFAULT) {
         *default_case = node;
         emit_switch_dispatch(node->lhs, default_case);
         return;
     }
+
     if (node->kind == ND_BLOCK) {
         for (Node *n = node->body; n; n = n->next)
             emit_switch_dispatch(n, default_case);
         return;
     }
+
     if (node->kind == ND_IF) {
         emit_switch_dispatch(node->then, default_case);
         emit_switch_dispatch(node->els, default_case);
         return;
     }
+
     if (node->kind == ND_WHILE || node->kind == ND_DO || node->kind == ND_FOR) {
         emit_switch_dispatch(node->then, default_case);
         return;
     }
+
     if (node->kind == ND_LABEL) {
         emit_switch_dispatch(node->lhs, default_case);
         return;
@@ -1461,20 +1528,25 @@ static void gen_stmt(Node *node) {
         printf("  mov %%rsp, %d(%%rbp)\n", node->var->offset);
         return;
     }
+
     if (node->kind == ND_VLA_ALLOC) {
         if (!node->var || !node->var->vla_size)
             error("invalid VLA allocation metadata");
         printf("  mov %d(%%rbp), %%rax\n", node->var->vla_size->offset);
+        // The backend supports object alignments through 16 bytes. Rounding
+        // each dynamic allocation to 16 also keeps SysV call alignment stable.
         printf("  add $15, %%rax\n");
         printf("  and $-16, %%rax\n");
         printf("  sub %%rax, %%rsp\n");
         printf("  mov %%rsp, %d(%%rbp)\n", node->var->offset);
         return;
     }
+
     if (node->kind == ND_VLA_RESTORE) {
         printf("  mov %d(%%rbp), %%rsp\n", node->var->offset);
         return;
     }
+
     if (node->kind == ND_RETURN) {
         if (node->lhs) {
             gen_expr(node->lhs);
@@ -1486,6 +1558,7 @@ static void gen_stmt(Node *node) {
         printf("  jmp .L.return.%s\n", current_fn);
         return;
     }
+
     if (node->kind == ND_BREAK) {
         if (!brk_label) error("break outside loop");
         if (node->var)
@@ -1493,6 +1566,7 @@ static void gen_stmt(Node *node) {
         printf("  jmp %s\n", brk_label);
         return;
     }
+
     if (node->kind == ND_CONTINUE) {
         if (!cnt_label) error("continue outside loop");
         if (node->var)
@@ -1500,30 +1574,36 @@ static void gen_stmt(Node *node) {
         printf("  jmp %s\n", cnt_label);
         return;
     }
+
     if (node->kind == ND_GOTO) {
         printf("  jmp %s\n", node->unique_label);
         return;
     }
+
     if (node->kind == ND_LABEL) {
         printf("%s:\n", node->unique_label);
         gen_stmt(node->lhs);
         return;
     }
+
     if (node->kind == ND_CASE || node->kind == ND_DEFAULT) {
         printf("%s:\n", node->unique_label);
         if (node->lhs)
             gen_stmt(node->lhs);
         return;
     }
+
     if (node->kind == ND_EXPR_STMT) {
         if (node->lhs) gen_expr(node->lhs);
         return;
     }
+
     if (node->kind == ND_BLOCK) {
         for (Node *n = node->body; n; n = n->next)
             gen_stmt(n);
         return;
     }
+
     if (node->kind == ND_IF) {
         int c = count();
         gen_expr(node->cond);
@@ -1537,6 +1617,7 @@ static void gen_stmt(Node *node) {
         printf(".L.end.%d:\n", c);
         return;
     }
+
     if (node->kind == ND_WHILE) {
         int c = count();
         char brk_buf[32], cnt_buf[32];
@@ -1544,6 +1625,7 @@ static void gen_stmt(Node *node) {
         sprintf(cnt_buf, ".L.begin.%d", c);
         char *old_brk = brk_label, *old_cnt = cnt_label;
         brk_label = brk_buf; cnt_label = cnt_buf;
+
         printf(".L.begin.%d:\n", c);
         gen_expr(node->cond);
         value_to_bool(node->cond->ty);
@@ -1552,9 +1634,11 @@ static void gen_stmt(Node *node) {
         gen_stmt(node->then);
         printf("  jmp .L.begin.%d\n", c);
         printf(".L.end.%d:\n", c);
+
         brk_label = old_brk; cnt_label = old_cnt;
         return;
     }
+
     if (node->kind == ND_DO) {
         int c = count();
         char brk_buf[32], cnt_buf[32];
@@ -1562,6 +1646,7 @@ static void gen_stmt(Node *node) {
         sprintf(cnt_buf, ".L.continue.%d", c);
         char *old_brk = brk_label, *old_cnt = cnt_label;
         brk_label = brk_buf; cnt_label = cnt_buf;
+
         printf(".L.begin.%d:\n", c);
         gen_stmt(node->then);
         printf(".L.continue.%d:\n", c);
@@ -1570,9 +1655,11 @@ static void gen_stmt(Node *node) {
         printf("  cmp $0, %%rax\n");
         printf("  jne .L.begin.%d\n", c);
         printf(".L.end.%d:\n", c);
+
         brk_label = old_brk; cnt_label = old_cnt;
         return;
     }
+
     if (node->kind == ND_FOR) {
         int c = count();
         char brk_buf[32], cnt_buf[32];
@@ -1580,6 +1667,7 @@ static void gen_stmt(Node *node) {
         sprintf(cnt_buf, ".L.continue.%d", c);
         char *old_brk = brk_label, *old_cnt = cnt_label;
         brk_label = brk_buf; cnt_label = cnt_buf;
+
         if (node->init) gen_stmt(node->init);
         printf(".L.begin.%d:\n", c);
         if (node->cond) {
@@ -1595,33 +1683,44 @@ static void gen_stmt(Node *node) {
         printf(".L.end.%d:\n", c);
         if (node->var)
             printf("  mov %d(%%rbp), %%rsp\n", node->var->offset);
+
         brk_label = old_brk; cnt_label = old_cnt;
         return;
     }
+
     if (node->kind == ND_SWITCH) {
         int c = count();
         gen_expr(node->cond);
         cast_value(node->cond->ty, node->ty);
+
         Node *default_case = NULL;
         emit_switch_dispatch(node->then, &default_case);
         if (default_case)
             printf("  jmp %s\n", default_case->unique_label);
         else
             printf("  jmp .L.end.%d\n", c);
+
         char brk_buf[32];
         sprintf(brk_buf, ".L.end.%d", c);
         char *old_brk = brk_label;
         brk_label = brk_buf;
+
         gen_stmt(node->then);
+
         printf(".L.end.%d:\n", c);
         brk_label = old_brk;
         return;
     }
+
     error("invalid statement");
 }
 
 static int align_up_cg(int n, int a) { return (n + a - 1) / a * a; }
 
+// File-scope and block-static objects must begin at an address satisfying their
+// declared type alignment. GAS data directives do not implicitly realign the
+// location counter, so a one-byte object emitted immediately before a long,
+// pointer, double or record would otherwise leave the later symbol misaligned.
 static void emit_data_alignment(Obj *var) {
     int align = var->align > 0 ? var->align
                                : (var->ty && var->ty->align > 0 ? var->ty->align : 1);
@@ -1643,15 +1742,20 @@ static void emit_object_section(Obj *var, bool initialized) {
 static void assign_lvar_offsets(Program *prog) {
     for (Function *fn = prog->fns; fn; fn = fn->next) {
         int offset = 0;
+
         if (fn->is_variadic) {
+            // SysV AMD64 register_save_area: 6 GP slots followed by 8 16-byte
+            // SSE slots. RBP is 16-byte aligned here, so -176 is aligned too.
             offset = 176;
             fn->va_offset = -offset;
         }
+
         if (fn->return_ty && sysv_record_is_memory(fn->return_ty)) {
             offset += 8;
             offset = align_up_cg(offset, 8);
             fn->sret_offset = -offset;
         }
+
         for (Obj *var = fn->locals; var; var = var->next) {
             int align = var->is_vla ? 8
                                     : (var->align > 0 ? var->align
@@ -1661,6 +1765,7 @@ static void assign_lvar_offsets(Program *prog) {
             offset = align_up_cg(offset, align);
             var->offset = -offset;
         }
+
         if (fn->is_variadic) {
             int gp = fn->return_ty && sysv_record_is_memory(fn->return_ty) ? 1 : 0;
             int fp = 0;
@@ -1668,31 +1773,39 @@ static void assign_lvar_offsets(Program *prog) {
             for (Obj *p = fn->params; p; p = p->param_next) {
                 if (p->ty->kind == TY_STRUCT) {
                     RecordAbi abi = require_record_abi(p->ty);
-                    if (abi.memory)
+                    if (abi.memory) {
                         stack_arg += abi.slots;
-                    else if (gp + abi.gp <= 6 && fp + abi.fp <= 8) {
+                    } else if (gp + abi.gp <= 6 && fp + abi.fp <= 8) {
                         gp += abi.gp;
                         fp += abi.fp;
-                    } else
+                    } else {
                         stack_arg += abi.slots;
+                    }
                 } else if (is_flonum(p->ty)) {
-                    if (fp < 8) fp++; else stack_arg++;
+                    if (fp < 8)
+                        fp++;
+                    else
+                        stack_arg++;
                 } else {
-                    if (gp < 6) gp++; else stack_arg++;
+                    if (gp < 6)
+                        gp++;
+                    else
+                        stack_arg++;
                 }
             }
             fn->va_gp_offset = gp * 8;
             fn->va_fp_offset = 48 + fp * 16;
             fn->va_stack_offset = 16 + stack_arg * 8;
         }
+
         fn->stack_size = align_up_cg(offset, 16);
     }
 }
 
 static void emit_data(Program *prog) {
     for (Obj *var = prog->globals; var; var = var->next) {
-        if (var->is_function) continue;
-        if (var->is_extern) continue;
+        if (var->is_function) continue; // function symbols don't need storage
+        if (var->is_extern) continue;   // extern declarations don't allocate
 
         if (var->init_image) {
             emit_object_section(var, true);
@@ -1700,11 +1813,16 @@ static void emit_data(Program *prog) {
                 printf("  .globl %s\n", var->name);
             emit_data_alignment(var);
             printf("%s:\n", var->name);
+
             for (int off = 0; off < var->init_image_size;) {
                 Relocation *found = NULL;
                 for (Relocation *rel = var->init_relocs; rel; rel = rel->next) {
-                    if (rel->offset == off) { found = rel; break; }
+                    if (rel->offset == off) {
+                        found = rel;
+                        break;
+                    }
                 }
+
                 if (found) {
                     if (found->addend > 0)
                         printf("  .quad %s+%" PRId64 "\n", found->label, found->addend);
@@ -1715,6 +1833,7 @@ static void emit_data(Program *prog) {
                     off += 8;
                     continue;
                 }
+
                 printf("  .byte %u\n", (unsigned char)var->init_image[off]);
                 off++;
             }
@@ -1759,9 +1878,11 @@ static void emit_data(Program *prog) {
             emit_data_alignment(var);
             printf("%s:\n", var->name);
             if (var->init_reloc_addend > 0)
-                printf("  .quad %s+%" PRId64 "\n", var->init_reloc_label, var->init_reloc_addend);
+                printf("  .quad %s+%" PRId64 "\n", var->init_reloc_label,
+                       var->init_reloc_addend);
             else if (var->init_reloc_addend < 0)
-                printf("  .quad %s%" PRId64 "\n", var->init_reloc_label, var->init_reloc_addend);
+                printf("  .quad %s%" PRId64 "\n", var->init_reloc_label,
+                       var->init_reloc_addend);
             else
                 printf("  .quad %s\n", var->init_reloc_label);
         } else if (var->has_init_val) {
@@ -1798,6 +1919,7 @@ static void emit_data(Program *prog) {
 void codegen(Program *prog) {
     assign_lvar_offsets(prog);
     emit_data(prog);
+
     printf("  .text\n");
     for (Function *fn = prog->fns; fn; fn = fn->next) {
         if (!fn->is_static)
@@ -1809,6 +1931,7 @@ void codegen(Program *prog) {
         if (fn->return_ty && fn->return_ty->kind == TY_STRUCT)
             require_record_abi(fn->return_ty);
 
+        // Prologue
         printf("  push %%rbp\n");
         printf("  mov %%rsp, %%rbp\n");
         printf("  sub $%d, %%rsp\n", fn->stack_size);
@@ -1827,6 +1950,8 @@ void codegen(Program *prog) {
                 printf("  movaps %%xmm%d, %d(%%rbp)\n", i, fn->va_offset + 48 + i * 16);
         }
 
+        // Save named parameters to ordinary local slots. GP and SSE register
+        // numbers advance independently, with a shared source-order stack area.
         int gp = fn->return_ty && sysv_record_is_memory(fn->return_ty) ? 1 : 0;
         int fp = 0;
         int stack_arg = 0;
@@ -1889,11 +2014,15 @@ void codegen(Program *prog) {
             assert(depth == 0);
         }
 
+        // Epilogue
         printf(".L.return.%s:\n", fn->name);
         printf("  mov %%rbp, %%rsp\n");
         printf("  pop %%rbp\n");
         printf("  ret\n");
     }
 
+    // GNU/ELF linkers treat an input object without this marker as potentially
+    // requiring an executable stack. Generated C code never needs one, so emit
+    // the conventional empty note section explicitly.
     printf("  .section .note.GNU-stack,\"\",@progbits\n");
 }
