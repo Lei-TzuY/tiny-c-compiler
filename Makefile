@@ -12,6 +12,7 @@ test: minicc
 	bash ./test/driver_stdin.sh
 	bash ./test/driver_cli.sh
 	bash ./test/line_splicing.sh
+	bash ./test/digraph_punctuators.sh
 	bash ./test/preprocessor.sh
 	bash ./test/preprocessor_advanced.sh
 	bash ./test/preprocessor_stringification_literals.sh
