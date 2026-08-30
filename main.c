@@ -28,6 +28,7 @@ typedef struct {
     bool dependency_phony;
     bool dependency_side_effect;
     bool dependency_omit_system;
+    bool dependency_missing_generated;
     bool exit_after_options;
 } DriverOptions;
 
@@ -47,6 +48,7 @@ static void print_usage(FILE *out, const char *prog) {
             "  -MD              Compile and also emit all .d dependencies\n"
             "  -MMD             Compile and emit non-system .d dependencies\n"
             "  -MF <file>       Write dependencies to <file>\n"
+            "  -MG              Treat missing headers as generated dependencies\n"
             "  -MP              Add phony rules for header prerequisites\n"
             "  -MT <target>     Add an exact dependency rule target\n"
             "  -MQ <target>     Add a Make-quoted dependency rule target\n"
@@ -159,6 +161,12 @@ static DriverOptions parse_options(int argc, char **argv) {
             saw_MMD = true;
             opts.dependency_side_effect = true;
             opts.dependency_omit_system = true;
+            continue;
+        }
+
+        if (!end_options && !strcmp(arg, "-MG")) {
+            opts.dependency_missing_generated = true;
+            preprocess_v2_enable_missing_header_dependencies();
             continue;
         }
 
@@ -303,6 +311,8 @@ static DriverOptions parse_options(int argc, char **argv) {
     if ((opts.dependency_output_path || opts.dependency_targets || opts.dependency_phony) &&
         !dependency_requested)
         error("%s: '-MF', '-MP', '-MT' and '-MQ' require '-M' or '-MD' (also '-MM' or '-MMD')", argv[0]);
+    if (opts.dependency_missing_generated && !dependency_only)
+        error("%s: '-MG' requires dependency-only mode '-M' or '-MM'", argv[0]);
     if (!opts.input_path)
         error("%s: no input file", argv[0]);
     if (dependency_requested && !strcmp(opts.input_path, "-"))

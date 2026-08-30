@@ -95,6 +95,7 @@ static Dependency *dependencies;
 static Dependency *dependencies_tail;
 static IncludePath *include_paths;
 static IncludePath *include_paths_tail;
+static bool missing_header_dependencies_enabled;
 
 static void sb_init(StrBuf *sb, size_t cap) {
     sb->cap = cap < 64 ? 64 : cap;
@@ -230,6 +231,31 @@ static void record_dependency(const char *path, bool is_system) {
     dependencies_tail = dep;
 }
 
+static void record_missing_dependency(const char *path, bool is_system) {
+    if (!path || !*path)
+        return;
+
+    // -MG prerequisites are names, not resolved filesystem identities. Do
+    // not stat() them: an unrelated CWD file with the same spelling may
+    // exist even though angle-header lookup deliberately did not search it.
+    for (Dependency *dep = dependencies; dep; dep = dep->next) {
+        if (strcmp(dep->path, path))
+            continue;
+        if (!is_system)
+            dep->is_system = false;
+        return;
+    }
+
+    Dependency *dep = calloc(1, sizeof(Dependency));
+    dep->path = strdup(path);
+    dep->is_system = is_system;
+    if (dependencies_tail)
+        dependencies_tail->next = dep;
+    else
+        dependencies = dep;
+    dependencies_tail = dep;
+}
+
 int preprocess_v2_dependency_count(void) {
     int count = 0;
     for (Dependency *dep = dependencies; dep; dep = dep->next)
@@ -312,6 +338,10 @@ void preprocess_v2_add_include_path(const char *path) {
 
 void preprocess_v2_add_system_include_path(const char *path) {
     add_include_path(path, true, "-isystem");
+}
+
+void preprocess_v2_enable_missing_header_dependencies(void) {
+    missing_header_dependencies_enabled = true;
 }
 
 static char *trim_copy(const char *s) {
@@ -2219,8 +2249,23 @@ static char *preprocess_v2_source_impl(char *input, const char *source_name,
                     }
                 }
                 content = owned ? owned : get_builtin_header(hname);
-                if (!content)
-                    error("cannot include %s", hname);
+                if (!content) {
+                    if (!missing_header_dependencies_enabled)
+                        error("cannot include %s", hname);
+
+                    // GCC -MG records the header spelling after macro expansion
+                    // exactly as written in the include operand, without a
+                    // source-relative or search-directory prefix. Missing
+                    // headers reached from a system subtree remain system
+                    // dependencies for -MM filtering.
+                    record_missing_dependency(hname, source_is_system);
+                    free(owned);
+                    free(resolved_path);
+                    free(expanded_include);
+                    free(directive);
+                    free(line);
+                    continue;
+                }
                 if (!owned)
                     included_is_system = true;
 
