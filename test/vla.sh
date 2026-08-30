@@ -82,6 +82,10 @@ assert_run 0 'int get(int n,int m,int a[n][m]){return sizeof a[0]==(unsigned lon
 assert_run 0 'int get(int m,int (*p)[m]){p++;return sizeof *p==(unsigned long)m*4&&p[-1][m-1]==31?0:1;}int main(void){int n=2,m=6;int a[n][m];a[0][5]=31;return get(m,a);}'
 assert_run 0 'int get(int x,int y,int z,int a[x][y][z]){return a[1][2][3]==37&&sizeof a[0]==(unsigned long)y*z*4?0:1;}int main(void){int a[2][3][4];a[1][2][3]=37;return get(2,3,4,a);}'
 
+# The outermost array parameter still adjusts to a pointer when `static` carries
+# a runtime minimum bound, while the inner VLA dimension keeps its row stride.
+assert_run 0 'int get(int n,int m,int a[static n][m]){return sizeof a==8&&sizeof a[0]==(unsigned long)m*4&&a[n-1][m-1]==41?0:1;}int main(void){int n=3,m=7;int a[n][m];a[2][6]=41;return get(n,m,a);}'
+
 # Dynamic allocations satisfy the element alignment and preserve call ABI
 # alignment because every stack decrement is rounded to 16 bytes.
 assert_run 0 'int check(double *p){return ((unsigned long)p)&7;}int main(void){int n=5;double a[n];return check(a);}'
