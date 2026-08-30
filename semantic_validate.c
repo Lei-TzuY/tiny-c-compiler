@@ -6,7 +6,7 @@ static bool is_complete_object_type(Type *ty) {
     if (ty->kind == TY_STRUCT)
         return !ty->is_incomplete;
     if (ty->kind == TY_ARRAY)
-        return ty->array_len > 0 && is_complete_object_type(ty->base);
+        return ty->array_len != 0 && is_complete_object_type(ty->base);
     return true;
 }
 

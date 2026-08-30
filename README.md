@@ -40,7 +40,7 @@ The compiler is designed as an educational systems-programming project rather th
 
 - `sizeof` and C11 `_Alignof` are integer constant expressions typed as LP64 `size_t` (`unsigned long`), so their signed/unsigned arithmetic follows the normal usual arithmetic conversions.
 
-- C99 VLA support currently materializes direct automatic arrays whose runtime-sized dimension is outermost and whose element stride is compile-time known. Runtime-sized inner dimensions, pointer-to-VLA objects, variably-modified typedefs, VLA initializers, and `goto` in a function containing a VLA remain explicitly diagnosed until runtime-stride and arbitrary control-transfer metadata are added.
+- C99 VLA support materializes automatic variably-modified arrays with saved runtime byte extents for every dynamic dimension. Multidimensional VLAs, fixed outer dimensions containing VLAs, pointer-to-VLA objects, parameter VLA row strides, runtime `sizeof`, indexing, pointer arithmetic, pointer difference, and lexical stack restoration are supported. Variably-modified typedefs, VLA initializers, and `goto` in a function containing a variably-modified local remain explicitly diagnosed.
 
 - Static/global integer scalar and array initializers accept type-aware integer constant expressions, including enum constants, casts, shifts, short-circuit logic, and ternary expressions. Signed integer constant-expression arithmetic diagnoses overflow and invalid signed left shifts instead of wrapping, while unsigned arithmetic retains modulo semantics.
 

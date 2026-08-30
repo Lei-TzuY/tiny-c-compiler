@@ -57,6 +57,31 @@ assert_run 0 'int main(void){int n=3;int a[n][4];a[2][3]=9;return sizeof a==48&&
 # Non-scalar complete element types use their compile-time stride.
 assert_run 0 'struct S{long x;};int main(void){int n=3;struct S a[n];a[2].x=11;return sizeof a==24&&a[2].x==11?0:1;}'
 
+
+# Every variably-modified dimension has an allocation-time byte extent. This
+# enables true runtime row/plane strides rather than requiring fixed inner sizes.
+assert_run 0 'int main(void){int n=3,m=5;int a[n][m];a[2][4]=17;return sizeof a==60&&sizeof a[0]==20&&a[2][4]==17?0:1;}'
+assert_run 0 'int main(void){int n=4;int a[3][n];a[2][3]=11;return sizeof a==48&&sizeof a[0]==16&&a[2][3]==11?0:1;}'
+assert_run 0 'int main(void){int x=2,y=3,z=4;int a[x][y][z];a[1][2][3]=23;return sizeof a==96&&sizeof a[0]==48&&sizeof a[0][0]==16&&a[1][2][3]==23?0:1;}'
+
+# Bounds are saved once. Later mutation must not change object sizeof or row
+# stride, and sizeof(type-name) recursively evaluates all runtime dimensions.
+assert_run 0 'int main(void){int n=2,m=3;int a[n++][m++];if(n!=3||m!=4)return 1;n=9;m=10;a[1][2]=7;return sizeof a==24&&sizeof a[0]==12&&a[1][2]==7?0:2;}'
+assert_run 0 'int main(void){int n=2,m=3;unsigned long s=sizeof(int[n][m]);return s==24?0:1;}'
+assert_run 0 'int main(void){int n=2,m=3;unsigned long a=_Alignof(int[n++][m++]);return a==4&&n==2&&m==3?0:1;}'
+
+# Pointer-to-VLA objects use the saved runtime row extent for indexing,
+# increment/decrement, compound arithmetic and pointer difference.
+assert_run 0 'int main(void){int n=3,m=4;int a[n][m];int (*p)[m]=a;p[2][3]=19;return sizeof *p==16&&a[2][3]==19?0:1;}'
+assert_run 0 'int main(void){int n=4,m=3;int a[n][m];int (*p)[m]=a;int (*q)[m]=p;p++;p+=2;return p-q==3?0:1;}'
+assert_run 0 'int main(void){int n=4,m=3;int a[n][m];int (*p)[m]=a+3;p--;return p-a==2?0:1;}'
+
+# Callee-side parameter adjustment retains inner VLA dimensions. Their bounds
+# are rebound to the real parameter locals and materialized before the body.
+assert_run 0 'int get(int n,int m,int a[n][m]){return sizeof a[0]==(unsigned long)m*4&&a[n-1][m-1]==29?0:1;}int main(void){int n=3,m=5;int a[n][m];a[2][4]=29;return get(n,m,a);}'
+assert_run 0 'int get(int m,int (*p)[m]){p++;return sizeof *p==(unsigned long)m*4&&p[-1][m-1]==31?0:1;}int main(void){int n=2,m=6;int a[n][m];a[0][5]=31;return get(m,a);}'
+assert_run 0 'int get(int x,int y,int z,int a[x][y][z]){return a[1][2][3]==37&&sizeof a[0]==(unsigned long)y*z*4?0:1;}int main(void){int a[2][3][4];a[1][2][3]=37;return get(2,3,4,a);}'
+
 # Dynamic allocations satisfy the element alignment and preserve call ABI
 # alignment because every stack decrement is rounded to 16 bytes.
 assert_run 0 'int check(double *p){return ((unsigned long)p)&7;}int main(void){int n=5;double a[n];return check(a);}'
@@ -91,9 +116,6 @@ assert_reject 'int main(void){int n=3;extern int a[n];return 0;}'
 assert_reject 'int n;int a[n];int main(void){return 0;}'
 assert_reject 'int main(void){int n=3;struct S{int a[n];};return 0;}'
 assert_reject 'int main(void){int n=3;typedef int A[n];return 0;}'
-assert_reject 'int main(void){int n=3;int a[3][n];return 0;}'
-assert_reject 'int main(void){int n=3,m=4;int a[n][m];return 0;}'
-assert_reject 'int main(void){int n=3;int (*p)[n];return p!=0;}'
 assert_reject 'int main(void){int n=3;int a[n];goto out;out:return a[0];}'
 assert_reject 'int f(int n,int a[static *]);int main(void){return 0;}'
 

@@ -353,6 +353,8 @@ static bool assignment_compatible(Type *dst, Node *rhs);
 static bool is_scalar_expr(Node *node);
 static Node *new_initializer_assign(Node *lhs, Node *rhs, Token *at);
 static Node *new_checked_assign(Node *lhs, Node *rhs, Token *op);
+static bool type_is_variably_modified(Type *ty);
+static Node *vla_size_expression(Type *ty);
 
 static Type *current_return_ty;
 static bool current_function_variadic;
@@ -621,10 +623,20 @@ static Type *pointer_arithmetic_type(Type *ty) {
     // Standard C pointer arithmetic is defined only for pointers to complete
     // object types.  In particular, void* and function pointers are not
     // arithmetic pointers (even though some host compilers accept extensions).
-    if (base->kind == TY_VOID || base->kind == TY_FUNC ||
-        base->is_incomplete || base->size <= 0)
+    if (base->kind == TY_VOID || base->kind == TY_FUNC || base->is_incomplete)
+        return NULL;
+    if (base->size <= 0 &&
+        !(base->kind == TY_ARRAY && type_is_variably_modified(base)))
         return NULL;
     return ty;
+}
+
+static Node *pointer_stride_expression(Type *ptr) {
+    if (!ptr || ptr->kind != TY_PTR || !ptr->base)
+        error("internal error: pointer stride requested for non-pointer type");
+    if (ptr->base->kind == TY_ARRAY && type_is_variably_modified(ptr->base))
+        return vla_size_expression(ptr->base);
+    return new_size_t_num(ptr->base->size);
 }
 
 static Node *new_add(Node *lhs, Node *rhs) {
@@ -639,14 +651,16 @@ static Node *new_add(Node *lhs, Node *rhs) {
 
     if (lp && is_integer(rhs->ty)) {
         Node *node = new_binary(ND_ADD, lhs,
-                                new_binary(ND_MUL, rhs, new_long(lp->base->size)));
+                                new_binary(ND_MUL, rhs,
+                                           pointer_stride_expression(lp)));
         node->ty = lp;
         return node;
     }
 
     if (is_integer(lhs->ty) && rp) {
         Node *node = new_binary(ND_ADD, rhs,
-                                new_binary(ND_MUL, lhs, new_long(rp->base->size)));
+                                new_binary(ND_MUL, lhs,
+                                           pointer_stride_expression(rp)));
         node->ty = rp;
         return node;
     }
@@ -666,7 +680,8 @@ static Node *new_sub(Node *lhs, Node *rhs) {
 
     if (lp && is_integer(rhs->ty)) {
         Node *node = new_binary(ND_SUB, lhs,
-                                new_binary(ND_MUL, rhs, new_long(lp->base->size)));
+                                new_binary(ND_MUL, rhs,
+                                           pointer_stride_expression(lp)));
         node->ty = lp;
         return node;
     }
@@ -677,7 +692,7 @@ static Node *new_sub(Node *lhs, Node *rhs) {
 
         Node *diff = new_binary(ND_SUB, lhs, rhs);
         diff->ty = ty_long;
-        Node *node = new_binary(ND_DIV, diff, new_long(lp->base->size));
+        Node *node = new_binary(ND_DIV, diff, pointer_stride_expression(lp));
         node->ty = ty_long;
         return node;
     }
@@ -698,7 +713,7 @@ static Node *new_compound_assign(NodeKind kind, Node *lhs, Node *rhs) {
 
         Type *ptr = pointer_arithmetic_type(lhs->ty);
         if (ptr && lhs->ty->kind == TY_PTR && is_integer(rhs->ty)) {
-            rhs = new_binary(ND_MUL, rhs, new_long(ptr->base->size));
+            rhs = new_binary(ND_MUL, rhs, pointer_stride_expression(ptr));
             return new_binary(kind, lhs, rhs);
         }
 
@@ -719,9 +734,14 @@ static Node *new_inc_dec(NodeKind kind, Node *expr) {
     add_type(expr);
     if (!is_modifiable_lvalue(expr))
         error("increment/decrement operand is not a modifiable lvalue");
-    if (!is_numeric(expr->ty) && !pointer_arithmetic_type(expr->ty))
+    Type *ptr = pointer_arithmetic_type(expr->ty);
+    if (!is_numeric(expr->ty) && !ptr)
         error("invalid increment/decrement operand");
-    return new_unary(kind, expr);
+    Node *node = new_unary(kind, expr);
+    if (ptr && ptr->base->kind == TY_ARRAY &&
+        type_is_variably_modified(ptr->base))
+        node->rhs = pointer_stride_expression(ptr);
+    return node;
 }
 
 static Node *new_var_node(Obj *var) {
@@ -757,15 +777,22 @@ static Obj *vla_restore_between(Scope *from, Scope *target) {
 }
 
 static Node *vla_size_expression(Type *ty) {
-    if (!ty || ty->kind != TY_ARRAY || !ty->is_vla)
+    if (!ty || ty->kind != TY_ARRAY || !type_is_variably_modified(ty))
         return new_size_t_num(ty ? ty->size : 0);
     if (ty->vla_size)
         return new_var_node(ty->vla_size);
-    if (!ty->vla_len)
-        error("sizeof cannot be applied to an unspecified parameter VLA bound");
 
-    Node *bytes = new_binary(ND_MUL, ty->vla_len,
-                             new_size_t_num(ty->base->size));
+    Node *count = NULL;
+    if (ty->is_vla) {
+        if (!ty->vla_len)
+            error("sizeof cannot be applied to an unspecified parameter VLA bound");
+        count = ty->vla_len;
+    } else {
+        count = new_size_t_num(ty->array_len);
+    }
+
+    Node *bytes = new_binary(ND_MUL, count,
+                             vla_size_expression(ty->base));
     add_type(bytes);
     return bytes;
 }
@@ -912,6 +939,72 @@ static Type *vla_of(Type *base, Node *bound) {
     ty->is_vla = true;
     ty->vla_len = bound;
     return ty;
+}
+
+
+// Materialize every runtime byte stride reachable through an automatic
+// variably-modified declarator. Inner dimensions are saved before outer ones so
+// later indexing, sizeof and pointer arithmetic never re-evaluate a bound.
+static void append_vm_size_materialization(Type *ty, Node **tail) {
+    if (!ty)
+        return;
+    if (ty->kind == TY_PTR) {
+        append_vm_size_materialization(ty->base, tail);
+        return;
+    }
+    if (ty->kind != TY_ARRAY)
+        return;
+
+    append_vm_size_materialization(ty->base, tail);
+    if (!type_is_variably_modified(ty) || ty->vla_size)
+        return;
+    if (ty->is_vla && !ty->vla_len)
+        return; // prototype-scope [*] has no runtime stride to materialize
+
+    Obj *size = create_lvar(new_unique_name());
+    size->ty = ty_ulong;
+    ty->vla_size = size;
+
+    Node *count = ty->is_vla ? ty->vla_len : new_size_t_num(ty->array_len);
+    Node *bytes = new_binary(ND_MUL, count, vla_size_expression(ty->base));
+    Node *assign_size = new_binary(ND_ASSIGN, new_var_node(size), bytes);
+    *tail = (*tail)->next = new_unary(ND_EXPR_STMT, assign_size);
+}
+
+// Function parameter VLA bound expressions were parsed against temporary
+// prototype-scope metadata objects. Rebind only those exact Obj identities to
+// the actual callee local parameter slots before generating entry-time strides.
+static void rebind_param_bound_expr(Node *node, Obj **meta, Obj **actual, int nparam) {
+    for (; node; node = node->next) {
+        if (node->kind == ND_VAR && node->var) {
+            for (int i = 0; i < nparam; i++) {
+                if (node->var == meta[i]) {
+                    node->var = actual[i];
+                    break;
+                }
+            }
+        }
+        rebind_param_bound_expr(node->lhs, meta, actual, nparam);
+        rebind_param_bound_expr(node->rhs, meta, actual, nparam);
+        rebind_param_bound_expr(node->cond, meta, actual, nparam);
+        rebind_param_bound_expr(node->then, meta, actual, nparam);
+        rebind_param_bound_expr(node->els, meta, actual, nparam);
+        rebind_param_bound_expr(node->init, meta, actual, nparam);
+        rebind_param_bound_expr(node->inc, meta, actual, nparam);
+        rebind_param_bound_expr(node->args, meta, actual, nparam);
+    }
+}
+
+static void rebind_param_vla_type(Type *ty, Obj **meta, Obj **actual, int nparam) {
+    if (!ty)
+        return;
+    if (ty->kind == TY_ARRAY) {
+        if (ty->vla_len)
+            rebind_param_bound_expr(ty->vla_len, meta, actual, nparam);
+        rebind_param_vla_type(ty->base, meta, actual, nparam);
+    } else if (ty->kind == TY_PTR) {
+        rebind_param_vla_type(ty->base, meta, actual, nparam);
+    }
 }
 
 static bool is_unknown_bound_array_with_complete_element(Type *ty) {
@@ -2279,10 +2372,6 @@ static Type *type_suffix(Token **rest, Token *tok, Type *ty,
         if (ty->kind == TY_STRUCT && ty->contains_flexible_array_member)
             error_at(bracket->loc,
                      "array element type contains a flexible array member");
-        if (type_is_variably_modified(ty) || ty->size <= 0)
-            error_at(bracket->loc,
-                     "runtime-sized inner array dimensions are not supported yet");
-
         Type *arr = runtime_bound ? vla_of(ty, bound) : array_of(ty, len);
         if (allow_parameter_array_syntax) {
             arr->param_array_const = param_const;
@@ -4020,13 +4109,11 @@ static Node *declaration(Token **rest, Token *tok) {
             error_at(ident->loc, "function specifier may only declare a function");
         if (ty->kind == TY_VOID)
             error_at(ident->loc, "object cannot have void type");
-        bool is_vla_object = ty->kind == TY_ARRAY && ty->is_vla;
-        if (type_is_variably_modified(ty) && !is_vla_object)
+        bool is_vm_type = type_is_variably_modified(ty);
+        bool is_vm_array_object = ty->kind == TY_ARRAY && is_vm_type;
+        if (is_vm_type && (is_static || is_extern || attrs.is_thread_local))
             error_at(ident->loc,
-                     "only direct outer-dimension VLA objects are supported yet");
-        if (is_vla_object && (is_static || is_extern || attrs.is_thread_local))
-            error_at(ident->loc,
-                     "variable length array requires automatic storage duration");
+                     "variably modified declaration requires automatic storage duration");
         bool inferable_array = is_unknown_bound_array_with_complete_element(ty) &&
                                equal(tok, "=");
         if (!is_extern && is_incomplete_object_type(ty) && !inferable_array)
@@ -4054,11 +4141,16 @@ static Node *declaration(Token **rest, Token *tok) {
         var->is_register = attrs.is_register;
         var->is_thread_local = attrs.is_thread_local;
 
-        if (is_vla_object) {
+        if (is_vm_type) {
+            append_vm_size_materialization(ty, &block_cur);
+            current_function_has_vla = true;
+        }
+
+        if (is_vm_array_object) {
             if (equal(tok, "="))
                 error_at(tok->loc, "variable length array may not be initialized");
-            if (!ty->vla_len)
-                error_at(ident->loc, "automatic VLA requires a runtime bound");
+            if (!ty->vla_size)
+                error_at(ident->loc, "automatic variably modified array has no runtime extent");
 
             if (!current_scope->vla_stack_save) {
                 Obj *save = create_lvar(new_unique_name());
@@ -4067,17 +4159,12 @@ static Node *declaration(Token **rest, Token *tok) {
                 block_cur = block_cur->next = new_vla_stack_node(ND_VLA_SAVE, save);
             }
 
-            Obj *size = create_lvar(new_unique_name());
-            size->ty = ty_ulong;
             var->is_vla = true;
-            var->vla_size = size;
-            ty->vla_size = size;
+            var->vla_size = ty->vla_size;
 
             Node *alloc = new_node(ND_VLA_ALLOC);
             alloc->var = var;
-            alloc->lhs = ty->vla_len;
             block_cur = block_cur->next = alloc;
-            current_function_has_vla = true;
             continue;
         }
 
@@ -5654,7 +5741,7 @@ static Node *primary(Token **rest, Token *tok) {
             if (invalid_sizeof_type(ty))
                 error_at(tok->loc, "invalid operand type for sizeof");
             *rest = skip(tok, ")");
-            if (ty->kind == TY_ARRAY && ty->is_vla)
+            if (ty->kind == TY_ARRAY && type_is_variably_modified(ty))
                 return vla_size_expression(ty);
             return new_size_t_num(ty->size);
         }
@@ -5664,7 +5751,7 @@ static Node *primary(Token **rest, Token *tok) {
             error_at(tok->loc, "sizeof may not be applied to a bit-field");
         if (invalid_sizeof_type(n->ty))
             error_at(tok->loc, "invalid operand type for sizeof");
-        if (n->ty->kind == TY_ARRAY && n->ty->is_vla)
+        if (n->ty->kind == TY_ARRAY && type_is_variably_modified(n->ty))
             return vla_size_expression(n->ty);
         return new_size_t_num(n->ty->size);
     }
@@ -5809,8 +5896,12 @@ static bool type_compatible_impl(Type *a, Type *b, bool ignore_top_qual) {
     case TY_PTR:
         return type_compatible_impl(a->base, b->base, false);
     case TY_ARRAY:
+        // A variable-length bound is evaluated at runtime and is not part of
+        // the compatible array element type. Treat either VLA extent like an
+        // unknown bound while still recursively checking the element type.
         return type_compatible_impl(a->base, b->base, false) &&
-               (!a->array_len || !b->array_len || a->array_len == b->array_len);
+               (a->is_vla || b->is_vla || !a->array_len || !b->array_len ||
+                a->array_len == b->array_len);
     case TY_STRUCT:
         return type_identity(a) == type_identity(b);
     case TY_FUNC: {
@@ -6075,13 +6166,30 @@ Program *parse(Token *tok) {
 
             Obj param_head = {};
             Obj *pcur = &param_head;
+            Obj *meta_params[64] = {};
+            Obj *actual_params[64] = {};
+            int nparam = 0;
             for (Obj *meta = ty->params; meta; meta = meta->param_next) {
                 if (!meta->name)
                     error_at(ident->loc, "parameter name omitted in function definition");
+                if (nparam >= 64)
+                    error_at(ident->loc, "too many function parameters");
                 Obj *var = create_lvar(meta->name);
                 var->ty = meta->ty;
                 var->is_register = meta->is_register;
+                meta_params[nparam] = meta;
+                actual_params[nparam] = var;
+                nparam++;
                 pcur = pcur->param_next = var;
+            }
+
+            Node param_vm_head = {};
+            Node *param_vm_cur = &param_vm_head;
+            for (int i = 0; i < nparam; i++) {
+                rebind_param_vla_type(actual_params[i]->ty, meta_params,
+                                      actual_params, nparam);
+                append_vm_size_materialization(actual_params[i]->ty,
+                                               &param_vm_cur);
             }
 
             tok = skip(tok, "{");
@@ -6101,7 +6209,12 @@ Program *parse(Token *tok) {
             Node *block = compound_stmt(&tok, tok);
             current_return_ty = saved_return_ty;
             current_function_variadic = saved_variadic;
-            fn->body = block->body;
+            if (param_vm_head.next) {
+                param_vm_cur->next = block->body;
+                fn->body = param_vm_head.next;
+            } else {
+                fn->body = block->body;
+            }
             fn->locals = locals;
 
             resolve_gotos();

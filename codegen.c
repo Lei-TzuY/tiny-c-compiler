@@ -442,11 +442,9 @@ static void gen_inc_dec(Node *node, bool increment, bool return_old) {
         return;
     }
 
-    int step;
-    if (node->ty->kind == TY_PTR)
+    int step = 1;
+    if (node->ty->kind == TY_PTR && !node->rhs)
         step = node->ty->base->size;
-    else
-        step = 1;
 
     gen_addr(node->lhs);
     push();
@@ -456,10 +454,20 @@ static void gen_inc_dec(Node *node, bool increment, bool return_old) {
     if (return_old)
         printf(bitfield ? "  mov %%rax, %%r8\n" : "  mov %%rax, %%rsi\n");
 
-    if (increment)
+    if (node->rhs) {
+        push();
+        gen_expr(node->rhs);
+        printf("  mov %%rax, %%rdi\n");
+        pop("%rax");
+        if (increment)
+            printf("  add %%rdi, %%rax\n");
+        else
+            printf("  sub %%rdi, %%rax\n");
+    } else if (increment) {
         printf("  add $%d, %%rax\n", step);
-    else
+    } else {
         printf("  sub $%d, %%rax\n", step);
+    }
 
     store_lvalue(node->lhs);
     normalize(node->ty);
@@ -1522,12 +1530,9 @@ static void gen_stmt(Node *node) {
     }
 
     if (node->kind == ND_VLA_ALLOC) {
-        gen_expr(node->lhs);
-        if (!node->var || !node->var->vla_size || !node->var->ty ||
-            !node->var->ty->base || node->var->ty->base->size <= 0)
+        if (!node->var || !node->var->vla_size)
             error("invalid VLA allocation metadata");
-        printf("  imul $%d, %%rax\n", node->var->ty->base->size);
-        printf("  mov %%rax, %d(%%rbp)\n", node->var->vla_size->offset);
+        printf("  mov %d(%%rbp), %%rax\n", node->var->vla_size->offset);
         // The backend supports object alignments through 16 bytes. Rounding
         // each dynamic allocation to 16 also keeps SysV call alignment stable.
         printf("  add $15, %%rax\n");
