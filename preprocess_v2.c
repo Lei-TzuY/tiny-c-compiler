@@ -3,11 +3,14 @@
 #include <errno.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <time.h>
 
 typedef enum {
     BUILTIN_MACRO_NONE,
     BUILTIN_MACRO_LINE,
     BUILTIN_MACRO_FILE,
+    BUILTIN_MACRO_DATE,
+    BUILTIN_MACRO_TIME,
 } BuiltinMacroKind;
 
 typedef struct Macro Macro;
@@ -128,6 +131,8 @@ static CondStack *cond_stack;
 static int preprocess_depth;
 static const char *current_pp_file;
 static int current_pp_line;
+static char builtin_date[12];
+static char builtin_time[9];
 static const char *current_pp_source_name;
 static bool current_pp_source_is_system;
 static IncludeOrigin current_pp_source_origin;
@@ -183,6 +188,21 @@ static bool is_ident1_pp(char c) {
 
 static bool is_ident2_pp(char c) {
     return isalnum((unsigned char)c) || c == '_';
+}
+
+static void initialize_datetime_builtins(void) {
+    time_t now = time(NULL);
+    struct tm *local = localtime(&now);
+    if (!local)
+        error("failed to obtain local time for predefined macros");
+
+    if (!strftime(builtin_date, sizeof(builtin_date), "%b %d %Y", local) ||
+        !strftime(builtin_time, sizeof(builtin_time), "%H:%M:%S", local))
+        error("failed to format predefined date/time macros");
+
+    // C requires a space-padded one-digit day: "Mmm dd yyyy".
+    if (builtin_date[4] == '0')
+        builtin_date[4] = ' ';
 }
 
 static bool stat_source(const char *source_name, struct stat *st) {
@@ -1688,8 +1708,10 @@ static PPValue pp_primary(PPExpr *e) {
         PPValue result = pp_signed_value(0);
         if (m && m->builtin == BUILTIN_MACRO_LINE) {
             result = pp_signed_value(current_pp_line);
-        } else if (m && m->builtin == BUILTIN_MACRO_FILE) {
-            error("__FILE__ expands to a string and is not valid in #if arithmetic");
+        } else if (m && (m->builtin == BUILTIN_MACRO_FILE ||
+                         m->builtin == BUILTIN_MACRO_DATE ||
+                         m->builtin == BUILTIN_MACRO_TIME)) {
+            error("predefined string macro is not valid in #if arithmetic");
         } else if (m && m->is_objlike && e->depth < 64) {
             result = eval_pp_expr_depth(m->body, e->depth + 1, e->suppress_eval);
         } else if (m && !m->is_objlike && e->depth < 64) {
@@ -2400,6 +2422,14 @@ static char *expand_text(const char *text, Expansion *stack, bool *in_block_comm
             free(ident);
             continue;
         }
+        if (m->builtin == BUILTIN_MACRO_DATE || m->builtin == BUILTIN_MACRO_TIME) {
+            const char *value = m->builtin == BUILTIN_MACRO_DATE ? builtin_date : builtin_time;
+            char *quoted = quote_pp_string(value);
+            sb_puts(&out, quoted);
+            free(quoted);
+            free(ident);
+            continue;
+        }
 
         Expansion frame = {.next = stack, .macro = m};
         if (m->is_objlike) {
@@ -2628,8 +2658,11 @@ static char *preprocess_v2_source_impl(char *input, const char *source_name,
         add_macro(strdup("__STDC__"), true, false, NULL, 0, strdup("1"));
         add_macro(strdup("__STDC_VERSION__"), true, false, NULL, 0, strdup("201112L"));
         add_macro(strdup("__STDC_HOSTED__"), true, false, NULL, 0, strdup("1"));
+        initialize_datetime_builtins();
         add_builtin_macro("__LINE__", BUILTIN_MACRO_LINE);
         add_builtin_macro("__FILE__", BUILTIN_MACRO_FILE);
+        add_builtin_macro("__DATE__", BUILTIN_MACRO_DATE);
+        add_builtin_macro("__TIME__", BUILTIN_MACRO_TIME);
         apply_cli_macro_actions();
     }
 
