@@ -107,6 +107,7 @@ test: minicc
 	bash ./test/ctype_header.sh
 	bash ./test/stdio_header.sh
 	bash ./test/noreturn.sh
+	bash ./test/inline_function_specifier.sh
 	bash ./test/sizeof_alignof_size_t.sh
 	bash ./test/sizeof_constraints.sh
 	bash ./test/static_assert.sh
