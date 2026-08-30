@@ -103,6 +103,7 @@ static Dependency *dependencies_tail;
 static IncludePath *include_paths;
 static IncludePath *include_paths_tail;
 static bool missing_header_dependencies_enabled;
+static bool standard_includes_enabled = true;
 
 static void sb_init(StrBuf *sb, size_t cap) {
     sb->cap = cap < 64 ? 64 : cap;
@@ -357,6 +358,10 @@ void preprocess_v2_add_after_include_path(const char *path) {
 
 void preprocess_v2_enable_missing_header_dependencies(void) {
     missing_header_dependencies_enabled = true;
+}
+
+void preprocess_v2_disable_standard_includes(void) {
+    standard_includes_enabled = false;
 }
 
 static char *trim_copy(const char *s) {
@@ -2292,7 +2297,8 @@ static char *preprocess_v2_source_impl(char *input, const char *source_name,
                         included_is_system = source_is_system;
                     }
                 }
-                content = owned ? owned : get_builtin_header(hname);
+                content = owned ? owned :
+                          (standard_includes_enabled ? get_builtin_header(hname) : NULL);
                 if (!content) {
                     free(resolved_path);
                     resolved_path = NULL;

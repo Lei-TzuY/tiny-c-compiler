@@ -58,6 +58,7 @@ static void print_usage(FILE *out, const char *prog) {
             "  -iquote <dir>    Add a quote-only header search directory\n"
             "  -isystem <dir>   Add a system header search directory\n"
             "  -idirafter <dir> Add a system header directory searched last\n"
+            "  -nostdinc        Disable builtin standard header search\n"
             "  -o <file>        Write output to <file>\n"
             "  -o<file>         Same as '-o <file>'\n"
             "  -h, --help       Show this help and exit\n"
@@ -239,6 +240,12 @@ static DriverOptions parse_options(int argc, char **argv) {
 
         if (!end_options && !strncmp(arg, "-U", 2) && arg[2]) {
             preprocess_v2_add_undef(arg + 2);
+            continue;
+        }
+
+        if (!end_options &&
+            (!strcmp(arg, "-nostdinc") || !strcmp(arg, "--no-standard-includes"))) {
+            preprocess_v2_disable_standard_includes();
             continue;
         }
 
