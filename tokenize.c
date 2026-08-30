@@ -49,7 +49,18 @@ _Noreturn void error_at(char *loc, char *fmt, ...) {
 
 // Consumes the current token if it matches `op`.
 bool equal(Token *tok, char *op) {
-    return memcmp(tok->loc, op, tok->len) == 0 && op[tok->len] == '\0';
+    if (memcmp(tok->loc, op, tok->len) == 0 && op[tok->len] == '\0')
+        return true;
+
+    // C11 alternative punctuator spellings.  The parser uses the primary
+    // spellings, so canonicalize the four bracket/brace digraphs here while
+    // retaining their original source spelling for diagnostics.
+    if (tok->kind != TK_PUNCT || tok->len != 2)
+        return false;
+    return (!strcmp(op, "[") && !memcmp(tok->loc, "<:", 2)) ||
+           (!strcmp(op, "]") && !memcmp(tok->loc, ":>", 2)) ||
+           (!strcmp(op, "{") && !memcmp(tok->loc, "<%", 2)) ||
+           (!strcmp(op, "}") && !memcmp(tok->loc, "%>", 2));
 }
 
 // Ensure that the current token is `op`.
@@ -154,7 +165,9 @@ static int read_punct(char *p) {
         startswith(p, "*=") || startswith(p, "/=") ||
         startswith(p, "%=") || startswith(p, "&=") ||
         startswith(p, "|=") || startswith(p, "^=") ||
-        startswith(p, "<<") || startswith(p, ">>"))
+        startswith(p, "<<") || startswith(p, ">>") ||
+        startswith(p, "<:") || startswith(p, ":>") ||
+        startswith(p, "<%") || startswith(p, "%>"))
         return 2;
 
     return ispunct(*p) ? 1 : 0;
