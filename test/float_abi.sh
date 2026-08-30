@@ -41,4 +41,77 @@ assert_abi 10 '#include <stdarg.h>
 int sum(int count, ...) { va_list ap; va_start(ap,count); int s=0; for(int i=0;i<count;i++) s+=va_arg(ap,int); va_end(ap); return s; }
 int main() { return sum(4,1,2,3,4); }'
 
+# Cross the host/minicc boundary in both directions. Self-compiled caller/callee
+# tests can accidentally agree on the same incorrect SSE argument or return
+# convention, so use the host compiler as the independent ABI oracle here.
+cat > tmp-float-abi-mini-provider.c <<'EOF'
+double mini_mix(double a, float b, double c) { return a + b + c; }
+float mini_half(float x) { return x / 2.0f; }
+double mini_ninth(double a, double b, double c, double d, double e,
+                  double f, double g, double h, double i) {
+  return i;
+}
+EOF
+"${MINICC:-./minicc}" tmp-float-abi-mini-provider.c > tmp-float-abi-mini-provider.s
+gcc -c -o tmp-float-abi-mini-provider.o tmp-float-abi-mini-provider.s
+
+cat > tmp-float-abi-host-caller.c <<'EOF'
+double mini_mix(double, float, double);
+float mini_half(float);
+double mini_ninth(double, double, double, double, double,
+                  double, double, double, double);
+
+int main(void) {
+  if (mini_mix(1.5, 2.0f, 4.5) != 8.0)
+    return 1;
+  if (mini_half(7.0f) != 3.5f)
+    return 2;
+  if (mini_ninth(1, 2, 3, 4, 5, 6, 7, 8, 9.5) != 9.5)
+    return 3;
+  return 0;
+}
+EOF
+gcc -std=c11 -o tmp-float-abi-host-to-mini tmp-float-abi-host-caller.c tmp-float-abi-mini-provider.o
+./tmp-float-abi-host-to-mini
+
+echo 'OK(float ABI): host caller -> minicc callee'
+
+cat > tmp-float-abi-host-provider.c <<'EOF'
+double host_mix(double a, float b, double c) { return a + b + c; }
+float host_half(float x) { return x / 2.0f; }
+double host_ninth(double a, double b, double c, double d, double e,
+                  double f, double g, double h, double i) {
+  return i;
+}
+EOF
+gcc -std=c11 -c -o tmp-float-abi-host-provider.o tmp-float-abi-host-provider.c
+
+cat > tmp-float-abi-mini-caller.c <<'EOF'
+double host_mix(double, float, double);
+float host_half(float);
+double host_ninth(double, double, double, double, double,
+                  double, double, double, double);
+
+int main(void) {
+  double (*mixfp)(double, float, double) = host_mix;
+  if (mixfp(1.5, 2.0f, 4.5) != 8.0)
+    return 1;
+  if (host_half(7.0f) != 3.5f)
+    return 2;
+  if (host_ninth(1, 2, 3, 4, 5, 6, 7, 8, 9.5) != 9.5)
+    return 3;
+  return 0;
+}
+EOF
+"${MINICC:-./minicc}" tmp-float-abi-mini-caller.c > tmp-float-abi-mini-caller.s
+gcc -o tmp-float-abi-mini-to-host tmp-float-abi-mini-caller.s tmp-float-abi-host-provider.o
+./tmp-float-abi-mini-to-host
+
+echo 'OK(float ABI): minicc caller -> host callee'
+
+rm -f tmp-float-abi-mini-provider.c tmp-float-abi-mini-provider.s tmp-float-abi-mini-provider.o \
+      tmp-float-abi-host-caller.c tmp-float-abi-host-to-mini \
+      tmp-float-abi-host-provider.c tmp-float-abi-host-provider.o \
+      tmp-float-abi-mini-caller.c tmp-float-abi-mini-caller.s tmp-float-abi-mini-to-host
+
 echo "All floating-point ABI tests passed!"
