@@ -86,6 +86,12 @@ assert_run 0 'int get(int x,int y,int z,int a[x][y][z]){return a[1][2][3]==37&&s
 # a runtime minimum bound, while the inner VLA dimension keeps its row stride.
 assert_run 0 'int get(int n,int m,int a[static n][m]){return sizeof a==8&&sizeof a[0]==(unsigned long)m*4&&a[n-1][m-1]==41?0:1;}int main(void){int n=3,m=7;int a[n][m];a[2][6]=41;return get(n,m,a);}'
 
+# Array bounds use the full assignment-expression grammar. Runtime side
+# effects occur once for a VLA/sizeof, while _Alignof still does not evaluate it.
+assert_run 0 'int main(void){int n=2;int a[n+=2];return n==4&&sizeof a==16?0:1;}'
+assert_run 0 'int main(void){int n=2;unsigned long s=sizeof(int[n=5]);return s==20&&n==5?0:1;}'
+assert_run 0 'int main(void){int n=3;unsigned long a=_Alignof(int[n+=2]);return a==4&&n==3?0:1;}'
+
 # Dynamic allocations satisfy the element alignment and preserve call ABI
 # alignment because every stack decrement is rounded to 16 bytes.
 assert_run 0 'int check(double *p){return ((unsigned long)p)&7;}int main(void){int n=5;double a[n];return check(a);}'

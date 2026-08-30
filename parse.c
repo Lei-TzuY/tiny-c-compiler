@@ -2340,7 +2340,9 @@ static Type *type_suffix(Token **rest, Token *tok, Type *ty,
         int len = 0;
         bool runtime_bound = star_bound;
         if (!star_bound && !equal(tok, "]")) {
-            bound = ternary(&tok, tok);
+            // Array size syntax is an assignment-expression (C11 6.7.6.2), so VLA
+            // bounds may contain assignments and compound assignments.
+            bound = assign(&tok, tok);
             add_type(bound);
             if (!is_integer(bound->ty))
                 error_at(bracket->loc, "array bound must have integer type");
