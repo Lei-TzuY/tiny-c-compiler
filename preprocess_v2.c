@@ -82,6 +82,27 @@ struct IncludePath {
     IncludePathKind kind;
 };
 
+typedef enum {
+    INCLUDE_ORIGIN_NONE,
+    INCLUDE_ORIGIN_SOURCE_DIR,
+    INCLUDE_ORIGIN_PATH,
+    INCLUDE_ORIGIN_CWD,
+    INCLUDE_ORIGIN_BUILTIN,
+} IncludeOriginKind;
+
+typedef struct {
+    IncludeOriginKind kind;
+    IncludePath *path;
+} IncludeOrigin;
+
+typedef struct {
+    char *owned;
+    char *resolved_path;
+    const char *content;
+    bool is_system;
+    IncludeOrigin origin;
+} IncludeResolution;
+
 typedef struct ForcedInput ForcedInput;
 struct ForcedInput {
     ForcedInput *next;
@@ -89,8 +110,10 @@ struct ForcedInput {
 };
 
 static void parse_define(char *start);
+static char *get_builtin_header(char *name);
 static char *preprocess_v2_source_impl(char *input, const char *source_name,
-                                       bool source_is_system);
+                                       bool source_is_system,
+                                       IncludeOrigin source_origin);
 
 typedef struct {
     char *data;
@@ -574,21 +597,34 @@ static bool has_matching_system_include_path(const char *path) {
     return false;
 }
 
-static char *read_quote_include_paths(const char *header, char **resolved_path) {
-    for (IncludePath *entry = include_paths; entry; entry = entry->next) {
-        if (entry->kind != INCLUDE_PATH_QUOTE)
-            continue;
+static bool include_path_is_suppressed(IncludePath *entry) {
+    if (!entry)
+        return false;
+    if (entry->kind != INCLUDE_PATH_QUOTE && entry->kind != INCLUDE_PATH_USER)
+        return false;
+    return has_matching_system_include_path(entry->path);
+}
 
-        // GCC suppresses an earlier user/quote copy when the same directory is
-        // also present in a system include class. Search it only at its normal
-        // -isystem/-idirafter position instead.
-        if (has_matching_system_include_path(entry->path))
+static char *read_include_paths_from(const char *header, IncludePathKind kind,
+                                     IncludePath *after,
+                                     char **resolved_path,
+                                     IncludePath **matched_path) {
+    bool past_after = after == NULL;
+    for (IncludePath *entry = include_paths; entry; entry = entry->next) {
+        if (!past_after) {
+            if (entry == after)
+                past_after = true;
+            continue;
+        }
+        if (entry->kind != kind || include_path_is_suppressed(entry))
             continue;
 
         char *candidate = join_include_path(entry->path, header);
         char *content = read_file_content(candidate);
         if (content) {
             *resolved_path = candidate;
+            if (matched_path)
+                *matched_path = entry;
             return content;
         }
         free(candidate);
@@ -596,24 +632,238 @@ static char *read_quote_include_paths(const char *header, char **resolved_path) 
     return NULL;
 }
 
-static char *read_include_paths(const char *header, IncludePathKind kind,
-                                char **resolved_path) {
-    for (IncludePath *entry = include_paths; entry; entry = entry->next) {
-        if (entry->kind != kind)
+static IncludeResolution resolve_normal_include(const char *header, char quote,
+                                                const char *source_name,
+                                                bool source_is_system) {
+    IncludeResolution r = {.origin = {.kind = INCLUDE_ORIGIN_NONE}};
+    IncludePath *matched = NULL;
+
+    if (header[0] == '/') {
+        r.owned = read_file_content((char *)header);
+        if (r.owned) {
+            r.resolved_path = strdup(header);
+            r.content = r.owned;
+            r.is_system = source_is_system;
+        }
+        return r;
+    }
+
+    if (quote == '"') {
+        r.resolved_path = source_relative_include_path(source_name, header);
+        if (r.resolved_path) {
+            r.owned = read_file_content(r.resolved_path);
+            if (r.owned) {
+                r.content = r.owned;
+                r.is_system = source_is_system;
+                r.origin.kind = INCLUDE_ORIGIN_SOURCE_DIR;
+                return r;
+            }
+            free(r.resolved_path);
+            r.resolved_path = NULL;
+        }
+
+        r.owned = read_include_paths_from(header, INCLUDE_PATH_QUOTE, NULL,
+                                          &r.resolved_path, &matched);
+        if (r.owned) {
+            r.content = r.owned;
+            r.is_system = source_is_system;
+            r.origin = (IncludeOrigin){.kind = INCLUDE_ORIGIN_PATH, .path = matched};
+            return r;
+        }
+    }
+
+    matched = NULL;
+    r.owned = read_include_paths_from(header, INCLUDE_PATH_USER, NULL,
+                                      &r.resolved_path, &matched);
+    if (r.owned) {
+        r.content = r.owned;
+        r.is_system = source_is_system;
+        r.origin = (IncludeOrigin){.kind = INCLUDE_ORIGIN_PATH, .path = matched};
+        return r;
+    }
+
+    matched = NULL;
+    r.owned = read_include_paths_from(header, INCLUDE_PATH_SYSTEM, NULL,
+                                      &r.resolved_path, &matched);
+    if (r.owned) {
+        r.content = r.owned;
+        r.is_system = true;
+        r.origin = (IncludeOrigin){.kind = INCLUDE_ORIGIN_PATH, .path = matched};
+        return r;
+    }
+
+    if (quote == '"') {
+        r.owned = read_file_content((char *)header);
+        if (r.owned) {
+            r.resolved_path = strdup(header);
+            r.content = r.owned;
+            r.is_system = source_is_system;
+            r.origin.kind = INCLUDE_ORIGIN_CWD;
+            return r;
+        }
+    }
+
+    if (standard_includes_enabled) {
+        r.content = get_builtin_header((char *)header);
+        if (r.content) {
+            r.is_system = true;
+            r.origin.kind = INCLUDE_ORIGIN_BUILTIN;
+            return r;
+        }
+    }
+
+    matched = NULL;
+    r.owned = read_include_paths_from(header, INCLUDE_PATH_AFTER, NULL,
+                                      &r.resolved_path, &matched);
+    if (r.owned) {
+        r.content = r.owned;
+        r.is_system = true;
+        r.origin = (IncludeOrigin){.kind = INCLUDE_ORIGIN_PATH, .path = matched};
+    }
+    return r;
+}
+
+static IncludeResolution resolve_forced_include(const char *header) {
+    IncludeResolution r = {.origin = {.kind = INCLUDE_ORIGIN_NONE}};
+    IncludePath *matched = NULL;
+
+    r.owned = read_file_content((char *)header);
+    if (r.owned) {
+        r.resolved_path = strdup(header);
+        r.content = r.owned;
+        // A relative -include/-imacros file is found in the preprocessor
+        // working directory, which behaves like the leading quote directory
+        // for include_next. Absolute operands have no search-list origin.
+        if (header[0] != '/')
+            r.origin.kind = INCLUDE_ORIGIN_SOURCE_DIR;
+        return r;
+    }
+    if (header[0] == '/')
+        return r;
+
+    r.owned = read_include_paths_from(header, INCLUDE_PATH_QUOTE, NULL,
+                                      &r.resolved_path, &matched);
+    if (r.owned) {
+        r.content = r.owned;
+        r.origin = (IncludeOrigin){.kind = INCLUDE_ORIGIN_PATH, .path = matched};
+        return r;
+    }
+
+    matched = NULL;
+    r.owned = read_include_paths_from(header, INCLUDE_PATH_USER, NULL,
+                                      &r.resolved_path, &matched);
+    if (r.owned) {
+        r.content = r.owned;
+        r.origin = (IncludeOrigin){.kind = INCLUDE_ORIGIN_PATH, .path = matched};
+        return r;
+    }
+
+    matched = NULL;
+    r.owned = read_include_paths_from(header, INCLUDE_PATH_SYSTEM, NULL,
+                                      &r.resolved_path, &matched);
+    if (r.owned) {
+        r.content = r.owned;
+        r.is_system = true;
+        r.origin = (IncludeOrigin){.kind = INCLUDE_ORIGIN_PATH, .path = matched};
+        return r;
+    }
+
+    if (standard_includes_enabled) {
+        r.content = get_builtin_header((char *)header);
+        if (r.content) {
+            r.is_system = true;
+            r.origin.kind = INCLUDE_ORIGIN_BUILTIN;
+            return r;
+        }
+    }
+
+    matched = NULL;
+    r.owned = read_include_paths_from(header, INCLUDE_PATH_AFTER, NULL,
+                                      &r.resolved_path, &matched);
+    if (r.owned) {
+        r.content = r.owned;
+        r.is_system = true;
+        r.origin = (IncludeOrigin){.kind = INCLUDE_ORIGIN_PATH, .path = matched};
+    }
+    return r;
+}
+
+static int include_origin_stage(IncludeOrigin origin, IncludePath **after) {
+    *after = NULL;
+    switch (origin.kind) {
+    case INCLUDE_ORIGIN_SOURCE_DIR:
+        return 0; // -iquote
+    case INCLUDE_ORIGIN_PATH:
+        *after = origin.path;
+        if (!origin.path)
+            return 1;
+        if (origin.path->kind == INCLUDE_PATH_QUOTE)
+            return 0;
+        if (origin.path->kind == INCLUDE_PATH_USER)
+            return 1;
+        if (origin.path->kind == INCLUDE_PATH_SYSTEM)
+            return 2;
+        return 4; // -idirafter
+    case INCLUDE_ORIGIN_CWD:
+        return 3; // builtin standard-header layer
+    case INCLUDE_ORIGIN_BUILTIN:
+        return 4; // -idirafter
+    case INCLUDE_ORIGIN_NONE:
+    default:
+        // Primary sources and absolute includes have no search-list origin.
+        // GCC starts their include_next lookup at the ordinary -I class.
+        return 1;
+    }
+}
+
+static IncludeResolution resolve_include_next(const char *header,
+                                              IncludeOrigin source_origin,
+                                              bool source_is_system) {
+    IncludeResolution r = {.origin = {.kind = INCLUDE_ORIGIN_NONE}};
+    if (header[0] == '/') {
+        r.owned = read_file_content((char *)header);
+        if (r.owned) {
+            r.resolved_path = strdup(header);
+            r.content = r.owned;
+            r.is_system = source_is_system;
+        }
+        return r;
+    }
+
+    IncludePath *after = NULL;
+    int start_stage = include_origin_stage(source_origin, &after);
+    for (int stage = start_stage; stage <= 4; stage++) {
+        IncludePath *matched = NULL;
+        IncludePath *stage_after = stage == start_stage ? after : NULL;
+
+        if (stage == 3) {
+            if (!standard_includes_enabled)
+                continue;
+            r.content = get_builtin_header((char *)header);
+            if (r.content) {
+                r.is_system = true;
+                r.origin.kind = INCLUDE_ORIGIN_BUILTIN;
+                return r;
+            }
             continue;
-        if (kind == INCLUDE_PATH_USER &&
-            has_matching_system_include_path(entry->path))
+        }
+
+        IncludePathKind kind = stage == 0 ? INCLUDE_PATH_QUOTE :
+                               stage == 1 ? INCLUDE_PATH_USER :
+                               stage == 2 ? INCLUDE_PATH_SYSTEM :
+                                            INCLUDE_PATH_AFTER;
+        r.owned = read_include_paths_from(header, kind, stage_after,
+                                          &r.resolved_path, &matched);
+        if (!r.owned)
             continue;
 
-        char *candidate = join_include_path(entry->path, header);
-        char *content = read_file_content(candidate);
-        if (content) {
-            *resolved_path = candidate;
-            return content;
-        }
-        free(candidate);
+        r.content = r.owned;
+        r.is_system = source_is_system ||
+                      kind == INCLUDE_PATH_SYSTEM || kind == INCLUDE_PATH_AFTER;
+        r.origin = (IncludeOrigin){.kind = INCLUDE_ORIGIN_PATH, .path = matched};
+        return r;
     }
-    return NULL;
+    return r;
 }
 
 static char *get_builtin_header(char *name) {
@@ -2173,75 +2423,33 @@ static void parse_define(char *start) {
 }
 
 static char *preprocess_forced_input(const char *name) {
-    char *owned = NULL;
-    char *resolved_path = NULL;
-    const char *content = NULL;
-    bool included_is_system = false;
-
-    if (name[0] == '/') {
-        owned = read_file_content((char *)name);
-        if (owned)
-            resolved_path = strdup(name);
-    } else {
-        // GCC searches the preprocessor working directory first for -include
-        // and -imacros, rather than the primary source file's directory.
-        owned = read_file_content((char *)name);
-        if (owned)
-            resolved_path = strdup(name);
-    }
-
-    if (!owned && name[0] != '/') {
-        owned = read_quote_include_paths(name, &resolved_path);
-    }
-    if (!owned && name[0] != '/') {
-        owned = read_include_paths(name, INCLUDE_PATH_USER, &resolved_path);
-    }
-    if (!owned && name[0] != '/') {
-        owned = read_include_paths(name, INCLUDE_PATH_SYSTEM, &resolved_path);
-        if (owned)
-            included_is_system = true;
-    }
-
-    content = owned ? owned :
-              (standard_includes_enabled ? get_builtin_header((char *)name) : NULL);
-    if (content && !owned)
-        included_is_system = true;
-
-    if (!content && name[0] != '/') {
-        owned = read_include_paths(name, INCLUDE_PATH_AFTER, &resolved_path);
-        if (owned) {
-            included_is_system = true;
-            content = owned;
-        }
-    }
-
-    if (!content) {
+    IncludeResolution r = resolve_forced_include(name);
+    if (!r.content) {
         if (!missing_header_dependencies_enabled)
             error("cannot include %s", name);
         record_missing_dependency(name, false);
-        free(owned);
-        free(resolved_path);
         return strdup("");
     }
 
-    const char *included_source = owned ? resolved_path : name;
-    if (owned)
-        record_dependency(included_source, included_is_system);
+    const char *included_source = r.owned ? r.resolved_path : name;
+    if (r.owned)
+        record_dependency(included_source, r.is_system);
 
     char *result = strdup("");
     if (!once_contains_source(included_source)) {
         free(result);
-        result = preprocess_v2_source_impl((char *)content, included_source,
-                                           included_is_system);
+        result = preprocess_v2_source_impl((char *)r.content, included_source,
+                                           r.is_system, r.origin);
     }
 
-    free(owned);
-    free(resolved_path);
+    free(r.owned);
+    free(r.resolved_path);
     return result;
 }
 
 static char *preprocess_v2_source_impl(char *input, const char *source_name,
-                                       bool source_is_system) {
+                                       bool source_is_system,
+                                       IncludeOrigin source_origin) {
     const char *saved_file = current_pp_file;
     int saved_line = current_pp_line;
     bool outermost = preprocess_depth++ == 0;
@@ -2338,10 +2546,12 @@ static char *preprocess_v2_source_impl(char *input, const char *source_name,
                 if (pragma && !strcmp(pragma, "once"))
                     mark_once_source(source_name);
                 free(pragma);
-            } else if (is_cond_active() && !strcmp(directive, "include")) {
-                // C11 6.10.2: if the directive does not directly contain a
-                // header-name token, macro-expand the remaining preprocessing
-                // tokens and interpret the result as the header name.
+            } else if (is_cond_active() &&
+                       (!strcmp(directive, "include") ||
+                        !strcmp(directive, "include_next"))) {
+                bool is_include_next = !strcmp(directive, "include_next");
+                // C11 #include and GNU #include_next both macro-expand an
+                // operand that is not already a header-name token.
                 char *expanded_include = NULL;
                 char *include_operand = start;
                 if (*include_operand != '"' && *include_operand != '<') {
@@ -2354,115 +2564,48 @@ static char *preprocess_v2_source_impl(char *input, const char *source_name,
 
                 char quote = *include_operand;
                 if (quote != '"' && quote != '<')
-                    error("#include requires a header name");
+                    error("#%s requires a header name", directive);
                 char end_quote = quote == '"' ? '"' : '>';
                 char *hname = include_operand + 1;
                 char *end_h = strchr(hname, end_quote);
                 if (!end_h)
-                    error("unterminated #include");
+                    error("unterminated #%s", directive);
                 *end_h = '\0';
 
-                char *owned = NULL;
-                char *resolved_path = NULL;
-                const char *content = NULL;
-                bool included_is_system = false;
-                if (hname[0] == '/') {
-                    owned = read_file_content(hname);
-                    if (owned) {
-                        resolved_path = strdup(hname);
-                        included_is_system = source_is_system;
-                    }
-                } else if (quote == '"') {
-                    // A quoted include found next to the current physical file
-                    // inherits that file's system classification. This is what
-                    // makes -MM/-MMD omit a system header's private subheaders.
-                    resolved_path = source_relative_include_path(source_name, hname);
-                    if (resolved_path) {
-                        owned = read_file_content(resolved_path);
-                        if (owned)
-                            included_is_system = source_is_system;
-                    }
-                }
-                if (!owned && quote == '"') {
-                    free(resolved_path);
-                    resolved_path = NULL;
-                    owned = read_quote_include_paths(hname, &resolved_path);
-                    if (owned)
-                        included_is_system = source_is_system;
-                }
-                if (!owned) {
-                    free(resolved_path);
-                    resolved_path = NULL;
-                    owned = read_include_paths(hname, INCLUDE_PATH_USER, &resolved_path);
-                    // Once preprocessing is inside a system header, all of its
-                    // indirect includes remain system dependencies even if the
-                    // concrete file is found through a user -I directory.
-                    included_is_system = source_is_system;
-                }
-                if (!owned) {
-                    free(resolved_path);
-                    resolved_path = NULL;
-                    owned = read_include_paths(hname, INCLUDE_PATH_SYSTEM, &resolved_path);
-                    if (owned)
-                        included_is_system = true;
-                }
-                if (!owned && quote == '"') {
-                    // Preserve the historical current-working-directory fallback
-                    // after explicit user and system include directories.
-                    owned = read_file_content(hname);
-                    if (owned) {
-                        resolved_path = strdup(hname);
-                        included_is_system = source_is_system;
-                    }
-                }
-                content = owned ? owned :
-                          (standard_includes_enabled ? get_builtin_header(hname) : NULL);
-                if (!content) {
-                    free(resolved_path);
-                    resolved_path = NULL;
-                    owned = read_include_paths(hname, INCLUDE_PATH_AFTER,
-                                               &resolved_path);
-                    if (owned) {
-                        included_is_system = true;
-                        content = owned;
-                    }
-                }
-                if (!content) {
+                IncludeResolution r = is_include_next ?
+                    resolve_include_next(hname, source_origin, source_is_system) :
+                    resolve_normal_include(hname, quote, source_name, source_is_system);
+
+                if (!r.content) {
                     if (!missing_header_dependencies_enabled)
                         error("cannot include %s", hname);
 
-                    // GCC -MG records the header spelling after macro expansion
-                    // exactly as written in the include operand, without a
-                    // source-relative or search-directory prefix. Missing
-                    // headers reached from a system subtree remain system
-                    // dependencies for -MM filtering.
+                    // -MG records the expanded spelling, and a missing next
+                    // header reached from a system subtree remains system for
+                    // -MM/-MMD filtering.
                     record_missing_dependency(hname, source_is_system);
-                    free(owned);
-                    free(resolved_path);
+                    free(r.owned);
+                    free(r.resolved_path);
                     free(expanded_include);
                     free(directive);
                     free(line);
                     continue;
                 }
-                if (!owned)
-                    included_is_system = true;
 
-                // Recursive includes inherit both the resolved physical path and
-                // system-header classification. Physical dependency deduplication
-                // remains device/inode based, independent of path spelling.
-                const char *included_source = owned ? resolved_path : hname;
-                if (owned)
-                    record_dependency(included_source, included_is_system);
+                const char *included_source = r.owned ? r.resolved_path : hname;
+                if (r.owned)
+                    record_dependency(included_source, r.is_system);
                 if (!once_contains_source(included_source)) {
-                    char *sub = preprocess_v2_source_impl((char *)content, included_source,
-                                                         included_is_system);
+                    char *sub = preprocess_v2_source_impl((char *)r.content,
+                                                         included_source,
+                                                         r.is_system, r.origin);
                     sb_puts(&out, sub);
                     if (out.len && out.data[out.len - 1] != '\n')
                         sb_putc(&out, '\n');
                     free(sub);
                 }
-                free(owned);
-                free(resolved_path);
+                free(r.owned);
+                free(r.resolved_path);
                 free(expanded_include);
             } else if (is_cond_active() && !strcmp(directive, "line")) {
                 // C11 #line operands are macro-expanded before interpretation.
@@ -2524,7 +2667,8 @@ static char *preprocess_v2_source_impl(char *input, const char *source_name,
 }
 
 char *preprocess_v2_source(char *input, const char *source_name) {
-    return preprocess_v2_source_impl(input, source_name, false);
+    IncludeOrigin origin = {.kind = INCLUDE_ORIGIN_NONE};
+    return preprocess_v2_source_impl(input, source_name, false, origin);
 }
 
 char *preprocess_v2_dump_macros(void) {

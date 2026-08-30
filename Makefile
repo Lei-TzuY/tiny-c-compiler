@@ -24,6 +24,7 @@ test: minicc
 	bash ./test/preprocessor_nostdinc.sh
 	bash ./test/preprocessor_forced_includes.sh
 	bash ./test/preprocessor_dump_macros.sh
+	bash ./test/preprocessor_include_next.sh
 	bash ./test/preprocessor_absolute_includes.sh
 	bash ./test/preprocessor_system_includes.sh
 	bash ./test/preprocessor_pragma_once.sh
