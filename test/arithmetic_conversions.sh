@@ -26,6 +26,14 @@ assert_run 4 'int main(){return sizeof((unsigned short)1 << (long)1);}'
 assert_run 4 'int main(){return sizeof((unsigned int)1 << (long)1);}'
 assert_run 4 'int main(){return sizeof((_Bool)1 << (long)1);}'
 
+# Unary +, -, and ~ apply the integer promotions too.  Narrow unsigned types
+# therefore become signed int on LP64, while unsigned int keeps its type.
+assert_run 4 'int main(){return sizeof(+(unsigned short)1);}'
+assert_run 1 'int main(){return -(unsigned short)1<0;}'
+assert_run 1 'int main(){return ~(unsigned short)0==-1;}'
+assert_run 1 'int main(){return ~(unsigned char)0==-1;}'
+assert_run 1 'int main(){return ~(unsigned int)0==(unsigned int)-1;}'
+
 # A wider signed long represents every unsigned-int value, so long wins over
 # unsigned int in the usual arithmetic conversions on this LP64 target.
 assert_run 1 'int main(){unsigned int a=0;long b=-1;return (a+b)<0;}'
