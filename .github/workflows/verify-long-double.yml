@@ -1,0 +1,17 @@
+name: Verify long double implementation
+
+on:
+  push:
+    branches: [feat/long-double]
+    paths:
+      - '.github/workflows/verify-long-double.yml'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/long-double
+      - name: Run full test suite
+        run: make test
