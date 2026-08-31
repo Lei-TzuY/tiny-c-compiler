@@ -74,16 +74,16 @@ assert_reject 'int main(){return (int)0x1p;}'
 assert_reject 'int main(){return (int)0x1p+;}'
 assert_reject 'int main(){return (int)0x1p-;}'
 
-# Floating suffixes are only f/F in the implemented float/double subset.
+# Unsupported floating suffix spellings remain rejected.
 assert_reject 'int main(){return (int)1.0u;}'
 assert_reject 'int main(){return (int)1.0ff;}'
 assert_reject 'int main(){return (int)1e2foo;}'
 assert_reject 'int main(){return (int)0x1p2u;}'
 
-# Long-double literals are standard C but deliberately firewalled until the
-# backend has 80-bit storage and SysV x87 argument/return lowering.
-assert_reject 'int main(){return (int)1.0L;}'
-assert_reject 'int main(){return (int).5l;}'
-assert_reject 'int main(){return (int)0x1p2L;}'
+# C long-double suffixes select the x87 extended type for both decimal and
+# hexadecimal constants. Lower-case and upper-case suffixes are equivalent.
+assert_run 16 'int main(){return sizeof(1.0L);}'
+assert_run 5  'int main(){return _Generic(.5l,long double:5,double:3,float:4);}'
+assert_run 4  'int main(){return (int)0x1p2L;}'
 
 echo 'All floating literal grammar tests passed!'

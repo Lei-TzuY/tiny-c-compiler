@@ -87,10 +87,10 @@ assert_reject 'short long x;int main(void){return 0;}'
 assert_reject 'long short x;int main(void){return 0;}'
 assert_reject 'long long long x;int main(void){return 0;}'
 
-# long double is valid C, but this backend has no long-double representation;
-# diagnose it explicitly rather than compiling it with double semantics.
-assert_reject 'long double x;int main(void){return 0;}'
-assert_reject 'double long x;int main(void){return 0;}'
+# C permits long double in either declaration-specifier order. The x86-64
+# target represents it as a 16-byte object with 16-byte alignment.
+assert_run 16 'long double x;int main(void){return sizeof(x);}'
+assert_run 16 'double long x;int main(void){return sizeof(x);}'
 assert_reject 'long long double x;int main(void){return 0;}'
 
 # Named/typedef types cannot be combined with another type-specifier family.

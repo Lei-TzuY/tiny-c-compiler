@@ -27,6 +27,12 @@ static void pop(char *arg) {
 }
 
 static void pushf(Type *ty) {
+    if (ty->kind == TY_LDOUBLE) {
+        printf("  sub $16, %%rsp\n");
+        printf("  fstpt (%%rsp)\n");
+        depth += 2;
+        return;
+    }
     printf("  sub $8, %%rsp\n");
     if (ty->kind == TY_FLOAT)
         printf("  movss %%xmm0, (%%rsp)\n");
@@ -36,6 +42,12 @@ static void pushf(Type *ty) {
 }
 
 static void popf(Type *ty, char *reg) {
+    if (ty->kind == TY_LDOUBLE) {
+        printf("  fldt (%%rsp)\n");
+        printf("  add $16, %%rsp\n");
+        depth -= 2;
+        return;
+    }
     if (ty->kind == TY_FLOAT)
         printf("  movss (%%rsp), %s\n", reg);
     else
@@ -52,6 +64,8 @@ static void load(Type *ty) {
         printf("  movss (%%rax), %%xmm0\n");
     else if (ty->kind == TY_DOUBLE)
         printf("  movsd (%%rax), %%xmm0\n");
+    else if (ty->kind == TY_LDOUBLE)
+        printf("  fldt (%%rax)\n");
     else if (ty->kind == TY_BOOL)
         printf("  movzbq (%%rax), %%rax\n");
     else if (ty->kind == TY_CHAR) {
@@ -79,6 +93,11 @@ static void store(Type *ty) {
         printf("  movss %%xmm0, (%%rdi)\n");
     } else if (ty->kind == TY_DOUBLE) {
         printf("  movsd %%xmm0, (%%rdi)\n");
+    } else if (ty->kind == TY_LDOUBLE) {
+        // Assignment expressions retain their value in ST(0): duplicate it
+        // before the popping 80-bit store.
+        printf("  fld %%st(0)\n");
+        printf("  fstpt (%%rdi)\n");
     } else if (ty->kind == TY_BOOL) {
         // _Bool: any non-zero value becomes 1
         printf("  cmp $0, %%rax\n");
@@ -238,6 +257,16 @@ static void normalize(Type *ty) {
 }
 
 static void value_to_bool(Type *ty) {
+    if (ty->kind == TY_LDOUBLE) {
+        printf("  fldz\n");
+        printf("  fucomip %%st(1), %%st\n");
+        printf("  fstp %%st(0)\n");
+        printf("  setne %%al\n");
+        printf("  setp %%dl\n");
+        printf("  or %%dl, %%al\n");
+        printf("  movzb %%al, %%rax\n");
+        return;
+    }
     if (is_flonum(ty)) {
         if (ty->kind == TY_FLOAT) {
             printf("  xorps %%xmm1, %%xmm1\n");
@@ -274,6 +303,71 @@ static void cast_value(Type *from, Type *to) {
     if (to->kind == TY_BOOL) {
         value_to_bool(from);
         return;
+    }
+
+    // Long double is represented in x87 ST(0); float/double remain in XMM0.
+    if (to->kind == TY_LDOUBLE && from->kind != TY_LDOUBLE) {
+        if (from->kind == TY_FLOAT) {
+            printf("  sub $16, %%rsp\n");
+            printf("  movss %%xmm0, (%%rsp)\n");
+            printf("  flds (%%rsp)\n");
+            printf("  add $16, %%rsp\n");
+            return;
+        }
+        if (from->kind == TY_DOUBLE) {
+            printf("  sub $16, %%rsp\n");
+            printf("  movsd %%xmm0, (%%rsp)\n");
+            printf("  fldl (%%rsp)\n");
+            printf("  add $16, %%rsp\n");
+            return;
+        }
+        if (is_integer(from)) {
+            printf("  sub $16, %%rsp\n");
+            printf("  mov %%rax, (%%rsp)\n");
+            printf("  fildq (%%rsp)\n");
+            // Signed integer conversion is direct. For uint64_t values with the
+            // high bit set, add 2^64 to the signed interpretation.
+            if (from->size == 8 && from->is_unsigned) {
+                int c = count();
+                printf("  test %%rax, %%rax\n");
+                printf("  jns .L.u64_to_ld_end.%d\n", c);
+                long double two64 = 18446744073709551616.0L;
+                unsigned char raw[16] = {0};
+                memcpy(raw, &two64, 10);
+                printf("  sub $16, %%rsp\n");
+                for (int i = 0; i < 16; i++)
+                    printf("  movb $%u, %d(%%rsp)\n", raw[i], i);
+                printf("  fldt (%%rsp)\n");
+                printf("  add $16, %%rsp\n");
+                printf("  faddp %%st, %%st(1)\n");
+                printf(".L.u64_to_ld_end.%d:\n", c);
+            }
+            printf("  add $16, %%rsp\n");
+            return;
+        }
+    }
+
+    if (from->kind == TY_LDOUBLE && to->kind != TY_LDOUBLE) {
+        if (to->kind == TY_FLOAT || to->kind == TY_DOUBLE) {
+            printf("  sub $16, %%rsp\n");
+            if (to->kind == TY_FLOAT) {
+                printf("  fstps (%%rsp)\n");
+                printf("  movss (%%rsp), %%xmm0\n");
+            } else {
+                printf("  fstpl (%%rsp)\n");
+                printf("  movsd (%%rsp), %%xmm0\n");
+            }
+            printf("  add $16, %%rsp\n");
+            return;
+        }
+        if (is_integer(to)) {
+            printf("  sub $16, %%rsp\n");
+            printf("  fisttpq (%%rsp)\n");
+            printf("  mov (%%rsp), %%rax\n");
+            printf("  add $16, %%rsp\n");
+            normalize(to);
+            return;
+        }
     }
 
     if (is_integer(from) && is_flonum(to)) {
@@ -421,6 +515,23 @@ static void gen_addr(Node *node) {
 }
 
 static void gen_inc_dec(Node *node, bool increment, bool return_old) {
+    if (node->ty->kind == TY_LDOUBLE) {
+        gen_addr(node->lhs);
+        push();
+        load(node->ty);
+        // Keep the post-inc/dec old value below the working value on the x87
+        // register stack. This avoids interposing scratch bytes above the saved
+        // lvalue address that store() pops from the machine stack.
+        if (return_old)
+            printf("  fld %%st(0)\n");
+        printf("  fld1\n");
+        printf(increment ? "  faddp %%st, %%st(1)\n"
+                         : "  fsubrp %%st, %%st(1)\n");
+        store(node->ty);
+        if (return_old)
+            printf("  fstp %%st(0)\n");
+        return;
+    }
     if (is_flonum(node->ty)) {
         gen_addr(node->lhs);
         push();
@@ -476,6 +587,27 @@ static void gen_inc_dec(Node *node, bool increment, bool return_old) {
 }
 
 static void gen_compound_assign(Node *node) {
+    if (node->ty->kind == TY_LDOUBLE) {
+        gen_addr(node->lhs);
+        push();
+        load(node->ty);
+        pushf(node->ty);
+        gen_expr(node->rhs);
+        cast_value(node->rhs->ty, node->ty);
+        printf("  fldt (%%rsp)\n");
+        printf("  add $16, %%rsp\n");
+        depth -= 2;
+        // Arrange ST0=rhs, ST1=old so the same pop operations as ordinary
+        // binary arithmetic compute old op rhs.
+        printf("  fxch %%st(1)\n");
+        if (node->kind == ND_ADD_EQ) printf("  faddp %%st, %%st(1)\n");
+        else if (node->kind == ND_MUL_EQ) printf("  fmulp %%st, %%st(1)\n");
+        else if (node->kind == ND_SUB_EQ) printf("  fsubrp %%st, %%st(1)\n");
+        else if (node->kind == ND_DIV_EQ) printf("  fdivrp %%st, %%st(1)\n");
+        else error("invalid long double compound assignment");
+        store(node->ty);
+        return;
+    }
     if (is_flonum(node->ty)) {
         gen_addr(node->lhs);
         push();
@@ -838,6 +970,7 @@ static void gen_funcall(Node *node) {
 
     Node *args[32];
     bool fp_arg[32];
+    bool ld_arg[32];
     bool record_arg[32];
     bool stack_arg[32];
     int abi_slot[32];
@@ -859,7 +992,8 @@ static void gen_funcall(Node *node) {
         add_type(arg);
         args[nargs] = arg;
         record_arg[nargs] = arg->ty && arg->ty->kind == TY_STRUCT;
-        fp_arg[nargs] = !record_arg[nargs] && is_flonum(arg->ty);
+        ld_arg[nargs] = !record_arg[nargs] && arg->ty && arg->ty->kind == TY_LDOUBLE;
+        fp_arg[nargs] = !record_arg[nargs] && !ld_arg[nargs] && is_flonum(arg->ty);
         stack_arg[nargs] = false;
         spill_before[nargs] = total_spill_slots;
 
@@ -885,6 +1019,13 @@ static void gen_funcall(Node *node) {
                     stack_count += abi.slots;
                 }
             }
+        } else if (ld_arg[nargs]) {
+            spill_slots[nargs] = 2;
+            if (stack_count & 1)
+                stack_count++;
+            stack_arg[nargs] = true;
+            stack_slot[nargs] = stack_count;
+            stack_count += 2;
         } else if (fp_arg[nargs]) {
             spill_slots[nargs] = 1;
             if (fp_count < 8)
@@ -906,7 +1047,7 @@ static void gen_funcall(Node *node) {
         gen_expr(arg);
         if (record_arg[nargs])
             push_record_value(arg->ty);
-        else if (fp_arg[nargs])
+        else if (fp_arg[nargs] || ld_arg[nargs])
             pushf(arg->ty);
         else
             push();
@@ -1092,6 +1233,16 @@ static void gen_record_va_arg(Node *node) {
 
 static void gen_expr(Node *node) {
     if (node->kind == ND_NUM) {
+        if (node->ty && node->ty->kind == TY_LDOUBLE) {
+            unsigned char raw[16] = {0};
+            memcpy(raw, &node->ldval, 10);
+            printf("  sub $16, %%rsp\n");
+            for (int i = 0; i < 16; i++)
+                printf("  movb $%u, %d(%%rsp)\n", raw[i], i);
+            printf("  fldt (%%rsp)\n");
+            printf("  add $16, %%rsp\n");
+            return;
+        }
         if (node->ty && node->ty->kind == TY_FLOAT) {
             union { float f; uint32_t u; } u = { (float)node->fval };
             printf("  mov $%" PRIu32 ", %%eax\n", u.u);
@@ -1158,6 +1309,16 @@ static void gen_expr(Node *node) {
         gen_expr(node->lhs); // RAX = &va_list
         printf("  mov %%rax, %%rdi\n");
         int c = count();
+
+        if (node->ty->kind == TY_LDOUBLE) {
+            printf("  mov 8(%%rdi), %%rdx\n");
+            printf("  add $15, %%rdx\n");
+            printf("  and $-16, %%rdx\n");
+            printf("  fldt (%%rdx)\n");
+            printf("  add $16, %%rdx\n");
+            printf("  mov %%rdx, 8(%%rdi)\n");
+            return;
+        }
 
         if (node->ty->kind == TY_DOUBLE) {
             printf("  mov 4(%%rdi), %%eax\n");
@@ -1238,7 +1399,9 @@ static void gen_expr(Node *node) {
 
     if (node->kind == ND_NEG) {
         gen_expr(node->lhs);
-        if (node->ty->kind == TY_FLOAT) {
+        if (node->ty->kind == TY_LDOUBLE) {
+            printf("  fchs\n");
+        } else if (node->ty->kind == TY_FLOAT) {
             printf("  mov $0x80000000, %%eax\n");
             printf("  movd %%eax, %%xmm1\n");
             printf("  xorps %%xmm1, %%xmm0\n");
@@ -1342,6 +1505,50 @@ static void gen_expr(Node *node) {
     if ((arithmetic || comparison) && node->lhs->ty && node->rhs->ty &&
         is_numeric(node->lhs->ty) && is_numeric(node->rhs->ty))
         common = get_common_type_for_nodes(node->lhs, node->rhs);
+
+    if (common && common->kind == TY_LDOUBLE) {
+        gen_expr(node->rhs);
+        cast_value(node->rhs->ty, common);
+        pushf(common);
+        gen_expr(node->lhs);
+        cast_value(node->lhs->ty, common);
+        printf("  fldt (%%rsp)\n");
+        printf("  add $16, %%rsp\n");
+        depth -= 2;
+
+        if (comparison) {
+            // ST0=rhs, ST1=lhs. Compare lhs against rhs and consume both.
+            printf("  fxch %%st(1)\n");
+            printf("  fucomip %%st(1), %%st\n");
+            printf("  fstp %%st(0)\n");
+            if (node->kind == ND_EQ) {
+                printf("  sete %%al\n");
+                printf("  setnp %%dl\n");
+                printf("  and %%dl, %%al\n");
+            } else if (node->kind == ND_NE) {
+                printf("  setne %%al\n");
+                printf("  setp %%dl\n");
+                printf("  or %%dl, %%al\n");
+            } else if (node->kind == ND_LT) {
+                printf("  setb %%al\n");
+                printf("  setnp %%dl\n");
+                printf("  and %%dl, %%al\n");
+            } else {
+                printf("  setbe %%al\n");
+                printf("  setnp %%dl\n");
+                printf("  and %%dl, %%al\n");
+            }
+            printf("  movzb %%al, %%rax\n");
+            return;
+        }
+
+        if (node->kind == ND_ADD) printf("  faddp %%st, %%st(1)\n");
+        else if (node->kind == ND_MUL) printf("  fmulp %%st, %%st(1)\n");
+        else if (node->kind == ND_SUB) printf("  fsubrp %%st, %%st(1)\n");
+        else if (node->kind == ND_DIV) printf("  fdivrp %%st, %%st(1)\n");
+        else error("invalid long double arithmetic");
+        return;
+    }
 
     if (common && is_flonum(common)) {
         gen_expr(node->rhs);
@@ -1796,6 +2003,10 @@ static void assign_lvar_offsets(Program *prog) {
                     } else {
                         stack_arg += abi.slots;
                     }
+                } else if (p->ty->kind == TY_LDOUBLE) {
+                    if (stack_arg & 1)
+                        stack_arg++;
+                    stack_arg += 2;
                 } else if (is_flonum(p->ty)) {
                     if (fp < 8)
                         fp++;
@@ -1912,6 +2123,11 @@ static void emit_data(Program *prog) {
             } else if (var->ty->kind == TY_DOUBLE) {
                 union { double d; uint64_t u; } u = { var->finit_val };
                 printf("  .quad %" PRIu64 "\n", u.u);
+            } else if (var->ty->kind == TY_LDOUBLE) {
+                unsigned char raw[16] = {0};
+                memcpy(raw, &var->ldinit_val, 10);
+                for (int i = 0; i < 16; i++)
+                    printf("  .byte %u\n", raw[i]);
             } else if (var->ty->size == 1)
                 printf("  .byte %" PRId64 "\n", var->init_val);
             else if (var->ty->size == 2)
@@ -1973,6 +2189,17 @@ void codegen(Program *prog) {
         for (Obj *var = fn->params; var; var = var->param_next) {
             if (var->ty->kind == TY_STRUCT) {
                 save_record_parameter(var, &gp, &fp, &stack_arg);
+                continue;
+            }
+            if (var->ty->kind == TY_LDOUBLE) {
+                if (stack_arg & 1)
+                    stack_arg++;
+                int src = 16 + stack_arg * 8;
+                printf("  mov %d(%%rbp), %%rax\n", src);
+                printf("  mov %%rax, %d(%%rbp)\n", var->offset);
+                printf("  mov %d(%%rbp), %%rax\n", src + 8);
+                printf("  mov %%rax, %d(%%rbp)\n", var->offset + 8);
+                stack_arg += 2;
                 continue;
             }
             if (is_flonum(var->ty)) {
