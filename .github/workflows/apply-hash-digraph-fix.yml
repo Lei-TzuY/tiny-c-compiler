@@ -1,0 +1,178 @@
+name: Apply hash digraph fix
+
+on:
+  push:
+    branches:
+      - fix-preprocessor-hash-digraphs
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.event.head_commit.message == 'Prepare preprocessor digraph fix'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix-preprocessor-hash-digraphs
+      - name: Apply focused source and regression changes
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          pp = Path('preprocess_v2.c')
+          text = pp.read_text()
+          marker = "\nstatic Macro *find_macro(const char *name) {"
+          assert marker in text
+          helper = r'''
+
+// C11 digraphs %: and %:%: are preprocessing-token spellings of # and ##.
+// Canonicalize them after line splicing but before directive recognition and
+// macro replacement.  Text inside literals and comments is not a preprocessing
+// punctuator and must retain its original spelling.
+static char *canonicalize_pp_digraphs(const char *input) {
+    StrBuf out;
+    sb_init(&out, strlen(input) + 1);
+    bool in_block_comment = false;
+    char quote = 0;
+
+    for (const char *p = input; *p;) {
+        if (in_block_comment) {
+            if (p[0] == '*' && p[1] == '/') {
+                sb_putn(&out, p, 2);
+                p += 2;
+                in_block_comment = false;
+            } else {
+                sb_putc(&out, *p++);
+            }
+            continue;
+        }
+
+        if (quote) {
+            sb_putc(&out, *p);
+            if (*p == '\\' && p[1]) {
+                p++;
+                sb_putc(&out, *p++);
+                continue;
+            }
+            if (*p++ == quote)
+                quote = 0;
+            continue;
+        }
+
+        if (p[0] == '/' && p[1] == '*') {
+            in_block_comment = true;
+            sb_putn(&out, p, 2);
+            p += 2;
+            continue;
+        }
+        if (p[0] == '/' && p[1] == '/') {
+            while (*p && *p != '\n')
+                sb_putc(&out, *p++);
+            continue;
+        }
+        if (*p == '"' || *p == '\'') {
+            quote = *p;
+            sb_putc(&out, *p++);
+            continue;
+        }
+
+        // Match the four-character token first so it cannot be split into two
+        // adjacent %: tokens.
+        if (!strncmp(p, "%:%:", 4)) {
+            sb_puts(&out, "##");
+            p += 4;
+            continue;
+        }
+        if (!strncmp(p, "%:", 2)) {
+            sb_putc(&out, '#');
+            p += 2;
+            continue;
+        }
+        sb_putc(&out, *p++);
+    }
+    return out.data;
+}
+'''
+          text = text.replace(marker, helper + marker, 1)
+          old = "    char *spliced = splice_lines(input);\n    StrBuf out;"
+          new = "    char *spliced = splice_lines(input);\n    char *canonical = canonicalize_pp_digraphs(spliced);\n    free(spliced);\n    spliced = canonical;\n    StrBuf out;"
+          assert old in text
+          text = text.replace(old, new, 1)
+          pp.write_text(text)
+
+          mk = Path('Makefile')
+          text = mk.read_text()
+          old = "\tbash ./test/digraph_punctuators.sh\n\tbash ./test/preprocessor.sh\n"
+          new = "\tbash ./test/digraph_punctuators.sh\n\tbash ./test/preprocessor_hash_digraphs.sh\n\tbash ./test/preprocessor.sh\n"
+          assert old in text
+          mk.write_text(text.replace(old, new, 1))
+
+          test = r'''#!/bin/bash
+set -eu
+
+cat > tmp-pp-hash-digraphs.c <<'EOF'
+%:define ANSWER 42
+%:define STR(x) %:x
+%:define CAT(a, b) a %:%: b
+%:define TEMP 1
+%:undef TEMP
+
+/* %:define COMMENT_DEFINED 1 */
+// %:define LINE_COMMENT_DEFINED 1
+
+%:ifdef TEMP
+%:error %:undef did not remove TEMP
+%:endif
+%:ifdef COMMENT_DEFINED
+%:error hash digraph inside block comment became a directive
+%:endif
+%:ifdef LINE_COMMENT_DEFINED
+%:error hash digraph inside line comment became a directive
+%:endif
+
+%:if ANSWER != 42
+%:error %:define or %:if digraph handling failed
+%:endif
+
+int streq(const char *a, const char *b) {
+  while (*a && *a == *b) {
+    a++;
+    b++;
+  }
+  return *a == *b;
+}
+
+int CAT(ma, in)(void) {
+  if (ANSWER != 42) return 1;
+  if (!streq(STR(alpha      beta), "alpha beta")) return 2;
+  if (!streq("%: %:%:", "%: %:%:")) return 3;
+  return 0;
+}
+EOF
+
+# Keep a host compiler as an independent oracle that this is valid C11 source.
+cc -std=c11 -pedantic-errors -o tmp-pp-hash-digraphs-host tmp-pp-hash-digraphs.c
+./tmp-pp-hash-digraphs-host
+
+./minicc tmp-pp-hash-digraphs.c > tmp-pp-hash-digraphs.s
+cc -o tmp-pp-hash-digraphs tmp-pp-hash-digraphs.s
+./tmp-pp-hash-digraphs
+
+echo "OK(preprocessor hash digraphs): directives, #, ##, literals and comments"
+rm -f tmp-pp-hash-digraphs.c tmp-pp-hash-digraphs.s \
+      tmp-pp-hash-digraphs tmp-pp-hash-digraphs-host
+'''
+          Path('test/preprocessor_hash_digraphs.sh').write_text(test)
+          Path('.github/workflows/apply-hash-digraph-fix.yml').unlink()
+          PY
+
+          make test
+
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add -A
+          git commit -m "Support preprocessor hash digraphs"
+          git push origin HEAD:fix-preprocessor-hash-digraphs
