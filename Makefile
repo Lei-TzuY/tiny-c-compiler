@@ -46,6 +46,7 @@ test: minicc
 	bash ./test/float_abi.sh
 	bash ./test/float_callback_abi.sh
 	bash ./test/mixed_callback_abi.sh
+	bash ./test/narrow_callback_abi.sh
 	bash ./test/function_return_abi.sh
 	bash ./test/incomplete_tags.sh
 	bash ./test/incomplete_flexible_arrays.sh
