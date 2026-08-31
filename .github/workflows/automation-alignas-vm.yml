@@ -40,7 +40,7 @@ jobs:
       - name: Run focused regression
         run: |
           make minicc
-          ./test/alignas.sh
+          bash test/alignas.sh
       - name: Run full test suite
         run: make test
       - name: Commit verified changes and remove bootstrap workflow
