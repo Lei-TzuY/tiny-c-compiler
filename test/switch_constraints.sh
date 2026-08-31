@@ -43,6 +43,13 @@ assert_run 11 'int main(){unsigned short x=65535;switch(x){case 65535:return 11;
 # sign-extension corrupting the machine comparison.
 assert_run 12 'int main(){unsigned int x=(unsigned int)-1;switch(x){case -1:return 12;default:return 0;}}'
 
+# The same conversion and code-generation rules must hold for 64-bit controlling
+# types.  These cases exercise values that cannot be represented as signed int
+# and ensure a negative case constant is compared as ULONG_MAX after conversion.
+assert_run 14 'int main(){unsigned long x=4294967296UL;switch(x){case 4294967296UL:return 14;default:return 0;}}'
+assert_run 15 'int main(){unsigned long x=(unsigned long)-1;switch(x){case -1:return 15;default:return 0;}}'
+assert_run 16 'int main(){long x=-4294967296L;switch(x){case -4294967296L:return 16;default:return 0;}}'
+
 # Nested switches maintain independent case/default namespaces.
 assert_run 13 'int main(){int x=1;switch(x){case 1:switch(x){case 1:return 13;default:return 0;}default:return 0;}}'
 
@@ -63,6 +70,7 @@ assert_fail 'int main(){switch(1){case 1.5:return 0;}return 0;}'
 assert_fail 'int main(){switch(2){case 2:return 1;case 2:return 2;}return 0;}'
 assert_fail 'int main(){switch(2){case 1+1:return 1;case 2:return 2;}return 0;}'
 assert_fail 'int main(){unsigned int x=0;switch(x){case -1:return 1;case (unsigned int)-1:return 2;}return 0;}'
+assert_fail 'int main(){unsigned long x=0;switch(x){case -1:return 1;case 18446744073709551615UL:return 2;}return 0;}'
 assert_fail 'int main(){switch(0){default:return 1;default:return 2;}}'
 
 echo 'All switch-constraint tests passed!'
