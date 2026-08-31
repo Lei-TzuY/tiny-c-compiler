@@ -1760,6 +1760,8 @@ static int parse_alignment_specifier(Token **rest, Token *tok) {
         if (!aty || aty->kind == TY_VOID || aty->kind == TY_FUNC ||
             is_incomplete_object_type(aty))
             error_at(kw->loc, "_Alignas type must be a complete object type");
+        if (type_is_variably_modified(aty))
+            error_at(kw->loc, "_Alignas type must not be variably modified");
         align = aty->align > 0 ? aty->align : 1;
     } else {
         Node *expr_node = ternary(&tok, tok);
