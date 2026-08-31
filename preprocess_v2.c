@@ -2505,6 +2505,154 @@ static char *read_directive_ident(char **pp) {
     return strndup(start, (size_t)(p - start));
 }
 
+static void handle_pragma_text(const char *text, const char *source_name) {
+    char *copy = trim_copy(text ? text : "");
+    char *cursor = copy;
+    char *pragma = read_directive_ident(&cursor);
+
+    // Pragmas are implementation-defined. Keep the existing ubiquitous
+    // `once` behavior and deliberately ignore unknown pragma namespaces.
+    if (pragma && !strcmp(pragma, "once"))
+        mark_once_source(source_name);
+
+    free(pragma);
+    free(copy);
+}
+
+static const char *pragma_skip_space_comments(const char *p) {
+    for (;;) {
+        while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n')
+            p++;
+        if (p[0] != '/' || p[1] != '*')
+            return p;
+        const char *end = strstr(p + 2, "*/");
+        if (!end)
+            error("unterminated comment in _Pragma operator");
+        p = end + 2;
+    }
+}
+
+// C99 _Pragma accepts a normal or wide string literal. Destringizing removes
+// the string delimiters/prefix and replaces only escaped backslashes and
+// escaped quotes; every other escape spelling remains text for the pragma.
+static char *read_pragma_string(const char **rest, const char *p) {
+    p = pragma_skip_space_comments(p);
+
+    if (!strncmp(p, "u8\"", 3))
+        p += 2;
+    else if ((p[0] == 'L' || p[0] == 'u' || p[0] == 'U') && p[1] == '\"')
+        p++;
+
+    if (*p != '\"')
+        error("_Pragma requires a parenthesized string literal");
+    p++;
+
+    StrBuf out;
+    sb_init(&out, 32);
+    while (*p && *p != '\"') {
+        if (*p == '\n' || *p == '\r')
+            error("unterminated string literal in _Pragma operator");
+        if (*p == '\\' && p[1]) {
+            if (p[1] == '\\' || p[1] == '\"') {
+                sb_putc(&out, p[1]);
+                p += 2;
+                continue;
+            }
+            sb_putc(&out, *p++);
+            sb_putc(&out, *p++);
+            continue;
+        }
+        sb_putc(&out, *p++);
+    }
+    if (*p != '\"')
+        error("unterminated string literal in _Pragma operator");
+    p++;
+    *rest = p;
+    return out.data;
+}
+
+// _Pragma is handled after ordinary macro replacement so it can be produced by
+// a macro expansion. Scan preprocessing text token-aware: quoted literals and
+// comments must not accidentally execute text that merely spells `_Pragma`.
+static char *process_pragma_operators(const char *text, const char *source_name,
+                                      bool *in_block_comment) {
+    StrBuf out;
+    sb_init(&out, strlen(text) + 1);
+    const char *p = text;
+
+    while (*p) {
+        if (*in_block_comment) {
+            const char *end = strstr(p, "*/");
+            if (!end) {
+                sb_puts(&out, p);
+                break;
+            }
+            sb_putn(&out, p, (size_t)(end + 2 - p));
+            p = end + 2;
+            *in_block_comment = false;
+            continue;
+        }
+        if (p[0] == '/' && p[1] == '*') {
+            *in_block_comment = true;
+            sb_putn(&out, p, 2);
+            p += 2;
+            continue;
+        }
+        if (p[0] == '/' && p[1] == '/') {
+            sb_puts(&out, p);
+            break;
+        }
+
+        if (*p == '\"' || *p == '\'') {
+            char quote = *p;
+            sb_putc(&out, *p++);
+            while (*p) {
+                sb_putc(&out, *p);
+                if (*p == '\\' && p[1]) {
+                    p++;
+                    sb_putc(&out, *p++);
+                    continue;
+                }
+                if (*p++ == quote)
+                    break;
+            }
+            continue;
+        }
+
+        if (!is_ident1_pp(*p)) {
+            sb_putc(&out, *p++);
+            continue;
+        }
+
+        const char *start = p++;
+        while (is_ident2_pp(*p))
+            p++;
+        size_t len = (size_t)(p - start);
+        if (len != 7 || strncmp(start, "_Pragma", 7)) {
+            sb_putn(&out, start, len);
+            continue;
+        }
+
+        const char *q = pragma_skip_space_comments(p);
+        if (*q != '(')
+            error("_Pragma requires a parenthesized string literal");
+        q++;
+        char *pragma = read_pragma_string(&q, q);
+        q = pragma_skip_space_comments(q);
+        if (*q != ')') {
+            free(pragma);
+            error("_Pragma requires exactly one string literal operand");
+        }
+        q++;
+
+        handle_pragma_text(pragma, source_name);
+        free(pragma);
+        p = q;
+    }
+
+    return out.data;
+}
+
 static void parse_define(char *start) {
     char *name = read_directive_ident(&start);
     if (!name)
@@ -2671,6 +2819,7 @@ static char *preprocess_v2_source_impl(char *input, const char *source_name,
     StrBuf out;
     sb_init(&out, strlen(spliced) * 2 + 1024);
     bool in_block_comment = false;
+    bool pragma_in_block_comment = false;
 
     if (outermost && dump_mode != PREPROCESS_DUMP_NONE)
         append_macro_table(&out, dump_mode == PREPROCESS_DUMP_NAMES);
@@ -2749,12 +2898,7 @@ static char *preprocess_v2_source_impl(char *input, const char *source_name,
                 append_dumped_undef(&out, name);
                 free(name);
             } else if (is_cond_active() && !strcmp(directive, "pragma")) {
-                // #pragma is implementation-defined.  Support the ubiquitous
-                // once form and deliberately ignore unknown pragmas.
-                char *pragma = read_directive_ident(&start);
-                if (pragma && !strcmp(pragma, "once"))
-                    mark_once_source(source_name);
-                free(pragma);
+                handle_pragma_text(start, source_name);
             } else if (is_cond_active() &&
                        (!strcmp(directive, "include") ||
                         !strcmp(directive, "include_next"))) {
@@ -2859,10 +3003,15 @@ static char *preprocess_v2_source_impl(char *input, const char *source_name,
             continue;
         }
 
-        if (is_cond_active() && !suppress_text_output) {
+        if (is_cond_active()) {
             char *expanded = expand_text(line, NULL, &in_block_comment);
-            sb_puts(&out, expanded);
-            sb_putc(&out, '\n');
+            char *processed = process_pragma_operators(expanded, source_name,
+                                                       &pragma_in_block_comment);
+            if (!suppress_text_output) {
+                sb_puts(&out, processed);
+                sb_putc(&out, '\n');
+            }
+            free(processed);
             free(expanded);
         }
         free(line);
