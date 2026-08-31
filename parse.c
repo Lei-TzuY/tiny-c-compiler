@@ -5319,6 +5319,9 @@ static Node *compound_literal(Token **rest, Token *tok, Type *ty,
         !is_unknown_bound_array_with_complete_element(ty))
         error_at(type_tok->loc,
                  "compound literal requires a complete object type or an unknown-bound array with complete element type");
+    if (ty->kind == TY_ARRAY && ty->is_vla)
+        error_at(type_tok->loc,
+                 "compound literal may not have variable length array type");
     if (!equal(tok, "{"))
         error_at(tok->loc, "expected '{' after compound literal type name");
 

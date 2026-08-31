@@ -74,6 +74,12 @@ assert_run 9 'int main(){return (int[]){[3]=9}[3];}'
 assert_run 99 'int main(){return (char[]){"abc"}[2];}'
 assert_run 7 'int *p=(int[]){3,5,7}; int main(){return p[2];}'
 assert_run 98 'char *p=(char[]){"abc"}; int main(){return p[1];}'
+# C11 initialization constraints forbid VLA compound-literal objects.
+# A variably modified pointer object is not itself a VLA and remains valid.
+assert_reject 'int main(){int n=3; return (int[n]){1,2,3}[0];}'
+assert_reject 'int main(){int n=2; typedef int V[n]; return (V){4,5}[1];}'
+assert_run 0 'int main(){int n=3; int (*p)[n]=(int (*)[n]){0}; return p!=0;}'
+
 assert_reject 'int main(){return (int){1,2};}'
 assert_reject 'int x=(int){3}; int main(){return x;}'
 assert_reject 'int main(){static int *p=&(int){5}; return *p;}'
