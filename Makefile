@@ -68,6 +68,7 @@ test: minicc
 	bash ./test/mixed_variadic_abi.sh
 	bash ./test/variadic_default_promotions.sh
 	bash ./test/variadic_function_pointer_abi.sh
+	bash ./test/indirect_variadic_abi.sh
 	bash ./test/enum_abi.sh
 	bash ./test/pointer_abi.sh
 	bash ./test/prototype_params.sh
