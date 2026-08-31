@@ -44,6 +44,38 @@ static void popf(Type *ty, char *reg) {
     depth--;
 }
 
+static void pushld(void) {
+    printf("  sub $16, %%rsp\n");
+    printf("  fstpt (%%rsp)\n");
+    depth += 2;
+}
+
+static void popld(void) {
+    printf("  fldt (%%rsp)\n");
+    printf("  add $16, %%rsp\n");
+    depth -= 2;
+}
+
+// The compiler itself runs on the same x86-64 SysV target. Materialize the
+// host long-double representation byte-for-byte and load only the 80-bit x87
+// payload; the six ABI padding bytes stay deterministic zeroes.
+static void emit_long_double_constant(long double value) {
+    unsigned char raw[16] = {0};
+    uint64_t lo = 0, hi = 0;
+    if (sizeof(long double) != 16)
+        error("host long double representation is incompatible with x86-64 target");
+    memcpy(raw, &value, sizeof(value));
+    memcpy(&lo, raw, 8);
+    memcpy(&hi, raw + 8, 8);
+    printf("  sub $16, %%rsp\n");
+    printf("  movabs $0x%016" PRIx64 ", %%rax\n", lo);
+    printf("  mov %%rax, (%%rsp)\n");
+    printf("  movabs $0x%016" PRIx64 ", %%rax\n", hi);
+    printf("  mov %%rax, 8(%%rsp)\n");
+    printf("  fldt (%%rsp)\n");
+    printf("  add $16, %%rsp\n");
+}
+
 static void load(Type *ty) {
     if (ty->kind == TY_ARRAY || ty->kind == TY_STRUCT || ty->kind == TY_FUNC)
         return; // arrays/structs/functions decay to address
@@ -52,6 +84,8 @@ static void load(Type *ty) {
         printf("  movss (%%rax), %%xmm0\n");
     else if (ty->kind == TY_DOUBLE)
         printf("  movsd (%%rax), %%xmm0\n");
+    else if (ty->kind == TY_LDOUBLE)
+        printf("  fldt (%%rax)\n");
     else if (ty->kind == TY_BOOL)
         printf("  movzbq (%%rax), %%rax\n");
     else if (ty->kind == TY_CHAR) {
@@ -79,6 +113,10 @@ static void store(Type *ty) {
         printf("  movss %%xmm0, (%%rdi)\n");
     } else if (ty->kind == TY_DOUBLE) {
         printf("  movsd %%xmm0, (%%rdi)\n");
+    } else if (ty->kind == TY_LDOUBLE) {
+        // Assignment expressions retain their value in ST(0).
+        printf("  fld %%st(0)\n");
+        printf("  fstpt (%%rdi)\n");
     } else if (ty->kind == TY_BOOL) {
         // _Bool: any non-zero value becomes 1
         printf("  cmp $0, %%rax\n");
@@ -238,6 +276,17 @@ static void normalize(Type *ty) {
 }
 
 static void value_to_bool(Type *ty) {
+    if (ty->kind == TY_LDOUBLE) {
+        printf("  fldz\n");
+        printf("  fxch %%st(1)\n");
+        printf("  fucomip %%st(1), %%st\n");
+        printf("  fstp %%st(0)\n");
+        printf("  setne %%al\n");
+        printf("  setp %%dl\n");
+        printf("  or %%dl, %%al\n");
+        printf("  movzb %%al, %%rax\n");
+        return;
+    }
     if (is_flonum(ty)) {
         if (ty->kind == TY_FLOAT) {
             printf("  xorps %%xmm1, %%xmm1\n");
@@ -260,28 +309,107 @@ static void value_to_bool(Type *ty) {
 static void cast_value(Type *from, Type *to) {
     if (!from || !to || from == to)
         return;
-
-    // Most same-kind conversions are representation-preserving, but signed
-    // and unsigned integer types of the same rank still require the target
-    // width/sign interpretation (notably int <-> unsigned int).
     if (from->kind == to->kind &&
         (!is_integer(from) || from->is_unsigned == to->is_unsigned))
         return;
-
     if (to->kind == TY_VOID)
         return;
-
     if (to->kind == TY_BOOL) {
         value_to_bool(from);
         return;
     }
 
+    if (is_integer(from) && to->kind == TY_LDOUBLE) {
+        if (from->size == 8 && from->is_unsigned) {
+            int c = count();
+            printf("  test %%rax, %%rax\n");
+            printf("  js .L.u64_to_ld.%d\n", c);
+            printf("  sub $8, %%rsp\n");
+            printf("  mov %%rax, (%%rsp)\n");
+            printf("  fildq (%%rsp)\n");
+            printf("  add $8, %%rsp\n");
+            printf("  jmp .L.u64_to_ld_end.%d\n", c);
+            printf(".L.u64_to_ld.%d:\n", c);
+            printf("  mov %%rax, %%rdx\n");
+            printf("  and $1, %%eax\n");
+            printf("  shr $1, %%rdx\n");
+            printf("  or %%rax, %%rdx\n");
+            printf("  sub $8, %%rsp\n");
+            printf("  mov %%rdx, (%%rsp)\n");
+            printf("  fildq (%%rsp)\n");
+            printf("  add $8, %%rsp\n");
+            printf("  fadd %%st(0), %%st(0)\n");
+            printf(".L.u64_to_ld_end.%d:\n", c);
+            return;
+        }
+        printf("  sub $8, %%rsp\n");
+        printf("  mov %%rax, (%%rsp)\n");
+        printf("  fildq (%%rsp)\n");
+        printf("  add $8, %%rsp\n");
+        return;
+    }
+
+    if (from->kind == TY_LDOUBLE && is_integer(to)) {
+        if (to->size == 8 && to->is_unsigned) {
+            int c = count();
+            emit_long_double_constant(0x1p63L);
+            printf("  fxch %%st(1)\n");
+            printf("  fucomi %%st(1), %%st\n");
+            printf("  jb .L.ld_to_u64_low.%d\n", c);
+            printf("  fsub %%st(1), %%st\n");
+            printf("  fstp %%st(1)\n");
+            printf("  sub $8, %%rsp\n");
+            printf("  fisttpq (%%rsp)\n");
+            printf("  mov (%%rsp), %%rax\n");
+            printf("  add $8, %%rsp\n");
+            printf("  movabs $0x8000000000000000, %%rdx\n");
+            printf("  or %%rdx, %%rax\n");
+            printf("  jmp .L.ld_to_u64_end.%d\n", c);
+            printf(".L.ld_to_u64_low.%d:\n", c);
+            printf("  fstp %%st(1)\n");
+            printf("  sub $8, %%rsp\n");
+            printf("  fisttpq (%%rsp)\n");
+            printf("  mov (%%rsp), %%rax\n");
+            printf("  add $8, %%rsp\n");
+            printf(".L.ld_to_u64_end.%d:\n", c);
+            return;
+        }
+        printf("  sub $8, %%rsp\n");
+        printf("  fisttpq (%%rsp)\n");
+        printf("  mov (%%rsp), %%rax\n");
+        printf("  add $8, %%rsp\n");
+        normalize(to);
+        return;
+    }
+
+    if ((from->kind == TY_FLOAT || from->kind == TY_DOUBLE) &&
+        to->kind == TY_LDOUBLE) {
+        printf("  sub $8, %%rsp\n");
+        if (from->kind == TY_FLOAT) {
+            printf("  movss %%xmm0, (%%rsp)\n");
+            printf("  flds (%%rsp)\n");
+        } else {
+            printf("  movsd %%xmm0, (%%rsp)\n");
+            printf("  fldl (%%rsp)\n");
+        }
+        printf("  add $8, %%rsp\n");
+        return;
+    }
+
+    if (from->kind == TY_LDOUBLE && (to->kind == TY_FLOAT || to->kind == TY_DOUBLE)) {
+        printf("  sub $8, %%rsp\n");
+        if (to->kind == TY_FLOAT) {
+            printf("  fstps (%%rsp)\n");
+            printf("  movss (%%rsp), %%xmm0\n");
+        } else {
+            printf("  fstpl (%%rsp)\n");
+            printf("  movsd (%%rsp), %%xmm0\n");
+        }
+        printf("  add $8, %%rsp\n");
+        return;
+    }
+
     if (is_integer(from) && is_flonum(to)) {
-        // SSE2 only provides signed 64-bit integer-to-float conversion.  For
-        // unsigned long values with the high bit set, halve the value while
-        // preserving the dropped low bit, convert the now-signed-positive
-        // integer, then double the floating result.  This is the standard
-        // exact-rounding reduction used for the full uint64_t domain.
         if (from->size == 8 && from->is_unsigned) {
             int c = count();
             printf("  test %%rax, %%rax\n");
@@ -306,7 +434,6 @@ static void cast_value(Type *from, Type *to) {
             printf(".L.u64_to_fp_end.%d:\n", c);
             return;
         }
-
         if (to->kind == TY_FLOAT)
             printf("  cvtsi2ss %%rax, %%xmm0\n");
         else
@@ -315,11 +442,6 @@ static void cast_value(Type *from, Type *to) {
     }
 
     if (is_flonum(from) && is_integer(to)) {
-        // cvtt{s,d}2si also targets signed 64-bit integers.  Values in the
-        // upper half of uint64_t are converted after subtracting 2^63, then
-        // the high bit is restored in the integer result.  C leaves negative,
-        // NaN, and out-of-range floating conversions undefined, so only the
-        // representable unsigned range needs a defined lowering here.
         if (to->size == 8 && to->is_unsigned) {
             int c = count();
             if (from->kind == TY_FLOAT) {
@@ -348,7 +470,6 @@ static void cast_value(Type *from, Type *to) {
             printf(".L.fp_to_u64_end.%d:\n", c);
             return;
         }
-
         if (from->kind == TY_FLOAT)
             printf("  cvttss2si %%xmm0, %%rax\n");
         else
@@ -365,7 +486,6 @@ static void cast_value(Type *from, Type *to) {
         printf("  cvtsd2ss %%xmm0, %%xmm0\n");
         return;
     }
-
     if (is_integer(from) && is_integer(to))
         normalize(to);
 }
@@ -421,6 +541,32 @@ static void gen_addr(Node *node) {
 }
 
 static void gen_inc_dec(Node *node, bool increment, bool return_old) {
+    if (node->ty->kind == TY_LDOUBLE) {
+        gen_addr(node->lhs);
+        push();
+        load(node->ty);
+        if (return_old) {
+            printf("  fld %%st(0)\n");
+            pushld();
+        }
+        emit_long_double_constant(1.0L);
+        if (increment)
+            printf("  faddp %%st, %%st(1)\n");
+        else
+            printf("  fsubp %%st, %%st(1)\n");
+        int addr_off = return_old ? 16 : 0;
+        printf("  mov %d(%%rsp), %%rdi\n", addr_off);
+        printf("  fld %%st(0)\n");
+        printf("  fstpt (%%rdi)\n");
+        if (return_old) {
+            printf("  fstp %%st(0)\n");
+            popld();
+        }
+        printf("  add $8, %%rsp\n");
+        depth--;
+        return;
+    }
+
     if (is_flonum(node->ty)) {
         gen_addr(node->lhs);
         push();
@@ -445,7 +591,6 @@ static void gen_inc_dec(Node *node, bool increment, bool return_old) {
     int step = 1;
     if (node->ty->kind == TY_PTR && !node->rhs)
         step = node->ty->base->size;
-
     gen_addr(node->lhs);
     push();
     load_lvalue(node->lhs);
@@ -453,22 +598,17 @@ static void gen_inc_dec(Node *node, bool increment, bool return_old) {
                     node->lhs->member->is_bitfield;
     if (return_old)
         printf(bitfield ? "  mov %%rax, %%r8\n" : "  mov %%rax, %%rsi\n");
-
     if (node->rhs) {
         push();
         gen_expr(node->rhs);
         printf("  mov %%rax, %%rdi\n");
         pop("%rax");
-        if (increment)
-            printf("  add %%rdi, %%rax\n");
-        else
-            printf("  sub %%rdi, %%rax\n");
+        printf(increment ? "  add %%rdi, %%rax\n" : "  sub %%rdi, %%rax\n");
     } else if (increment) {
         printf("  add $%d, %%rax\n", step);
     } else {
         printf("  sub $%d, %%rax\n", step);
     }
-
     store_lvalue(node->lhs);
     normalize(node->ty);
     if (return_old)
@@ -476,6 +616,24 @@ static void gen_inc_dec(Node *node, bool increment, bool return_old) {
 }
 
 static void gen_compound_assign(Node *node) {
+    if (node->ty->kind == TY_LDOUBLE) {
+        gen_addr(node->lhs);
+        push();
+        load(node->ty);
+        pushld();
+        gen_expr(node->rhs);
+        cast_value(node->rhs->ty, node->ty);
+        popld(); // ST0=old lhs, ST1=rhs
+        printf("  fxch %%st(1)\n"); // ST0=rhs, ST1=old lhs
+        if (node->kind == ND_ADD_EQ) printf("  faddp %%st, %%st(1)\n");
+        else if (node->kind == ND_MUL_EQ) printf("  fmulp %%st, %%st(1)\n");
+        else if (node->kind == ND_SUB_EQ) printf("  fsubp %%st, %%st(1)\n");
+        else if (node->kind == ND_DIV_EQ) printf("  fdivp %%st, %%st(1)\n");
+        else error("invalid long double compound assignment");
+        store(node->ty);
+        return;
+    }
+
     if (is_flonum(node->ty)) {
         gen_addr(node->lhs);
         push();
@@ -484,31 +642,18 @@ static void gen_compound_assign(Node *node) {
         gen_expr(node->rhs);
         cast_value(node->rhs->ty, node->ty);
         popf(node->ty, "%xmm1");
-
         if (node->ty->kind == TY_FLOAT) {
             if (node->kind == ND_ADD_EQ) printf("  addss %%xmm1, %%xmm0\n");
             else if (node->kind == ND_MUL_EQ) printf("  mulss %%xmm1, %%xmm0\n");
-            else if (node->kind == ND_SUB_EQ) {
-                printf("  subss %%xmm0, %%xmm1\n");
-                printf("  movaps %%xmm1, %%xmm0\n");
-            } else if (node->kind == ND_DIV_EQ) {
-                printf("  divss %%xmm0, %%xmm1\n");
-                printf("  movaps %%xmm1, %%xmm0\n");
-            } else {
-                error("invalid floating compound assignment");
-            }
+            else if (node->kind == ND_SUB_EQ) { printf("  subss %%xmm0, %%xmm1\n"); printf("  movaps %%xmm1, %%xmm0\n"); }
+            else if (node->kind == ND_DIV_EQ) { printf("  divss %%xmm0, %%xmm1\n"); printf("  movaps %%xmm1, %%xmm0\n"); }
+            else error("invalid floating compound assignment");
         } else {
             if (node->kind == ND_ADD_EQ) printf("  addsd %%xmm1, %%xmm0\n");
             else if (node->kind == ND_MUL_EQ) printf("  mulsd %%xmm1, %%xmm0\n");
-            else if (node->kind == ND_SUB_EQ) {
-                printf("  subsd %%xmm0, %%xmm1\n");
-                printf("  movapd %%xmm1, %%xmm0\n");
-            } else if (node->kind == ND_DIV_EQ) {
-                printf("  divsd %%xmm0, %%xmm1\n");
-                printf("  movapd %%xmm1, %%xmm0\n");
-            } else {
-                error("invalid floating compound assignment");
-            }
+            else if (node->kind == ND_SUB_EQ) { printf("  subsd %%xmm0, %%xmm1\n"); printf("  movapd %%xmm1, %%xmm0\n"); }
+            else if (node->kind == ND_DIV_EQ) { printf("  divsd %%xmm0, %%xmm1\n"); printf("  movapd %%xmm1, %%xmm0\n"); }
+            else error("invalid floating compound assignment");
         }
         store(node->ty);
         return;
@@ -518,63 +663,39 @@ static void gen_compound_assign(Node *node) {
     if (node->kind == ND_DIV_EQ || node->kind == ND_MOD_EQ)
         operation_ty = get_common_type_for_nodes(node->lhs, node->rhs);
     else if (node->kind == ND_SHR_EQ)
-        // Integer promotion of the left operand.  Using int as the second
-        // operand is a compact way to request exactly that promotion here.
         operation_ty = integer_promotion_for_node(node->lhs);
-
     gen_addr(node->lhs);
     push();
     load_lvalue(node->lhs);
-    if (operation_ty)
-        cast_value(node->lhs->ty, operation_ty);
+    if (operation_ty) cast_value(node->lhs->ty, operation_ty);
     push();
     gen_expr(node->rhs);
-    if (operation_ty &&
-        (node->kind == ND_DIV_EQ || node->kind == ND_MOD_EQ))
+    if (operation_ty && (node->kind == ND_DIV_EQ || node->kind == ND_MOD_EQ))
         cast_value(node->rhs->ty, operation_ty);
     printf("  mov %%rax, %%rsi\n");
     pop("%rax");
-
     switch (node->kind) {
     case ND_ADD_EQ: printf("  add %%rsi, %%rax\n"); break;
     case ND_SUB_EQ: printf("  sub %%rsi, %%rax\n"); break;
     case ND_MUL_EQ: printf("  imul %%rsi, %%rax\n"); break;
     case ND_DIV_EQ:
-        if (operation_ty && operation_ty->is_unsigned) {
-            printf("  mov $0, %%rdx\n");
-            printf("  div %%rsi\n");
-        } else {
-            printf("  cqo\n");
-            printf("  idiv %%rsi\n");
-        }
+        if (operation_ty && operation_ty->is_unsigned) { printf("  mov $0, %%rdx\n"); printf("  div %%rsi\n"); }
+        else { printf("  cqo\n"); printf("  idiv %%rsi\n"); }
         break;
     case ND_MOD_EQ:
-        if (operation_ty && operation_ty->is_unsigned) {
-            printf("  mov $0, %%rdx\n");
-            printf("  div %%rsi\n");
-        } else {
-            printf("  cqo\n");
-            printf("  idiv %%rsi\n");
-        }
-        printf("  mov %%rdx, %%rax\n");
-        break;
+        if (operation_ty && operation_ty->is_unsigned) { printf("  mov $0, %%rdx\n"); printf("  div %%rsi\n"); }
+        else { printf("  cqo\n"); printf("  idiv %%rsi\n"); }
+        printf("  mov %%rdx, %%rax\n"); break;
     case ND_AND_EQ: printf("  and %%rsi, %%rax\n"); break;
-    case ND_OR_EQ:  printf("  or %%rsi, %%rax\n"); break;
+    case ND_OR_EQ: printf("  or %%rsi, %%rax\n"); break;
     case ND_XOR_EQ: printf("  xor %%rsi, %%rax\n"); break;
-    case ND_SHL_EQ:
-        printf("  mov %%rsi, %%rcx\n");
-        printf("  shl %%cl, %%rax\n");
-        break;
+    case ND_SHL_EQ: printf("  mov %%rsi, %%rcx\n"); printf("  shl %%cl, %%rax\n"); break;
     case ND_SHR_EQ:
         printf("  mov %%rsi, %%rcx\n");
-        if (operation_ty && operation_ty->is_unsigned)
-            printf("  shr %%cl, %%rax\n");
-        else
-            printf("  sar %%cl, %%rax\n");
+        printf(operation_ty && operation_ty->is_unsigned ? "  shr %%cl, %%rax\n" : "  sar %%cl, %%rax\n");
         break;
     default: error("invalid compound assignment");
     }
-
     store_lvalue(node->lhs);
     normalize(node->ty);
 }
@@ -687,6 +808,7 @@ static void copy_stack_record_to_local(Type *ty, int src, int dst) {
 static void save_record_parameter(Obj *var, int *gp, int *fp, int *stack_arg) {
     RecordAbi abi = require_record_abi(var->ty);
     if (abi.memory) {
+        if (var->ty->align > 8 && (*stack_arg & 1)) (*stack_arg)++;
         int src = 16 + *stack_arg * 8;
         copy_stack_record_to_local(var->ty, src, var->offset);
         *stack_arg += abi.slots;
@@ -712,6 +834,7 @@ static void save_record_parameter(Obj *var, int *gp, int *fp, int *stack_arg) {
 
     // A small aggregate also reverts entirely to memory if either required
     // register class is short; do not consume the other class partially.
+    if (var->ty->align > 8 && (*stack_arg & 1)) (*stack_arg)++;
     int src = 16 + *stack_arg * 8;
     copy_stack_record_to_local(var->ty, src, var->offset);
     *stack_arg += abi.slots;
@@ -830,182 +953,107 @@ static void gen_funcall(Node *node) {
     bool indirect = (node->funcname == NULL);
     bool memory_return = node->ty && node->ty->kind == TY_STRUCT &&
                          sysv_record_is_memory(node->ty);
-
-    if (indirect) {
-        gen_expr(node->lhs);
-        push(); // function address remains above the argument spills
-    }
+    if (indirect) { gen_expr(node->lhs); push(); }
 
     Node *args[32];
-    bool fp_arg[32];
-    bool record_arg[32];
-    bool stack_arg[32];
-    int abi_slot[32];
-    int record_gp_base[32];
-    int record_fp_base[32];
+    bool fp_arg[32], ld_arg[32], record_arg[32], stack_arg[32];
+    int abi_slot[32], record_gp_base[32], record_fp_base[32];
     SysVAbiClass record_classes[32][2];
-    int stack_slot[32];
-    int spill_before[32];
-    int spill_slots[32];
-    int nargs = 0;
-    int gp_count = memory_return ? 1 : 0;
-    int fp_count = 0;
-    int stack_count = 0;
-    int total_spill_slots = 0;
+    int stack_slot[32], spill_before[32], spill_slots[32];
+    int nargs=0, gp_count=memory_return?1:0, fp_count=0, stack_count=0, total_spill_slots=0;
 
-    for (Node *arg = node->args; arg; arg = arg->next) {
-        if (nargs >= 32)
-            error("too many arguments");
+    for (Node *arg=node->args; arg; arg=arg->next) {
+        if (nargs>=32) error("too many arguments");
         add_type(arg);
-        args[nargs] = arg;
-        record_arg[nargs] = arg->ty && arg->ty->kind == TY_STRUCT;
-        fp_arg[nargs] = !record_arg[nargs] && is_flonum(arg->ty);
-        stack_arg[nargs] = false;
-        spill_before[nargs] = total_spill_slots;
+        args[nargs]=arg;
+        record_arg[nargs]=arg->ty && arg->ty->kind==TY_STRUCT;
+        ld_arg[nargs]=!record_arg[nargs] && arg->ty && arg->ty->kind==TY_LDOUBLE;
+        fp_arg[nargs]=!record_arg[nargs] && !ld_arg[nargs] && is_flonum(arg->ty);
+        stack_arg[nargs]=false;
+        spill_before[nargs]=total_spill_slots;
 
         if (record_arg[nargs]) {
-            RecordAbi abi = require_record_abi(arg->ty);
-            spill_slots[nargs] = abi.slots;
+            RecordAbi abi=require_record_abi(arg->ty);
+            spill_slots[nargs]=abi.slots;
             if (abi.memory) {
-                stack_arg[nargs] = true;
-                stack_slot[nargs] = stack_count;
-                stack_count += abi.slots;
+                if (arg->ty->align>8 && (stack_count&1)) stack_count++;
+                stack_arg[nargs]=true; stack_slot[nargs]=stack_count; stack_count+=abi.slots;
             } else {
-                for (int j = 0; j < abi.slots; j++)
-                    record_classes[nargs][j] = abi.classes[j];
-
-                if (gp_count + abi.gp <= 6 && fp_count + abi.fp <= 8) {
-                    record_gp_base[nargs] = gp_count;
-                    record_fp_base[nargs] = fp_count;
-                    gp_count += abi.gp;
-                    fp_count += abi.fp;
+                for(int j=0;j<abi.slots;j++) record_classes[nargs][j]=abi.classes[j];
+                if(gp_count+abi.gp<=6 && fp_count+abi.fp<=8) {
+                    record_gp_base[nargs]=gp_count; record_fp_base[nargs]=fp_count;
+                    gp_count+=abi.gp; fp_count+=abi.fp;
                 } else {
-                    stack_arg[nargs] = true;
-                    stack_slot[nargs] = stack_count;
-                    stack_count += abi.slots;
+                    if (arg->ty->align>8 && (stack_count&1)) stack_count++;
+                    stack_arg[nargs]=true; stack_slot[nargs]=stack_count; stack_count+=abi.slots;
                 }
             }
+        } else if (ld_arg[nargs]) {
+            spill_slots[nargs]=2;
+            if (stack_count&1) stack_count++;
+            stack_arg[nargs]=true; stack_slot[nargs]=stack_count; stack_count+=2;
         } else if (fp_arg[nargs]) {
-            spill_slots[nargs] = 1;
-            if (fp_count < 8)
-                abi_slot[nargs] = fp_count++;
-            else {
-                stack_arg[nargs] = true;
-                stack_slot[nargs] = stack_count++;
-            }
+            spill_slots[nargs]=1;
+            if(fp_count<8) abi_slot[nargs]=fp_count++;
+            else { stack_arg[nargs]=true; stack_slot[nargs]=stack_count++; }
         } else {
-            spill_slots[nargs] = 1;
-            if (gp_count < 6)
-                abi_slot[nargs] = gp_count++;
-            else {
-                stack_arg[nargs] = true;
-                stack_slot[nargs] = stack_count++;
-            }
+            spill_slots[nargs]=1;
+            if(gp_count<6) abi_slot[nargs]=gp_count++;
+            else { stack_arg[nargs]=true; stack_slot[nargs]=stack_count++; }
         }
 
         gen_expr(arg);
-        if (record_arg[nargs])
-            push_record_value(arg->ty);
-        else if (fp_arg[nargs])
-            pushf(arg->ty);
-        else
-            push();
-
+        if(record_arg[nargs]) push_record_value(arg->ty);
+        else if(ld_arg[nargs]) pushld();
+        else if(fp_arg[nargs]) pushf(arg->ty);
+        else push();
         total_spill_slots += spill_slots[nargs];
         nargs++;
     }
 
     printf("  mov %%rsp, %%r11\n");
-
-    for (int i = 0; i < nargs; i++) {
-        if (stack_arg[i])
-            continue;
-        int src = (total_spill_slots - spill_before[i] - spill_slots[i]) * 8;
-        if (record_arg[i]) {
-            int g = record_gp_base[i];
-            int f = record_fp_base[i];
-            for (int j = 0; j < spill_slots[i]; j++) {
-                if (record_classes[i][j] == SYSV_ABI_INTEGER)
-                    printf("  mov %d(%%r11), %s\n", src + j * 8, argreg64[g++]);
-                else
-                    printf("  movq %d(%%r11), %%xmm%d\n", src + j * 8, f++);
+    for(int i=0;i<nargs;i++) {
+        if(stack_arg[i]) continue;
+        int src=(total_spill_slots-spill_before[i]-spill_slots[i])*8;
+        if(record_arg[i]) {
+            int g=record_gp_base[i], f=record_fp_base[i];
+            for(int j=0;j<spill_slots[i];j++) {
+                if(record_classes[i][j]==SYSV_ABI_INTEGER) printf("  mov %d(%%r11), %s\n",src+j*8,argreg64[g++]);
+                else printf("  movq %d(%%r11), %%xmm%d\n",src+j*8,f++);
             }
-        } else if (fp_arg[i]) {
-            if (args[i]->ty->kind == TY_FLOAT)
-                printf("  movss %d(%%r11), %%xmm%d\n", src, abi_slot[i]);
-            else
-                printf("  movsd %d(%%r11), %%xmm%d\n", src, abi_slot[i]);
+        } else if(fp_arg[i]) {
+            printf(args[i]->ty->kind==TY_FLOAT ? "  movss %d(%%r11), %%xmm%d\n" : "  movsd %d(%%r11), %%xmm%d\n",src,abi_slot[i]);
         } else {
-            printf("  mov %d(%%r11), %s\n", src, argreg64[abi_slot[i]]);
+            printf("  mov %d(%%r11), %s\n",src,argreg64[abi_slot[i]]);
         }
     }
+    if(indirect) printf("  mov %d(%%r11), %%r10\n",total_spill_slots*8);
 
-    if (indirect)
-        printf("  mov %d(%%r11), %%r10\n", total_spill_slots * 8);
-
-    // Keep alignment padding above the stack argument area, preserving the
-    // first stack-passed argument at 0(%rsp) immediately before call.
-    int pad = (depth + stack_count) & 1;
-    if (pad) {
-        printf("  sub $8, %%rsp\n");
-        depth++;
-    }
-
-    if (stack_count) {
-        printf("  sub $%d, %%rsp\n", stack_count * 8);
-        depth += stack_count;
-
-        for (int i = 0; i < nargs; i++) {
-            if (!stack_arg[i])
-                continue;
-            int src = (total_spill_slots - spill_before[i] - spill_slots[i]) * 8;
-            int dst = stack_slot[i] * 8;
-            for (int j = 0; j < spill_slots[i]; j++) {
-                printf("  mov %d(%%r11), %%rax\n", src + j * 8);
-                printf("  mov %%rax, %d(%%rsp)\n", dst + j * 8);
+    int pad=(depth+stack_count)&1;
+    if(pad){ printf("  sub $8, %%rsp\n"); depth++; }
+    if(stack_count){
+        printf("  sub $%d, %%rsp\n",stack_count*8); depth+=stack_count;
+        for(int i=0;i<nargs;i++) if(stack_arg[i]) {
+            int src=(total_spill_slots-spill_before[i]-spill_slots[i])*8;
+            int dst=stack_slot[i]*8;
+            for(int j=0;j<spill_slots[i];j++) {
+                printf("  mov %d(%%r11), %%rax\n",src+j*8);
+                printf("  mov %%rax, %d(%%rsp)\n",dst+j*8);
             }
         }
     }
-
-    if (memory_return) {
-        if (!node->ret_buffer)
-            error("missing MEMORY record return buffer");
-        printf("  lea %d(%%rbp), %%rdi\n", node->ret_buffer->offset);
+    if(memory_return){
+        if(!node->ret_buffer) error("missing MEMORY record return buffer");
+        printf("  lea %d(%%rbp), %%rdi\n",node->ret_buffer->offset);
     }
-
-    // For variadic calls AL counts every XMM register used by named/unnamed
-    // scalar or small-record arguments. MEMORY records contribute no XMM regs.
-    printf("  mov $%d, %%eax\n", fp_count);
-    if (indirect)
-        printf("  call *%%r10\n");
-    else
-        printf("  call %s\n", node->funcname);
-
-    if (stack_count) {
-        printf("  add $%d, %%rsp\n", stack_count * 8);
-        depth -= stack_count;
-    }
-    if (pad) {
-        printf("  add $8, %%rsp\n");
-        depth--;
-    }
-
-    int spill_count = total_spill_slots + (indirect ? 1 : 0);
-    if (spill_count) {
-        printf("  add $%d, %%rsp\n", spill_count * 8);
-        depth -= spill_count;
-    }
-
-    // SysV places scalar integer return values in the low part of RAX. For
-    // types narrower than 64 bits the remaining bits are not a C value and
-    // must be interpreted according to the declared return type at the call
-    // site. Canonicalize signed/unsigned bool/char/short/int exactly as loads
-    // and casts do before any enclosing expression consumes the result.
-    if (node->ty && node->ty->kind != TY_STRUCT)
-        normalize(node->ty);
-
-    if (node->ty && node->ty->kind == TY_STRUCT)
-        materialize_record_call(node);
+    printf("  mov $%d, %%eax\n",fp_count);
+    if(indirect) printf("  call *%%r10\n"); else printf("  call %s\n",node->funcname);
+    if(stack_count){ printf("  add $%d, %%rsp\n",stack_count*8); depth-=stack_count; }
+    if(pad){ printf("  add $8, %%rsp\n"); depth--; }
+    int spill_count=total_spill_slots+(indirect?1:0);
+    if(spill_count){ printf("  add $%d, %%rsp\n",spill_count*8); depth-=spill_count; }
+    if(node->ty && node->ty->kind!=TY_STRUCT && node->ty->kind!=TY_LDOUBLE) normalize(node->ty);
+    if(node->ty && node->ty->kind==TY_STRUCT) materialize_record_call(node);
 }
 
 // Copy one low eightbyte from the variadic register-save area into a
@@ -1099,9 +1147,13 @@ static void gen_expr(Node *node) {
             return;
         }
         if (node->ty && node->ty->kind == TY_DOUBLE) {
-            union { double d; uint64_t u; } u = { node->fval };
+            union { double d; uint64_t u; } u = { (double)node->fval };
             printf("  mov $%" PRIu64 ", %%rax\n", u.u);
             printf("  movq %%rax, %%xmm0\n");
+            return;
+        }
+        if (node->ty && node->ty->kind == TY_LDOUBLE) {
+            emit_long_double_constant(node->fval);
             return;
         }
         printf("  mov $%" PRId64 ", %%rax\n", node->val);
@@ -1158,6 +1210,16 @@ static void gen_expr(Node *node) {
         gen_expr(node->lhs); // RAX = &va_list
         printf("  mov %%rax, %%rdi\n");
         int c = count();
+
+        if (node->ty->kind == TY_LDOUBLE) {
+            printf("  mov 8(%%rdi), %%rdx\n");
+            printf("  add $15, %%rdx\n");
+            printf("  and $-16, %%rdx\n");
+            printf("  fldt (%%rdx)\n");
+            printf("  add $16, %%rdx\n");
+            printf("  mov %%rdx, 8(%%rdi)\n");
+            return;
+        }
 
         if (node->ty->kind == TY_DOUBLE) {
             printf("  mov 4(%%rdi), %%eax\n");
@@ -1246,6 +1308,8 @@ static void gen_expr(Node *node) {
             printf("  movabs $0x8000000000000000, %%rax\n");
             printf("  movq %%rax, %%xmm1\n");
             printf("  xorpd %%xmm1, %%xmm0\n");
+        } else if (node->ty->kind == TY_LDOUBLE) {
+            printf("  fchs\n");
         } else {
             printf("  neg %%rax\n");
             if (is_integer(node->ty))
@@ -1343,6 +1407,32 @@ static void gen_expr(Node *node) {
         is_numeric(node->lhs->ty) && is_numeric(node->rhs->ty))
         common = get_common_type_for_nodes(node->lhs, node->rhs);
 
+    if (common && common->kind == TY_LDOUBLE) {
+        gen_expr(node->rhs);
+        cast_value(node->rhs->ty, common);
+        pushld();
+        gen_expr(node->lhs);
+        cast_value(node->lhs->ty, common);
+        popld(); // ST0=rhs, ST1=lhs
+        if (comparison) {
+            printf("  fxch %%st(1)\n");
+            printf("  fucomip %%st(1), %%st\n");
+            printf("  fstp %%st(0)\n");
+            if (node->kind == ND_EQ) { printf("  sete %%al\n"); printf("  setnp %%dl\n"); printf("  and %%dl, %%al\n"); }
+            else if (node->kind == ND_NE) { printf("  setne %%al\n"); printf("  setp %%dl\n"); printf("  or %%dl, %%al\n"); }
+            else if (node->kind == ND_LT) { printf("  setb %%al\n"); printf("  setnp %%dl\n"); printf("  and %%dl, %%al\n"); }
+            else { printf("  setbe %%al\n"); printf("  setnp %%dl\n"); printf("  and %%dl, %%al\n"); }
+            printf("  movzb %%al, %%rax\n");
+            return;
+        }
+        if (node->kind == ND_ADD) printf("  faddp %%st, %%st(1)\n");
+        else if (node->kind == ND_SUB) printf("  fsubp %%st, %%st(1)\n");
+        else if (node->kind == ND_MUL) printf("  fmulp %%st, %%st(1)\n");
+        else if (node->kind == ND_DIV) printf("  fdivp %%st, %%st(1)\n");
+        else error("invalid long double arithmetic");
+        return;
+    }
+
     if (common && is_flonum(common)) {
         gen_expr(node->rhs);
         cast_value(node->rhs->ty, common);
@@ -1350,50 +1440,26 @@ static void gen_expr(Node *node) {
         gen_expr(node->lhs);
         cast_value(node->lhs->ty, common);
         popf(common, "%xmm1");
-
         if (comparison) {
-            if (common->kind == TY_FLOAT)
-                printf("  ucomiss %%xmm1, %%xmm0\n");
-            else
-                printf("  ucomisd %%xmm1, %%xmm0\n");
-
-            if (node->kind == ND_EQ) {
-                printf("  sete %%al\n");
-                printf("  setnp %%dl\n");
-                printf("  and %%dl, %%al\n");
-            } else if (node->kind == ND_NE) {
-                printf("  setne %%al\n");
-                printf("  setp %%dl\n");
-                printf("  or %%dl, %%al\n");
-            } else if (node->kind == ND_LT) {
-                printf("  setb %%al\n");
-                printf("  setnp %%dl\n");
-                printf("  and %%dl, %%al\n");
-            } else {
-                printf("  setbe %%al\n");
-                printf("  setnp %%dl\n");
-                printf("  and %%dl, %%al\n");
-            }
+            if (common->kind == TY_FLOAT) printf("  ucomiss %%xmm1, %%xmm0\n");
+            else printf("  ucomisd %%xmm1, %%xmm0\n");
+            if (node->kind == ND_EQ) { printf("  sete %%al\n"); printf("  setnp %%dl\n"); printf("  and %%dl, %%al\n"); }
+            else if (node->kind == ND_NE) { printf("  setne %%al\n"); printf("  setp %%dl\n"); printf("  or %%dl, %%al\n"); }
+            else if (node->kind == ND_LT) { printf("  setb %%al\n"); printf("  setnp %%dl\n"); printf("  and %%dl, %%al\n"); }
+            else { printf("  setbe %%al\n"); printf("  setnp %%dl\n"); printf("  and %%dl, %%al\n"); }
             printf("  movzb %%al, %%rax\n");
             return;
         }
-
         if (common->kind == TY_FLOAT) {
             if (node->kind == ND_ADD) printf("  addss %%xmm1, %%xmm0\n");
             else if (node->kind == ND_MUL) printf("  mulss %%xmm1, %%xmm0\n");
-            else if (node->kind == ND_SUB) {
-                printf("  subss %%xmm1, %%xmm0\n");
-            } else if (node->kind == ND_DIV) {
-                printf("  divss %%xmm1, %%xmm0\n");
-            }
+            else if (node->kind == ND_SUB) printf("  subss %%xmm1, %%xmm0\n");
+            else if (node->kind == ND_DIV) printf("  divss %%xmm1, %%xmm0\n");
         } else {
             if (node->kind == ND_ADD) printf("  addsd %%xmm1, %%xmm0\n");
             else if (node->kind == ND_MUL) printf("  mulsd %%xmm1, %%xmm0\n");
-            else if (node->kind == ND_SUB) {
-                printf("  subsd %%xmm1, %%xmm0\n");
-            } else if (node->kind == ND_DIV) {
-                printf("  divsd %%xmm1, %%xmm0\n");
-            }
+            else if (node->kind == ND_SUB) printf("  subsd %%xmm1, %%xmm0\n");
+            else if (node->kind == ND_DIV) printf("  divsd %%xmm1, %%xmm0\n");
         }
         return;
     }
@@ -1796,6 +1862,9 @@ static void assign_lvar_offsets(Program *prog) {
                     } else {
                         stack_arg += abi.slots;
                     }
+                } else if (p->ty->kind == TY_LDOUBLE) {
+                    if (stack_arg & 1) stack_arg++;
+                    stack_arg += 2;
                 } else if (is_flonum(p->ty)) {
                     if (fp < 8)
                         fp++;
@@ -1910,8 +1979,14 @@ static void emit_data(Program *prog) {
                 union { float f; uint32_t u; } u = { (float)var->finit_val };
                 printf("  .long %" PRIu32 "\n", u.u);
             } else if (var->ty->kind == TY_DOUBLE) {
-                union { double d; uint64_t u; } u = { var->finit_val };
+                union { double d; uint64_t u; } u = { (double)var->finit_val };
                 printf("  .quad %" PRIu64 "\n", u.u);
+            } else if (var->ty->kind == TY_LDOUBLE) {
+                unsigned char raw[16] = {0};
+                long double ld = var->finit_val;
+                memcpy(raw, &ld, sizeof(ld));
+                for (int i = 0; i < 16; i++)
+                    printf("  .byte %u\n", raw[i]);
             } else if (var->ty->size == 1)
                 printf("  .byte %" PRId64 "\n", var->init_val);
             else if (var->ty->size == 2)
@@ -1973,6 +2048,16 @@ void codegen(Program *prog) {
         for (Obj *var = fn->params; var; var = var->param_next) {
             if (var->ty->kind == TY_STRUCT) {
                 save_record_parameter(var, &gp, &fp, &stack_arg);
+                continue;
+            }
+            if (var->ty->kind == TY_LDOUBLE) {
+                if (stack_arg & 1) stack_arg++;
+                int src = 16 + stack_arg * 8;
+                printf("  mov %d(%%rbp), %%rax\n", src);
+                printf("  mov %%rax, %d(%%rbp)\n", var->offset);
+                printf("  mov %d(%%rbp), %%rax\n", src + 8);
+                printf("  mov %%rax, %d(%%rbp)\n", var->offset + 8);
+                stack_arg += 2;
                 continue;
             }
             if (is_flonum(var->ty)) {

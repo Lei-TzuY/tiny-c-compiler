@@ -44,6 +44,8 @@ test: minicc
 	bash ./test/floating_literals.sh
 	bash ./test/float_header.sh
 	bash ./test/float_abi.sh
+	bash ./test/long_double.sh
+	bash ./test/long_double_abi.sh
 	bash ./test/float_callback_abi.sh
 	bash ./test/mixed_callback_abi.sh
 	bash ./test/narrow_callback_abi.sh
