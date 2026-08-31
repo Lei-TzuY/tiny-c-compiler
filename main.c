@@ -1,11 +1,15 @@
 #include "minicc.h"
 #include "preprocess_v2.h"
 #include <sys/stat.h>
+#include <errno.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 void validate_program(Program *prog);
 
 typedef enum {
     DRIVER_COMPILE_ASSEMBLY,
+    DRIVER_COMPILE_OBJECT,
     DRIVER_PREPROCESS_ONLY,
     DRIVER_DEPENDENCIES_ONLY,
     DRIVER_SYNTAX_ONLY,
@@ -44,12 +48,13 @@ static void print_usage(FILE *out, const char *prog) {
     fprintf(out,
             "Usage: %s [options] <input>\n"
             "\n"
-            "Compile one C source file to x86-64 assembly.\n"
+            "Compile one C source file to x86-64 assembly or an object file.\n"
             "Use '-' as the input or output path for standard input/output.\n"
             "\n"
             "Options:\n"
             "  -E               Preprocess only\n"
             "  -S               Compile to assembly (default)\n"
+            "  -c               Compile and assemble to a relocatable object\n"
             "  -fsyntax-only    Check preprocessing, syntax and semantics only\n"
             "  -M               Emit all Make dependencies only\n"
             "  -MM              Emit non-system Make dependencies only\n"
@@ -120,6 +125,7 @@ static DriverOptions parse_options(int argc, char **argv) {
     bool end_options = false;
     bool saw_E = false;
     bool saw_S = false;
+    bool saw_c = false;
     bool saw_M = false;
     bool saw_MM = false;
     bool saw_MD = false;
@@ -175,6 +181,12 @@ static DriverOptions parse_options(int argc, char **argv) {
         if (!end_options && !strcmp(arg, "-S")) {
             saw_S = true;
             opts.mode = DRIVER_COMPILE_ASSEMBLY;
+            continue;
+        }
+
+        if (!end_options && !strcmp(arg, "-c")) {
+            saw_c = true;
+            opts.mode = DRIVER_COMPILE_OBJECT;
             continue;
         }
 
@@ -453,12 +465,18 @@ static DriverOptions parse_options(int argc, char **argv) {
     bool dependency_only = saw_M || saw_MM;
     bool dependency_side_effect_requested = saw_MD || saw_MMD;
 
+    if (saw_c && (saw_E || saw_S || saw_syntax_only))
+        error("%s: '-c' is mutually exclusive with '-E', '-S' and '-fsyntax-only'", argv[0]);
     if ((saw_E ? 1 : 0) + (saw_S ? 1 : 0) + (saw_syntax_only ? 1 : 0) > 1)
         error("%s: '-E', '-S' and '-fsyntax-only' are mutually exclusive", argv[0]);
     if (saw_M && saw_MD)
         error("%s: '-M' and '-MD' are mutually exclusive", argv[0]);
     if (dependency_mode_count > 1)
         error("%s: '-M', '-MM', '-MD' and '-MMD' are mutually exclusive", argv[0]);
+    if (saw_M && saw_c)
+        error("%s: '-M' is mutually exclusive with '-c'", argv[0]);
+    if (saw_MM && saw_c)
+        error("%s: '-MM' is mutually exclusive with '-c'", argv[0]);
     if (saw_M && (saw_E || saw_S || saw_syntax_only))
         error("%s: '-M' is mutually exclusive with '-E', '-S' and '-fsyntax-only'", argv[0]);
     if (saw_MM && (saw_E || saw_S || saw_syntax_only))
@@ -479,6 +497,8 @@ static DriverOptions parse_options(int argc, char **argv) {
         error("%s: macro dump options require '-E'", argv[0]);
     if (!opts.input_path)
         error("%s: no input file", argv[0]);
+    if (saw_c && !strcmp(opts.input_path, "-") && !opts.output_path)
+        error("%s: '-c' with standard input requires '-o'", argv[0]);
     if (dependency_requested && !strcmp(opts.input_path, "-"))
         error("%s: dependency generation requires a named input file", argv[0]);
     if (saw_M && opts.output_path)
@@ -587,7 +607,9 @@ static void write_make_escaped(FILE *out, const char *text) {
 static char *default_dependency_target(const DriverOptions *opts) {
     if (opts->output_path && strcmp(opts->output_path, "-"))
         return strdup(opts->output_path);
-    return path_with_extension(opts->input_path, ".s", true);
+    const char *extension =
+        opts->mode == DRIVER_COMPILE_OBJECT ? ".o" : ".s";
+    return path_with_extension(opts->input_path, extension, true);
 }
 
 static char *default_dependency_output(const DriverOptions *opts) {
@@ -672,10 +694,147 @@ static void emit_dependency_rule(const DriverOptions *opts) {
     free(path);
 }
 
+
+static FILE *emit_temporary_assembly(Program *prog) {
+    FILE *assembly = tmpfile();
+    if (!assembly)
+        error("cannot create temporary assembly file: %s", strerror(errno));
+
+    if (fflush(stdout) == EOF)
+        error("failed to flush standard output before object emission");
+
+    int saved_stdout = dup(STDOUT_FILENO);
+    if (saved_stdout < 0)
+        error("cannot save standard output: %s", strerror(errno));
+    if (dup2(fileno(assembly), STDOUT_FILENO) < 0)
+        error("cannot redirect assembly output: %s", strerror(errno));
+    clearerr(stdout);
+
+    codegen(prog);
+    if (fflush(stdout) == EOF || ferror(stdout))
+        error("failed to write temporary assembly output");
+
+    if (dup2(saved_stdout, STDOUT_FILENO) < 0)
+        error("cannot restore standard output: %s", strerror(errno));
+    close(saved_stdout);
+    clearerr(stdout);
+
+    if (fseek(assembly, 0, SEEK_SET) != 0)
+        error("cannot rewind temporary assembly output: %s", strerror(errno));
+    return assembly;
+}
+
+static char *make_object_temp_path(const char *output_path) {
+    const char *base = strcmp(output_path, "-") ? output_path : "/tmp/minicc-object";
+    const char suffix[] = ".tmp.XXXXXX";
+    char *path = calloc(1, strlen(base) + sizeof(suffix));
+    sprintf(path, "%s%s", base, suffix);
+
+    int fd = mkstemp(path);
+    if (fd < 0)
+        error("cannot create temporary object file near %s: %s", base,
+              strerror(errno));
+    if (close(fd) < 0) {
+        unlink(path);
+        error("cannot close temporary object file: %s", strerror(errno));
+    }
+    return path;
+}
+
+static void copy_object_to_stdout(const char *path) {
+    FILE *in = fopen(path, "rb");
+    if (!in)
+        error("cannot reopen assembled object %s", path);
+
+    char buf[16384];
+    for (;;) {
+        size_t n = fread(buf, 1, sizeof(buf), in);
+        if (n && fwrite(buf, 1, n, stdout) != n) {
+            fclose(in);
+            error("failed to write object file to standard output");
+        }
+        if (n < sizeof(buf)) {
+            if (ferror(in)) {
+                fclose(in);
+                error("failed to read assembled object %s", path);
+            }
+            break;
+        }
+    }
+    if (fclose(in) == EOF)
+        error("failed to close assembled object %s", path);
+    finish_output("-");
+}
+
+static void assemble_object(FILE *assembly, const char *output_path) {
+    if (!assembly || !output_path)
+        error("internal error: missing object-emission stream or output path");
+
+    char *temp_object = make_object_temp_path(output_path);
+    if (fseek(assembly, 0, SEEK_SET) != 0) {
+        unlink(temp_object);
+        error("cannot rewind temporary assembly output: %s", strerror(errno));
+    }
+
+    const char *assembler = getenv("MINICC_AS");
+    if (!assembler || !*assembler)
+        assembler = "as";
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        unlink(temp_object);
+        error("cannot start assembler: %s", strerror(errno));
+    }
+    if (pid == 0) {
+        if (dup2(fileno(assembly), STDIN_FILENO) < 0)
+            _exit(126);
+        execlp(assembler, assembler, "-o", temp_object, (char *)NULL);
+        _exit(127);
+    }
+
+    int status;
+    while (waitpid(pid, &status, 0) < 0) {
+        if (errno == EINTR)
+            continue;
+        unlink(temp_object);
+        error("failed while waiting for assembler: %s", strerror(errno));
+    }
+
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+        int exit_status = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+        unlink(temp_object);
+        if (exit_status >= 0)
+            error("assembler '%s' failed with exit status %d", assembler, exit_status);
+        error("assembler '%s' terminated abnormally", assembler);
+    }
+
+    if (!strcmp(output_path, "-")) {
+        copy_object_to_stdout(temp_object);
+        unlink(temp_object);
+        free(temp_object);
+        return;
+    }
+
+    if (rename(temp_object, output_path) != 0) {
+        int saved_errno = errno;
+        unlink(temp_object);
+        error("cannot install object output %s: %s", output_path,
+              strerror(saved_errno));
+    }
+    free(temp_object);
+}
+
 int main(int argc, char **argv) {
     DriverOptions opts = parse_options(argc, argv);
     if (opts.exit_after_options)
         return 0;
+
+    if (opts.mode == DRIVER_COMPILE_OBJECT && !opts.output_path) {
+        opts.output_path = path_with_extension(opts.input_path, ".o", true);
+        if (!strcmp(opts.output_path, opts.input_path) ||
+            same_existing_file(opts.output_path, opts.input_path))
+            error("%s: input and output files must be different", argv[0]);
+    }
 
     if (opts.macro_dump == MACRO_DUMP_DEFINITIONS)
         preprocess_v2_set_dump_mode(PREPROCESS_DUMP_DEFINITIONS);
@@ -713,6 +872,14 @@ int main(int argc, char **argv) {
 
     if (opts.mode == DRIVER_SYNTAX_ONLY)
         return 0;
+
+    if (opts.mode == DRIVER_COMPILE_OBJECT) {
+        FILE *assembly = emit_temporary_assembly(prog);
+        assemble_object(assembly, opts.output_path);
+        if (fclose(assembly) == EOF)
+            error("failed to close temporary assembly output");
+        return 0;
+    }
 
     // Delay opening the output until preprocessing, tokenization and parsing
     // have succeeded so a front-end error does not truncate an existing file.

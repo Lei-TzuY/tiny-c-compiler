@@ -28,6 +28,8 @@ make
 make test
 ```
 
+The driver keeps assembly output as the default (`-S`), and `-c` additionally assembles the generated x86-64 code into a relocatable `.o` using GNU `as` (override the assembler executable with `MINICC_AS`). Named inputs default to a basename `.o` output, while `-o` also supports explicit paths and binary standard output.
+
 The test target builds `minicc`, compiles small C programs with it, links them with the host compiler, and checks their exit values. It runs the 228 core compiler cases plus focused basic and advanced preprocessor regression suites. Use `make clean` to remove generated objects, binaries, and temporary test sources.
 
 ## Notes

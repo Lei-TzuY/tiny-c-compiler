@@ -11,6 +11,7 @@ test: minicc
 	./test/test.sh
 	bash ./test/driver_stdin.sh
 	bash ./test/driver_cli.sh
+	bash ./test/driver_object.sh
 	bash ./test/line_splicing.sh
 	bash ./test/digraph_punctuators.sh
 	bash ./test/preprocessor.sh
