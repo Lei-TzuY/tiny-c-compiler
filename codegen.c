@@ -1238,9 +1238,19 @@ static void gen_expr(Node *node) {
 
     if (node->kind == ND_NEG) {
         gen_expr(node->lhs);
-        printf("  neg %%rax\n");
-        if (is_integer(node->ty))
-            normalize(node->ty);
+        if (node->ty->kind == TY_FLOAT) {
+            printf("  mov $0x80000000, %%eax\n");
+            printf("  movd %%eax, %%xmm1\n");
+            printf("  xorps %%xmm1, %%xmm0\n");
+        } else if (node->ty->kind == TY_DOUBLE) {
+            printf("  movabs $0x8000000000000000, %%rax\n");
+            printf("  movq %%rax, %%xmm1\n");
+            printf("  xorpd %%xmm1, %%xmm0\n");
+        } else {
+            printf("  neg %%rax\n");
+            if (is_integer(node->ty))
+                normalize(node->ty);
+        }
         return;
     }
 

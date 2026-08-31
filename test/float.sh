@@ -46,5 +46,8 @@ assert_float 5 'double g=2.5; int main() { return (int)(g*2); }'
 assert_float 6 'float g=3.0f; int main() { return (int)(g*2.0f); }'
 assert_float 8 'int main() { static double x=4.0; return (int)(x*2); }'
 assert_float 4 'int main() { return (int)(-1.5 + 5.5); }'
+assert_float 3 'int main() { float x=1.5f; return (int)(-x + 4.5f); }'
+assert_float 5 'int main() { double x=2.25; return (int)(-x + 7.25); }'
+assert_float 1 'int main() { double x=-0.0; return -x == 0.0; }'
 
 echo "All floating-point core tests passed!"
