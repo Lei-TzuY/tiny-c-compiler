@@ -5303,7 +5303,7 @@ static Node *unary(Token **rest, Token *tok) {
     }
 
     if (equal(tok, "+"))  return new_unary(ND_POS, unary(rest, tok->next));
-    if (equal(tok, "-"))  return new_binary(ND_SUB, new_num(0), unary(rest, tok->next));
+    if (equal(tok, "-"))  return new_unary(ND_NEG, unary(rest, tok->next));
     if (equal(tok, "&")) {
         Token *op = tok;
         return new_checked_addr(unary(rest, tok->next), op);

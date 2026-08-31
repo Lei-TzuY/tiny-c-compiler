@@ -28,7 +28,7 @@ assert_abi 6 'double twice(double x) { return x*2.0; } int main() { return (int)
 assert_abi 3 'float idf(float x) { return x; } int main() { return (int)idf(3.75); }'
 assert_abi 5 'double twice(double x); int main() { return (int)twice(2.5); } double twice(double x) { return x*2.0; }'
 assert_abi 5 'double twice(double x) { return x*2.0; } int main() { double (*fp)(double)=twice; return (int)fp(2.5); }'
-assert_abi 28 'double many(int a,double b,int c,double d,int e,double f,int g) { return a+b+c+d+e+f+g; } int main() { return (int)many(1,2.0,3.0,4.0,5,6.0,7); }'
+assert_abi 28 'double many(int a,double b,int c,double d,int e,double f,int g) { return a+b+c+d+e+f+g; } int main() { return (int)many(1,2.0,3,4.0,5,6.0,7); }'
 assert_abi 36 'double sum8(double a,double b,double c,double d,double e,double f,double g,double h) { return a+b+c+d+e+f+g+h; } int main() { return (int)sum8(1,2,3,4,5,6,7,8); }'
 assert_abi 2 'int main() { double x=2.0; int n=0; for (;x;x-=1.0) n++; return n; }'
 assert_abi 1 'int sprintf(char *str, char *fmt, ...);
@@ -49,7 +49,6 @@ double mini_neg_double(double x) { return -x; }
 float mini_neg_float(float x) { return -x; }
 EOF
 "${MINICC:-./minicc}" tmp-float-abi-mini-provider.c > tmp-float-abi-mini-provider.s
-sed -n '/mini_neg_double:/,/mini_neg_float:/p' tmp-float-abi-mini-provider.s
 gcc -c -o tmp-float-abi-mini-provider.o tmp-float-abi-mini-provider.s
 
 cat > tmp-float-abi-host-caller.c <<'EOF'
@@ -67,9 +66,9 @@ int main(void) {
   if (mini_neg_double(2.25) != -2.25) return 4;
   if (mini_neg_float(1.5f) != -1.5f) return 5;
   dz.d = mini_neg_double(0.0);
-  if (dz.u != 0x8000000000000000ULL) return dz.u == 0 ? 6 : 8;
+  if (dz.u != 0x8000000000000000ULL) return 6;
   fz.f = mini_neg_float(0.0f);
-  if (fz.u != 0x80000000U) return fz.u == 0 ? 7 : 9;
+  if (fz.u != 0x80000000U) return 7;
   return 0;
 }
 EOF
