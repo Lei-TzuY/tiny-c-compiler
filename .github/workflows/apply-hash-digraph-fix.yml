@@ -10,7 +10,6 @@ permissions:
 
 jobs:
   apply:
-    if: github.event.head_commit.message == 'Prepare preprocessor digraph fix'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -18,90 +17,24 @@ jobs:
           ref: fix-preprocessor-hash-digraphs
       - name: Apply focused source and regression changes
         shell: bash
+        env:
+          HELPER_B64: Ci8vIEMxMSBkaWdyYXBocyAlOiBhbmQgJTolOiBhcmUgcHJlcHJvY2Vzc2luZy10b2tlbiBzcGVsbGluZ3Mgb2YgIyBhbmQgIyMuCi8vIENhbm9uaWNhbGl6ZSB0aGVtIGFmdGVyIGxpbmUgc3BsaWNpbmcgYnV0IGJlZm9yZSBkaXJlY3RpdmUgcmVjb2duaXRpb24gYW5kCi8vIG1hY3JvIHJlcGxhY2VtZW50LiBUZXh0IGluc2lkZSBsaXRlcmFscyBhbmQgY29tbWVudHMgaXMgbm90IGEgcHJlcHJvY2Vzc2luZwovLyBwdW5jdHVhdG9yIGFuZCBtdXN0IHJldGFpbiBpdHMgb3JpZ2luYWwgc3BlbGxpbmcuCnN0YXRpYyBjaGFyICpjYW5vbmljYWxpemVfcHBfZGlncmFwaHMoY29uc3QgY2hhciAqaW5wdXQpIHsKICAgIFN0ckJ1ZiBvdXQ7CiAgICBzYl9pbml0KCZvdXQsIHN0cmxlbihpbnB1dCkgKyAxKTsKICAgIGJvb2wgaW5fYmxvY2tfY29tbWVudCA9IGZhbHNlOwogICAgY2hhciBxdW90ZSA9IDA7CgogICAgZm9yIChjb25zdCBjaGFyICpwID0gaW5wdXQ7ICpwOykgewogICAgICAgIGlmIChpbl9ibG9ja19jb21tZW50KSB7CiAgICAgICAgICAgIGlmIChwWzBdID09ICcqJyAmJiBwWzFdID09ICcvJykgewogICAgICAgICAgICAgICAgc2JfcHV0bigmb3V0LCBwLCAyKTsKICAgICAgICAgICAgICAgIHAgKz0gMjsKICAgICAgICAgICAgICAgIGluX2Jsb2NrX2NvbW1lbnQgPSBmYWxzZTsKICAgICAgICAgICAgfSBlbHNlIHsKICAgICAgICAgICAgICAgIHNiX3B1dGMoJm91dCwgKnArKyk7CiAgICAgICAgICAgIH0KICAgICAgICAgICAgY29udGludWU7CiAgICAgICAgfQoKICAgICAgICBpZiAocXVvdGUpIHsKICAgICAgICAgICAgc2JfcHV0Yygmb3V0LCAqcCk7CiAgICAgICAgICAgIGlmICgqcCA9PSAnXFwnICYmIHBbMV0pIHsKICAgICAgICAgICAgICAgIHArKzsKICAgICAgICAgICAgICAgIHNiX3B1dGMoJm91dCwgKnArKyk7CiAgICAgICAgICAgICAgICBjb250aW51ZTsKICAgICAgICAgICAgfQogICAgICAgICAgICBpZiAoKnArKyA9PSBxdW90ZSkKICAgICAgICAgICAgICAgIHF1b3RlID0gMDsKICAgICAgICAgICAgY29udGludWU7CiAgICAgICAgfQoKICAgICAgICBpZiAocFswXSA9PSAnLycgJiYgcFsxXSA9PSAnKicpIHsKICAgICAgICAgICAgaW5fYmxvY2tfY29tbWVudCA9IHRydWU7CiAgICAgICAgICAgIHNiX3B1dG4oJm91dCwgcCwgMik7CiAgICAgICAgICAgIHAgKz0gMjsKICAgICAgICAgICAgY29udGludWU7CiAgICAgICAgfQogICAgICAgIGlmIChwWzBdID09ICcvJyAmJiBwWzFdID09ICcvJykgewogICAgICAgICAgICB3aGlsZSAoKnAgJiYgKnAgIT0gJ1xuJykKICAgICAgICAgICAgICAgIHNiX3B1dGMoJm91dCwgKnArKyk7CiAgICAgICAgICAgIGNvbnRpbnVlOwogICAgICAgIH0KICAgICAgICBpZiAoKnAgPT0gJyInIHx8ICpwID09ICdcJycpIHsKICAgICAgICAgICAgcXVvdGUgPSAqcDsKICAgICAgICAgICAgc2JfcHV0Yygmb3V0LCAqcCsrKTsKICAgICAgICAgICAgY29udGludWU7CiAgICAgICAgfQoKICAgICAgICAvLyBNYXRjaCB0aGUgZm91ci1jaGFyYWN0ZXIgdG9rZW4gZmlyc3Qgc28gaXQgY2Fubm90IGJlIHNwbGl0IGludG8gdHdvCiAgICAgICAgLy8gYWRqYWNlbnQgJTogdG9rZW5zLgogICAgICAgIGlmICghc3RybmNtcChwLCAiJTolOiIsIDQpKSB7CiAgICAgICAgICAgIHNiX3B1dHMoJm91dCwgIiMjIik7CiAgICAgICAgICAgIHAgKz0gNDsKICAgICAgICAgICAgY29udGludWU7CiAgICAgICAgfQogICAgICAgIGlmICghc3RybmNtcChwLCAiJToiLCAyKSkgewogICAgICAgICAgICBzYl9wdXRjKCZvdXQsICcjJyk7CiAgICAgICAgICAgIHAgKz0gMjsKICAgICAgICAgICAgY29udGludWU7CiAgICAgICAgfQogICAgICAgIHNiX3B1dGMoJm91dCwgKnArKyk7CiAgICB9CiAgICByZXR1cm4gb3V0LmRhdGE7Cn0K
+          TEST_B64: IyEvYmluL2Jhc2gKc2V0IC1ldQoKY2F0ID4gdG1wLXBwLWhhc2gtZGlncmFwaHMuYyA8PCdFT0YnCiU6ZGVmaW5lIEFOU1dFUiA0MgolOmRlZmluZSBTVFIoeCkgJTp4CiU6ZGVmaW5lIENBVChhLCBiKSBhICU6JTogYgolOmRlZmluZSBURU1QIDEKJTp1bmRlZiBURU1QCgovKiAlOmRlZmluZSBDT01NRU5UX0RFRklORUQgMSAqLwovLyAlOmRlZmluZSBMSU5FX0NPTU1FTlRfREVGSU5FRCAxCgolOmlmZGVmIFRFTVAKJTplcnJvciAlOnVuZGVmIGRpZCBub3QgcmVtb3ZlIFRFTVAKJTplbmRpZgolOmlmZGVmIENPTU1FTlRfREVGSU5FRAolOmVycm9yIGhhc2ggZGlncmFwaCBpbnNpZGUgYmxvY2sgY29tbWVudCBiZWNhbWUgYSBkaXJlY3RpdmUKJTplbmRpZgolOmlmZGVmIExJTkVfQ09NTUVOVF9ERUZJTkVECiU6ZXJyb3IgaGFzaCBkaWdyYXBoIGluc2lkZSBsaW5lIGNvbW1lbnQgYmVjYW1lIGEgZGlyZWN0aXZlCiU6ZW5kaWYKCiU6aWYgQU5TV0VSICE9IDQyCiU6ZXJyb3IgJTpkZWZpbmUgb3IgJTppZiBkaWdyYXBoIGhhbmRsaW5nIGZhaWxlZAolOmVuZGlmCgppbnQgc3RyZXEoY29uc3QgY2hhciAqYSwgY29uc3QgY2hhciAqYikgewogIHdoaWxlICgqYSAmJiAqYSA9PSAqYikgewogICAgYSsrOwogICAgYisrOwogIH0KICByZXR1cm4gKmEgPT0gKmI7Cn0KCmludCBDQVQobWEsIGluKSh2b2lkKSB7CiAgaWYgKEFOU1dFUiAhPSA0MikgcmV0dXJuIDE7CiAgaWYgKCFzdHJlcShTVFIoYWxwaGEgICAgICBiZXRhKSwgImFscGhhIGJldGEiKSkgcmV0dXJuIDI7CiAgaWYgKCFzdHJlcSgiJTogJTolOiIsICIlOiAlOiU6IikpIHJldHVybiAzOwogIHJldHVybiAwOwp9CkVPRgoKIyBLZWVwIGEgaG9zdCBjb21waWxlciBhcyBhbiBpbmRlcGVuZGVudCBvcmFjbGUgdGhhdCB0aGlzIGlzIHZhbGlkIEMxMSBzb3VyY2UuCmNjIC1zdGQ9YzExIC1wZWRhbnRpYy1lcnJvcnMgLW8gdG1wLXBwLWhhc2gtZGlncmFwaHMtaG9zdCB0bXAtcHAtaGFzaC1kaWdyYXBocy5jCi4vdG1wLXBwLWhhc2gtZGlncmFwaHMtaG9zdAoKLi9taW5pY2MgdG1wLXBwLWhhc2gtZGlncmFwaHMuYyA+IHRtcC1wcC1oYXNoLWRpZ3JhcGhzLnMKY2MgLW8gdG1wLXBwLWhhc2gtZGlncmFwaHMgdG1wLXBwLWhhc2gtZGlncmFwaHMucwouL3RtcC1wcC1oYXNoLWRpZ3JhcGhzCgplY2hvICJPSyhwcmVwcm9jZXNzb3IgaGFzaCBkaWdyYXBocyk6IGRpcmVjdGl2ZXMsICMsICMjLCBsaXRlcmFscyBhbmQgY29tbWVudHMiCnJtIC1mIHRtcC1wcC1oYXNoLWRpZ3JhcGhzLmMgdG1wLXBwLWhhc2gtZGlncmFwaHMucyBcCiAgICAgIHRtcC1wcC1oYXNoLWRpZ3JhcGhzIHRtcC1wcC1oYXNoLWRpZ3JhcGhzLWhvc3QK
         run: |
           python3 - <<'PY'
+          import base64, os
           from pathlib import Path
 
           pp = Path('preprocess_v2.c')
           text = pp.read_text()
           marker = "\nstatic Macro *find_macro(const char *name) {"
           assert marker in text
-          helper = r'''
-
-// C11 digraphs %: and %:%: are preprocessing-token spellings of # and ##.
-// Canonicalize them after line splicing but before directive recognition and
-// macro replacement.  Text inside literals and comments is not a preprocessing
-// punctuator and must retain its original spelling.
-static char *canonicalize_pp_digraphs(const char *input) {
-    StrBuf out;
-    sb_init(&out, strlen(input) + 1);
-    bool in_block_comment = false;
-    char quote = 0;
-
-    for (const char *p = input; *p;) {
-        if (in_block_comment) {
-            if (p[0] == '*' && p[1] == '/') {
-                sb_putn(&out, p, 2);
-                p += 2;
-                in_block_comment = false;
-            } else {
-                sb_putc(&out, *p++);
-            }
-            continue;
-        }
-
-        if (quote) {
-            sb_putc(&out, *p);
-            if (*p == '\\' && p[1]) {
-                p++;
-                sb_putc(&out, *p++);
-                continue;
-            }
-            if (*p++ == quote)
-                quote = 0;
-            continue;
-        }
-
-        if (p[0] == '/' && p[1] == '*') {
-            in_block_comment = true;
-            sb_putn(&out, p, 2);
-            p += 2;
-            continue;
-        }
-        if (p[0] == '/' && p[1] == '/') {
-            while (*p && *p != '\n')
-                sb_putc(&out, *p++);
-            continue;
-        }
-        if (*p == '"' || *p == '\'') {
-            quote = *p;
-            sb_putc(&out, *p++);
-            continue;
-        }
-
-        // Match the four-character token first so it cannot be split into two
-        // adjacent %: tokens.
-        if (!strncmp(p, "%:%:", 4)) {
-            sb_puts(&out, "##");
-            p += 4;
-            continue;
-        }
-        if (!strncmp(p, "%:", 2)) {
-            sb_putc(&out, '#');
-            p += 2;
-            continue;
-        }
-        sb_putc(&out, *p++);
-    }
-    return out.data;
-}
-'''
+          helper = base64.b64decode(os.environ['HELPER_B64']).decode()
           text = text.replace(marker, helper + marker, 1)
           old = "    char *spliced = splice_lines(input);\n    StrBuf out;"
           new = "    char *spliced = splice_lines(input);\n    char *canonical = canonicalize_pp_digraphs(spliced);\n    free(spliced);\n    spliced = canonical;\n    StrBuf out;"
           assert old in text
-          text = text.replace(old, new, 1)
-          pp.write_text(text)
+          pp.write_text(text.replace(old, new, 1))
 
           mk = Path('Makefile')
           text = mk.read_text()
@@ -110,62 +43,8 @@ static char *canonicalize_pp_digraphs(const char *input) {
           assert old in text
           mk.write_text(text.replace(old, new, 1))
 
-          test = r'''#!/bin/bash
-set -eu
-
-cat > tmp-pp-hash-digraphs.c <<'EOF'
-%:define ANSWER 42
-%:define STR(x) %:x
-%:define CAT(a, b) a %:%: b
-%:define TEMP 1
-%:undef TEMP
-
-/* %:define COMMENT_DEFINED 1 */
-// %:define LINE_COMMENT_DEFINED 1
-
-%:ifdef TEMP
-%:error %:undef did not remove TEMP
-%:endif
-%:ifdef COMMENT_DEFINED
-%:error hash digraph inside block comment became a directive
-%:endif
-%:ifdef LINE_COMMENT_DEFINED
-%:error hash digraph inside line comment became a directive
-%:endif
-
-%:if ANSWER != 42
-%:error %:define or %:if digraph handling failed
-%:endif
-
-int streq(const char *a, const char *b) {
-  while (*a && *a == *b) {
-    a++;
-    b++;
-  }
-  return *a == *b;
-}
-
-int CAT(ma, in)(void) {
-  if (ANSWER != 42) return 1;
-  if (!streq(STR(alpha      beta), "alpha beta")) return 2;
-  if (!streq("%: %:%:", "%: %:%:")) return 3;
-  return 0;
-}
-EOF
-
-# Keep a host compiler as an independent oracle that this is valid C11 source.
-cc -std=c11 -pedantic-errors -o tmp-pp-hash-digraphs-host tmp-pp-hash-digraphs.c
-./tmp-pp-hash-digraphs-host
-
-./minicc tmp-pp-hash-digraphs.c > tmp-pp-hash-digraphs.s
-cc -o tmp-pp-hash-digraphs tmp-pp-hash-digraphs.s
-./tmp-pp-hash-digraphs
-
-echo "OK(preprocessor hash digraphs): directives, #, ##, literals and comments"
-rm -f tmp-pp-hash-digraphs.c tmp-pp-hash-digraphs.s \
-      tmp-pp-hash-digraphs tmp-pp-hash-digraphs-host
-'''
-          Path('test/preprocessor_hash_digraphs.sh').write_text(test)
+          Path('test/preprocessor_hash_digraphs.sh').write_bytes(
+              base64.b64decode(os.environ['TEST_B64']))
           Path('.github/workflows/apply-hash-digraph-fix.yml').unlink()
           PY
 
