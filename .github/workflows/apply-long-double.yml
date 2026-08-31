@@ -16,8 +16,51 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: feat/long-double-x87
+      - name: Repair helper quoting
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('tools/migrate_long_double.py')
+          s=p.read_text()
+          a=s.index('# static scalar emission\n')
+          b=s.index('# named parameter stack handling:', a)
+          s=s[:a] + '# static scalar emission\n# applied by the workflow after the main migration\n' + s[b:]
+          p.write_text(s)
+          PY
       - name: Apply x87 long double implementation
         run: python3 tools/migrate_long_double.py
+      - name: Patch static long double emission
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('codegen.c')
+          s=p.read_text()
+          old='''            if (var->ty->kind == TY_FLOAT) {
+                union { float f; uint32_t u; } u = { (float)var->finit_val };
+                printf("  .long %" PRIu32 "\\n", u.u);
+            } else if (var->ty->kind == TY_DOUBLE) {
+                union { double d; uint64_t u; } u = { var->finit_val };
+                printf("  .quad %" PRIu64 "\\n", u.u);
+            } else if (var->ty->size == 1)
+'''
+          new='''            if (var->ty->kind == TY_FLOAT) {
+                union { float f; uint32_t u; } u = { (float)var->finit_val };
+                printf("  .long %" PRIu32 "\\n", u.u);
+            } else if (var->ty->kind == TY_DOUBLE) {
+                union { double d; uint64_t u; } u = { (double)var->finit_val };
+                printf("  .quad %" PRIu64 "\\n", u.u);
+            } else if (var->ty->kind == TY_LDOUBLE) {
+                unsigned char raw[16] = {0};
+                long double ld = var->finit_val;
+                memcpy(raw, &ld, sizeof(ld));
+                for (int i = 0; i < 16; i++)
+                    printf("  .byte %u\\n", raw[i]);
+            } else if (var->ty->size == 1)
+'''
+          if s.count(old)!=1:
+              raise SystemExit(f'static emission anchor count={s.count(old)}')
+          p.write_text(s.replace(old,new))
+          PY
       - name: Commit generated product changes
         run: |
           git config user.name 'github-actions[bot]'
