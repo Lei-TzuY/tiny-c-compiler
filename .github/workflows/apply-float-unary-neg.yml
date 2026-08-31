@@ -1,0 +1,48 @@
+name: Apply float unary neg fix
+
+on:
+  push:
+    branches:
+      - fix/float-unary-neg
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/float-unary-neg
+      - name: Apply targeted fix and regressions
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path('codegen.c')
+          s = p.read_text()
+          old = '''    if (node->kind == ND_NEG) {\n        gen_expr(node->lhs);\n        printf("  neg %%rax\\n");\n        if (is_integer(node->ty))\n            normalize(node->ty);\n        return;\n    }\n'''
+          new = '''    if (node->kind == ND_NEG) {\n        gen_expr(node->lhs);\n        if (node->ty->kind == TY_FLOAT) {\n            printf("  mov $0x80000000, %%eax\\n");\n            printf("  movd %%eax, %%xmm1\\n");\n            printf("  xorps %%xmm1, %%xmm0\\n");\n        } else if (node->ty->kind == TY_DOUBLE) {\n            printf("  movabs $0x8000000000000000, %%rax\\n");\n            printf("  movq %%rax, %%xmm1\\n");\n            printf("  xorpd %%xmm1, %%xmm0\\n");\n        } else {\n            printf("  neg %%rax\\n");\n            if (is_integer(node->ty))\n                normalize(node->ty);\n        }\n        return;\n    }\n'''
+          if old not in s:
+              raise SystemExit('target ND_NEG block not found')
+          p.write_text(s.replace(old, new, 1))
+
+          p = Path('test/float.sh')
+          s = p.read_text()
+          anchor = "assert_float 4 'int main() { return (int)(-1.5 + 5.5); }'\n"
+          add = anchor + "assert_float 3 'int main() { float x=1.5f; return (int)(-x + 4.5f); }'\n" + "assert_float 5 'int main() { double x=2.25; return (int)(-x + 7.25); }'\n" + "assert_float 1 'int main() { double x=-0.0; return -x == 0.0; }'\n"
+          if anchor not in s:
+              raise SystemExit('float regression anchor not found')
+          p.write_text(s.replace(anchor, add, 1))
+          PY
+          make test
+      - name: Commit targeted changes
+        shell: bash
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add codegen.c test/float.sh
+          git commit -m "Fix floating-point unary negation codegen"
+          git push origin HEAD:fix/float-unary-neg
