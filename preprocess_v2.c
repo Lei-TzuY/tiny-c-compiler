@@ -477,6 +477,74 @@ static char *splice_lines(const char *input) {
     return out.data;
 }
 
+// C11 digraphs %: and %:%: are preprocessing-token spellings of # and ##.
+// Canonicalize them after line splicing but before directive recognition and
+// macro replacement. Text inside literals and comments is not a preprocessing
+// punctuator and must retain its original spelling.
+static char *canonicalize_pp_digraphs(const char *input) {
+    StrBuf out;
+    sb_init(&out, strlen(input) + 1);
+    bool in_block_comment = false;
+    char quote = 0;
+
+    for (const char *p = input; *p;) {
+        if (in_block_comment) {
+            if (p[0] == '*' && p[1] == '/') {
+                sb_putn(&out, p, 2);
+                p += 2;
+                in_block_comment = false;
+            } else {
+                sb_putc(&out, *p++);
+            }
+            continue;
+        }
+
+        if (quote) {
+            sb_putc(&out, *p);
+            if (*p == '\\' && p[1]) {
+                p++;
+                sb_putc(&out, *p++);
+                continue;
+            }
+            if (*p++ == quote)
+                quote = 0;
+            continue;
+        }
+
+        if (p[0] == '/' && p[1] == '*') {
+            in_block_comment = true;
+            sb_putn(&out, p, 2);
+            p += 2;
+            continue;
+        }
+        if (p[0] == '/' && p[1] == '/') {
+            while (*p && *p != '\n')
+                sb_putc(&out, *p++);
+            continue;
+        }
+        if (*p == '"' || *p == '\'') {
+            quote = *p;
+            sb_putc(&out, *p++);
+            continue;
+        }
+
+        // Match the four-character token first so it cannot be split into two
+        // adjacent %: tokens.
+        if (!strncmp(p, "%:%:", 4)) {
+            sb_puts(&out, "##");
+            p += 4;
+            continue;
+        }
+        if (!strncmp(p, "%:", 2)) {
+            sb_putc(&out, '#');
+            p += 2;
+            continue;
+        }
+        sb_putc(&out, *p++);
+    }
+    return out.data;
+}
+
 static Macro *find_macro(const char *name) {
     for (Macro *m = macros; m; m = m->next)
         if (!strcmp(m->name, name))
@@ -2816,6 +2884,9 @@ static char *preprocess_v2_source_impl(char *input, const char *source_name,
 
     CondStack *base_cond = cond_stack;
     char *spliced = splice_lines(input);
+    char *canonical = canonicalize_pp_digraphs(spliced);
+    free(spliced);
+    spliced = canonical;
     StrBuf out;
     sb_init(&out, strlen(spliced) * 2 + 1024);
     bool in_block_comment = false;
