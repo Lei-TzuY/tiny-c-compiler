@@ -51,6 +51,8 @@ double mini_ninth(double a, double b, double c, double d, double e,
                   double f, double g, double h, double i) {
   return i;
 }
+double mini_neg_double(double x) { return -x; }
+float mini_neg_float(float x) { return -x; }
 EOF
 "${MINICC:-./minicc}" tmp-float-abi-mini-provider.c > tmp-float-abi-mini-provider.s
 gcc -c -o tmp-float-abi-mini-provider.o tmp-float-abi-mini-provider.s
@@ -60,14 +62,30 @@ double mini_mix(double, float, double);
 float mini_half(float);
 double mini_ninth(double, double, double, double, double,
                   double, double, double, double);
+double mini_neg_double(double);
+float mini_neg_float(float);
 
 int main(void) {
+  union { double d; unsigned long long u; } dz;
+  union { float f; unsigned int u; } fz;
+
   if (mini_mix(1.5, 2.0f, 4.5) != 8.0)
     return 1;
   if (mini_half(7.0f) != 3.5f)
     return 2;
   if (mini_ninth(1, 2, 3, 4, 5, 6, 7, 8, 9.5) != 9.5)
     return 3;
+  if (mini_neg_double(2.25) != -2.25)
+    return 4;
+  if (mini_neg_float(1.5f) != -1.5f)
+    return 5;
+
+  dz.d = mini_neg_double(0.0);
+  if (dz.u != 0x8000000000000000ULL)
+    return 6;
+  fz.f = mini_neg_float(0.0f);
+  if (fz.u != 0x80000000U)
+    return 7;
   return 0;
 }
 EOF
