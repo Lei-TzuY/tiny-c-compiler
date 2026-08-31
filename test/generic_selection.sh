@@ -213,6 +213,20 @@ reject function-association <<'EOF'
 int main(void){return _Generic(1, int(void):1, default:0);}
 EOF
 
+reject variably-modified-vla-association <<'EOF'
+int main(void){
+  int n=3;
+  return _Generic(1, int[n]:1, default:0);
+}
+EOF
+
+reject variably-modified-pointer-association <<'EOF'
+int main(void){
+  int n=3;
+  return _Generic(1, int (*)[n]:1, default:0);
+}
+EOF
+
 reject missing-association <<'EOF'
 int main(void){return _Generic(1, );}
 EOF

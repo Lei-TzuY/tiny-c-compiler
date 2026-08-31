@@ -5783,6 +5783,9 @@ static Node *primary(Token **rest, Token *tok) {
                     (assoc_ty->kind == TY_ARRAY && assoc_ty->array_len == 0))
                     error_at(type_tok->loc,
                              "generic association requires a complete object type");
+                if (type_is_variably_modified(assoc_ty))
+                    error_at(type_tok->loc,
+                             "generic association type must not be variably modified");
 
                 for (GenericType *g = seen; g; g = g->next)
                     if (type_compatible(g->ty, assoc_ty))
