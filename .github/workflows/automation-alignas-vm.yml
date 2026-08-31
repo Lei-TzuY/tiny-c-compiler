@@ -41,6 +41,7 @@ jobs:
         run: |
           make minicc
           bash test/alignas.sh
+          rm -f tmp-alignas tmp-alignas.c tmp-alignas.s tmp-alignas-reject.c
       - name: Run full test suite
         run: make test
       - name: Commit verified changes and remove bootstrap workflow
