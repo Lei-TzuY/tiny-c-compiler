@@ -50,9 +50,12 @@ assert_run 0 'struct S{char a; _Alignas(8) int b;}; int main(void){struct S s; r
 assert_run 0 'union U{_Alignas(16) char c; long x;}; int main(void){return sizeof(union U)!=16 || _Alignof(union U)!=16;}'
 assert_run 0 'struct S{_Alignas(double) char c; char d;}; int main(void){return sizeof(struct S)!=8 || _Alignof(struct S)!=8;}'
 
-# Alignment survives compatible file-scope redeclarations, including omitted specifier.
+# Alignment survives compatible file-scope redeclarations, including omitted
+# specifiers and alignment introduced after an earlier tentative/extern declaration.
 assert_run 0 'extern _Alignas(16) char g; char g; int main(void){return (unsigned long)&g % 16;}'
 assert_run 0 'extern _Alignas(16) char g; _Alignas(16) char g; int main(void){return (unsigned long)&g % 16;}'
+assert_run 0 'char g; extern _Alignas(16) char g; int main(void){return (unsigned long)&g % 16;}'
+assert_run 0 'extern char g; _Alignas(16) char g; int main(void){return (unsigned long)&g % 16;}'
 
 # Invalid values/contexts and conflicting declarations.
 assert_reject '_Alignas(3) int x; int main(void){return 0;}'
@@ -67,6 +70,8 @@ assert_reject 'int f(_Alignas(16) int x){return x;}'
 assert_reject 'typedef _Alignas(16) int T; int main(void){return 0;}'
 assert_reject 'int main(void){_Alignas(16) register char x; return 0;}'
 assert_reject 'extern _Alignas(8) char g; _Alignas(16) char g; int main(void){return 0;}'
+assert_reject 'char g; extern _Alignas(8) char g; extern _Alignas(16) char g; int main(void){return 0;}'
+assert_reject 'extern _Alignas(16) char g; extern _Alignas(8) char g; char g; int main(void){return 0;}'
 assert_reject 'struct S{_Alignas(1) int x;}; int main(void){return 0;}'
 
 echo 'All _Alignas tests passed!'
