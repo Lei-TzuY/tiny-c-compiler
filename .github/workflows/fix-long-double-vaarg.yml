@@ -1,0 +1,26 @@
+name: Fix long double va_arg
+
+on:
+  push:
+    branches: [feat/long-double]
+    paths:
+      - 'tools/fix_long_double_vaarg.py'
+      - '.github/workflows/fix-long-double-vaarg.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/long-double
+      - run: python3 tools/fix_long_double_vaarg.py
+      - run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add parse.c
+          git commit -m 'Support long double va_arg'
+          git push origin HEAD:feat/long-double
