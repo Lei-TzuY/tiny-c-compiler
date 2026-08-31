@@ -69,6 +69,50 @@ if [ "$actual" != 0 ]; then
     exit 1
 fi
 
+# Verify the reverse ABI direction too: a host-compiled caller must observe
+# minicc-generated narrow integer results with the correct signedness and width.
+cat > tmp-return-narrow-provider.c <<'EOF'
+signed char minicc_schar(void) { return -5; }
+unsigned char minicc_uchar(void) { return 251; }
+short minicc_short(void) { return -2345; }
+unsigned short minicc_ushort(void) { return 54321; }
+int minicc_int(void) { return -123456789; }
+unsigned int minicc_uint(void) { return 4000000001U; }
+EOF
+"$MINICC" tmp-return-narrow-provider.c > tmp-return-narrow-provider.s
+cc -c tmp-return-narrow-provider.s -o tmp-return-narrow-provider.o
+
+cat > tmp-return-narrow-caller.c <<'EOF'
+signed char minicc_schar(void);
+unsigned char minicc_uchar(void);
+short minicc_short(void);
+unsigned short minicc_ushort(void);
+int minicc_int(void);
+unsigned int minicc_uint(void);
+
+int main(void) {
+    if (minicc_schar() != -5) return 1;
+    if (minicc_schar() >= 0) return 2;
+    if (minicc_uchar() != 251) return 3;
+    if (minicc_short() != -2345) return 4;
+    if (minicc_short() >= 0) return 5;
+    if (minicc_ushort() != 54321) return 6;
+    if (minicc_int() != -123456789) return 7;
+    if (minicc_int() >= 0) return 8;
+    if (minicc_uint() != 4000000001U) return 9;
+    return 0;
+}
+EOF
+cc -std=c11 -o tmp-return-narrow-host tmp-return-narrow-caller.c tmp-return-narrow-provider.o
+set +e
+./tmp-return-narrow-host
+actual="$?"
+set -e
+if [ "$actual" != 0 ]; then
+    echo "FAIL(function return ABI): host caller observed incorrect narrow integer return (exit $actual)"
+    exit 1
+fi
+
 # Verify the reverse ABI direction too: host-compiled callers must observe
 # canonical 0/1 _Bool results returned by minicc-generated functions.
 cat > tmp-return-bool-provider.c <<'EOF'
@@ -120,6 +164,8 @@ if [ "$actual" != 0 ]; then
 fi
 
 rm -f tmp-return-host.c tmp-return-host.o tmp-return-minicc.c tmp-return-minicc.s tmp-return-abi \
+      tmp-return-narrow-provider.c tmp-return-narrow-provider.s tmp-return-narrow-provider.o \
+      tmp-return-narrow-caller.c tmp-return-narrow-host \
       tmp-return-bool-provider.c tmp-return-bool-provider.s tmp-return-bool-provider.o \
       tmp-return-bool-caller.c tmp-return-bool-host \
       tmp-return-libc.c tmp-return-libc.s tmp-return-libc
