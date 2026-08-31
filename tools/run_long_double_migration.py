@@ -4,9 +4,21 @@ import runpy
 
 helper = Path('tools/migrate_long_double.py')
 s = helper.read_text()
+
+# Static scalar emission is patched below because quoting PRI macros inside the
+# generated Python replacement is unnecessarily fragile.
 start = s.index('# static scalar emission\n')
 end = s.index('# named parameter stack handling:', start)
 s = s[:start] + '# static scalar emission handled by runner\n' + s[end:]
+
+# parse.c's scalar compatibility switch intentionally falls through `default:
+# return true` for arithmetic kinds, so TY_LDOUBLE needs no dedicated case.
+marker = 'parse type compatibility")\n'
+end = s.index(marker) + len(marker)
+start = s.rfind('p = rep(p,', 0, end)
+if start < 0:
+    raise SystemExit('parse compatibility migration block not found')
+s = s[:start] + '# scalar compatibility already handled by default branch\n' + s[end:]
 helper.write_text(s)
 
 runpy.run_path(str(helper), run_name='__main__')
