@@ -143,6 +143,31 @@ assert_run 0 'int main(void){int n=2;typedef int A[n];int outer=sizeof(A);{int m
 # pointer arithmetic and sizeof after the source bound variable changes.
 assert_run 0 'int main(void){int m=3;typedef int Row[m++];if(m!=4)return 1;Row a[2];Row *p=a;m=9;p[1][2]=13;return sizeof(Row)==12&&p[1][2]==13&&p-a==0?0:2;}'
 
+# goto obeys the C variably-modified scope rule instead of being rejected for
+# the whole function. Forward jumps within an already-active VLA scope preserve
+# the allocation, while outward jumps release dynamic storage.
+assert_run 0 'int main(void){int n=5;int a[n];a[4]=9;goto done;a[4]=1;done:return sizeof a==20&&a[4]==9?0:1;}'
+assert_run 0 'int main(void){int n=512;int i=0;again:if(i==6000)return 0;int a[n];a[0]=i++;goto again;}'
+
+# A label between two VLAs is a fine-grained dynamic-stack frontier: jumping
+# back to it releases only the later VLA and keeps the earlier object alive.
+assert_run 0 'int main(void){int n=128;int a[n];a[0]=5;int i=0;mid:if(i==5000)return a[0]==5?0:1;int b[n];b[0]=i++;goto mid;}'
+
+# Nested outward jumps unwind only exited VLA declarations. The outer array
+# remains live after leaving the inner allocation scope.
+assert_run 0 'int main(void){int n=64;int i=0;loop:{int a[n];a[0]=7;{int b[n];b[0]=i++;goto out;}out:if(a[0]!=7)return 1;}if(i<4000)goto loop;return 0;}'
+
+# VM identifiers that do not themselves allocate dynamic data still participate
+# in the C goto constraint. Backward/outward transfers are legal; entering their
+# scope without executing the declaration is not. Ordinary declarations do not
+# create this barrier.
+assert_run 0 'int main(void){goto ordinary;int x=3;ordinary:return 0;}'
+assert_run 0 'int main(void){int n=3;int i=0;again:if(i++==3)return 0;typedef int A[n];goto again;}'
+assert_reject 'int main(void){int n=3;goto in;int a[n];in:return 0;}'
+assert_reject 'int main(void){int n=3;goto in;{int a[n];in:return 0;}}'
+assert_reject 'int main(void){int n=3;goto in;int (*p)[n]=0;in:return 0;}'
+assert_reject 'int main(void){int n=3;goto in;typedef int A[n];in:return 0;}'
+
 # Invalid/unsupported VM shapes are diagnosed rather than miscompiled.
 assert_reject 'int main(void){int n=3;int a[n]={1,2,3};return a[0];}'
 assert_reject 'int main(void){int n=3;static int a[n];return 0;}'
@@ -150,7 +175,6 @@ assert_reject 'int main(void){int n=3;extern int a[n];return 0;}'
 assert_reject 'int n;int a[n];int main(void){return 0;}'
 assert_reject 'int main(void){int n=3;struct S{int a[n];};return 0;}'
 assert_reject 'int n=3;typedef int A[n];int main(void){return 0;}'
-assert_reject 'int main(void){int n=3;int a[n];goto out;out:return a[0];}'
 assert_reject 'int f(int n,int a[static *]);int main(void){return 0;}'
 
 # Existing constant-bound constraints remain strict.

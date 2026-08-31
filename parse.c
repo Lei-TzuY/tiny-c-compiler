@@ -38,6 +38,16 @@ struct VarScope {
     Obj *var;
 };
 
+typedef struct VmGuard VmGuard;
+struct VmGuard {
+    // Active variably-modified identifiers form a persistent chain. A goto may
+    // target only a prefix of the source chain; otherwise it would enter the
+    // scope of an identifier whose variably-modified declaration was skipped.
+    VmGuard *parent;
+    Obj *stack_save; // pre-allocation RSP checkpoint for a materialized VLA
+    char *name;
+};
+
 typedef struct Scope Scope;
 struct Scope {
     Scope *parent;
@@ -48,9 +58,13 @@ struct Scope {
     // First VLA in a lexical scope snapshots RSP here. All VLA allocations in
     // that scope are discarded together when the scope is exited.
     Obj *vla_stack_save;
+    // Guard chain visible when this lexical scope was entered. Leaving the
+    // block restores that exact declaration-scope frontier.
+    VmGuard *vm_guard_entry;
 };
 
 static Scope *current_scope;
+static VmGuard *current_vm_guard;
 
 static bool type_compatible(Type *a, Type *b);
 static Type *composite_redecl_type(Type *old_ty, Type *new_ty);
@@ -59,11 +73,14 @@ static Obj *find_global_symbol(const char *name);
 static void enter_scope(void) {
     Scope *sc = calloc(1, sizeof(Scope));
     sc->parent = current_scope;
+    sc->vm_guard_entry = current_vm_guard;
     current_scope = sc;
 }
 
 static void leave_scope(void) {
-    current_scope = current_scope->parent;
+    Scope *leaving = current_scope;
+    current_vm_guard = leaving->vm_guard_entry;
+    current_scope = leaving->parent;
 }
 
 static StructTag *find_tag_in_scope(Scope *scope, const char *name) {
@@ -244,7 +261,7 @@ static TypeDef *find_typedef(Token *tok) {
     return NULL;
 }
 
-static void push_typedef(Token *ident, Type *ty) {
+static bool push_typedef(Token *ident, Type *ty) {
     char *name = strndup(ident->loc, ident->len);
     if (find_var_name_in_scope(current_scope, name) ||
         find_enum_name_in_scope(current_scope, name))
@@ -255,7 +272,7 @@ static void push_typedef(Token *ident, Type *ty) {
         if (!type_compatible(old->ty, ty))
             error_at(ident->loc, "conflicting typedef for '%s'", name);
         free(name);
-        return;
+        return false;
     }
 
     TypeDef *td = calloc(1, sizeof(TypeDef));
@@ -263,6 +280,7 @@ static void push_typedef(Token *ident, Type *ty) {
     td->ty = ty;
     td->next = current_scope->typedefs;
     current_scope->typedefs = td;
+    return true;
 }
 
 static EnumConst *find_enum_const(Token *tok) {
@@ -302,6 +320,16 @@ static Obj *globals;
 // goto / label tracking for current function
 static Node *current_gotos;
 static Node *current_labels;
+
+typedef struct JumpMeta JumpMeta;
+struct JumpMeta {
+    JumpMeta *next;
+    Node *node;
+    VmGuard *guard;
+};
+
+static JumpMeta *current_goto_meta;
+static JumpMeta *current_label_meta;
 
 static int align_up(int n, int a) { return (n + a - 1) / a * a; }
 
@@ -377,7 +405,6 @@ static SwitchContext *current_switch;
 static int current_loop_depth;
 static Scope *current_break_scope;
 static Scope *current_continue_scope;
-static bool current_function_has_vla;
 
 static bool is_typename(Token *tok) {
     if (equal(tok, "int") || equal(tok, "char") || equal(tok, "void") ||
@@ -764,6 +791,53 @@ static Node *new_vla_stack_node(NodeKind kind, Obj *slot) {
     Node *node = new_node(kind);
     node->var = slot;
     return node;
+}
+
+static VmGuard *push_vm_guard(Token *ident) {
+    VmGuard *guard = calloc(1, sizeof(VmGuard));
+    guard->parent = current_vm_guard;
+    if (ident)
+        guard->name = strndup(ident->loc, ident->len);
+    current_vm_guard = guard;
+    return guard;
+}
+
+static void note_jump_meta(JumpMeta **list, Node *node) {
+    JumpMeta *meta = calloc(1, sizeof(JumpMeta));
+    meta->node = node;
+    meta->guard = current_vm_guard;
+    meta->next = *list;
+    *list = meta;
+}
+
+static VmGuard *jump_guard_for(JumpMeta *list, Node *node) {
+    for (JumpMeta *meta = list; meta; meta = meta->next)
+        if (meta->node == node)
+            return meta->guard;
+    return NULL;
+}
+
+// A target is legal only when every variably-modified identifier active at the
+// target is already active at the goto statement. In the persistent guard
+// chain that means target must be an ancestor (prefix) of source.
+static bool vm_guard_target_is_active(VmGuard *source, VmGuard *target) {
+    if (!target)
+        return true;
+    for (VmGuard *guard = source; guard; guard = guard->parent)
+        if (guard == target)
+            return true;
+    return false;
+}
+
+// Walk declarations exited by a legal goto. The final checkpoint encountered
+// is the oldest exited dynamic allocation, which restores RSP to exactly the
+// target frontier while retaining all VLAs that are still active there.
+static Obj *vm_guard_restore_between(VmGuard *source, VmGuard *target) {
+    Obj *restore = NULL;
+    for (VmGuard *guard = source; guard && guard != target; guard = guard->parent)
+        if (guard->stack_save)
+            restore = guard->stack_save;
+    return restore;
 }
 
 // Return the outermost VLA stack snapshot among scopes exited when control
@@ -4052,7 +4126,8 @@ static Token *parse_typedef_declaration(Token *tok, Type *basety,
     for (;;) {
         Token *ident;
         Type *ty = declarator(&tok, tok, basety, &ident);
-        if (type_is_variably_modified(ty)) {
+        bool is_vm_typedef = type_is_variably_modified(ty);
+        if (is_vm_typedef) {
             // C11 6.7.6.2 permits variably-modified typedef names only at
             // ordinary block scope.  Materialize every dynamic byte extent at
             // the typedef declaration itself: later objects and sizeof(type)
@@ -4061,11 +4136,12 @@ static Token *parse_typedef_declaration(Token *tok, Type *basety,
                 error_at(ident->loc,
                          "variably modified typedef requires block scope");
             append_vm_size_materialization(ty, runtime_tail);
-            current_function_has_vla = true;
         }
         if (equal(tok, "="))
             error_at(tok->loc, "typedef declaration cannot have an initializer");
-        push_typedef(ident, ty);
+        bool introduced = push_typedef(ident, ty);
+        if (is_vm_typedef && introduced)
+            push_vm_guard(ident);
         if (!consume(&tok, tok, ","))
             break;
     }
@@ -4160,9 +4236,13 @@ static Node *declaration(Token **rest, Token *tok) {
         var->is_register = attrs.is_register;
         var->is_thread_local = attrs.is_thread_local;
 
+        VmGuard *vm_guard = NULL;
         if (is_vm_type) {
             append_vm_size_materialization(ty, &block_cur);
-            current_function_has_vla = true;
+            // The identifier's variably-modified scope begins after its
+            // declarator. Labels cannot occur inside a declaration, so this is
+            // the control-flow frontier observed by every later statement.
+            vm_guard = push_vm_guard(ident);
         }
 
         if (is_vm_array_object) {
@@ -4171,12 +4251,17 @@ static Node *declaration(Token **rest, Token *tok) {
             if (!ty->vla_size)
                 error_at(ident->loc, "automatic variably modified array has no runtime extent");
 
-            if (!current_scope->vla_stack_save) {
-                Obj *save = create_lvar(new_unique_name());
-                save->ty = ty_ulong;
+            // Every dynamic VLA declaration gets its own pre-allocation
+            // checkpoint. The first checkpoint in a lexical block also remains
+            // the block-wide unwind target used by normal exit/break/continue.
+            Obj *save = create_lvar(new_unique_name());
+            save->ty = ty_ulong;
+            block_cur = block_cur->next = new_vla_stack_node(ND_VLA_SAVE, save);
+            if (!current_scope->vla_stack_save)
                 current_scope->vla_stack_save = save;
-                block_cur = block_cur->next = new_vla_stack_node(ND_VLA_SAVE, save);
-            }
+            if (!vm_guard)
+                error_at(ident->loc, "internal error: VLA is missing VM guard metadata");
+            vm_guard->stack_save = save;
 
             var->is_vla = true;
             var->vla_size = ty->vla_size;
@@ -4559,6 +4644,7 @@ static Node *stmt(Token **rest, Token *tok) {
         node->label_name = strndup(tok->loc, tok->len);
         node->goto_next = current_gotos;
         current_gotos = node;
+        note_jump_meta(&current_goto_meta, node);
         *rest = skip(tok->next, ";");
         return node;
     }
@@ -4780,6 +4866,7 @@ static Node *stmt(Token **rest, Token *tok) {
         node->unique_label = new_unique_name();
         node->label_next = current_labels;
         current_labels = node;
+        note_jump_meta(&current_label_meta, node);
         tok = skip(tok->next, ":");
         require_statement_after_label(tok);
         node->lhs = stmt(rest, tok);
@@ -5873,19 +5960,25 @@ static Node *compound_stmt(Token **rest, Token *tok) {
 }
 
 static void resolve_gotos(void) {
-    if (current_function_has_vla && current_gotos)
-        error("goto in a function containing variable length arrays is not supported yet");
     for (Node *g = current_gotos; g; g = g->goto_next) {
-        bool found = false;
+        Node *target = NULL;
         for (Node *l = current_labels; l; l = l->label_next) {
             if (!strcmp(g->label_name, l->label_name)) {
-                g->unique_label = l->unique_label;
-                found = true;
+                target = l;
                 break;
             }
         }
-        if (!found)
+        if (!target)
             error("undefined label: %s", g->label_name);
+
+        VmGuard *source_guard = jump_guard_for(current_goto_meta, g);
+        VmGuard *target_guard = jump_guard_for(current_label_meta, target);
+        if (!vm_guard_target_is_active(source_guard, target_guard))
+            error("goto to label '%s' enters scope of a variably modified identifier",
+                  g->label_name);
+
+        g->unique_label = target->unique_label;
+        g->var = vm_guard_restore_between(source_guard, target_guard);
     }
 }
 
@@ -6178,7 +6271,9 @@ Program *parse(Token *tok) {
             locals = NULL;
             current_gotos = NULL;
             current_labels = NULL;
-            current_function_has_vla = false;
+            current_goto_meta = NULL;
+            current_label_meta = NULL;
+            current_vm_guard = NULL;
             current_break_scope = NULL;
             current_continue_scope = NULL;
             enter_scope();

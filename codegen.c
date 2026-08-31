@@ -1589,6 +1589,8 @@ static void gen_stmt(Node *node) {
     }
 
     if (node->kind == ND_GOTO) {
+        if (node->var)
+            printf("  mov %d(%%rbp), %%rsp\n", node->var->offset);
         printf("  jmp %s\n", node->unique_label);
         return;
     }
