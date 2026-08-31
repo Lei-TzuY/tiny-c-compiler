@@ -41,7 +41,7 @@ compile_run generic 'int main(void) { long double x=1.0L; return _Generic(x, lon
 compile_run local_call 'long double add(long double a,long double b){ return a+b; } long double twice(long double x){ return x*2.0L; } int main(void){ return !(twice(add(1.25L,2.5L))==7.5L); }'
 compile_run indirect_call 'long double add(long double a,long double b){return a+b;} int main(void){ long double (*fp)(long double,long double)=add; return !(fp(4.0L,1.5L)==5.5L); }'
 compile_run mixed_call 'int check(int a,double d,long double x,int b,long double y){return a==1 && d==2.0 && x==3.0L && b==4 && y==5.0L;} int main(void){return !check(1,2.0,3.0L,4,5.0L);}'
-compile_run float_header '#include <float.h>\nint main(void) { return !(LDBL_MANT_DIG==64 && LDBL_DIG>=18 && LDBL_MAX>1.0e4000L && LDBL_MIN<1.0e-4000L); }'
+compile_run float_header $'#include <float.h>\nint main(void) { return !(LDBL_MANT_DIG==64 && LDBL_DIG>=18 && LDBL_MAX>1.0e4000L && LDBL_MIN<1.0e-4000L); }'
 
 # host GCC caller -> minicc callee
 cat > tmp-ld-callee.c <<'EOF'
