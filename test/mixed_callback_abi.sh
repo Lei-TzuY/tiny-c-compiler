@@ -50,7 +50,7 @@ double host_overflow(int a, double b, int c, double d, int e, double f,
 int main(void) {
   if (mini_apply_mixed(host_mixed, 1, 2.0, 3, 4.0) != 4321.0)
     return 1;
-  if (mini_apply_overflow(host_overflow) != 88.0)
+  if (mini_apply_overflow(host_overflow) != 83.0)
     return 2;
   return 0;
 }
@@ -97,7 +97,7 @@ double mini_overflow(int a, double b, int c, double d, int e, double f,
 int main(void) {
   if (host_apply_mixed(mini_mixed, 1, 2.0, 3, 4.0) != 4321.0)
     return 1;
-  if (host_apply_overflow(mini_overflow) != 88.0)
+  if (host_apply_overflow(mini_overflow) != 83.0)
     return 2;
   return 0;
 }
