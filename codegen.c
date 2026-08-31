@@ -519,22 +519,17 @@ static void gen_inc_dec(Node *node, bool increment, bool return_old) {
         gen_addr(node->lhs);
         push();
         load(node->ty);
-        if (return_old) {
-            printf("  sub $16, %%rsp\n");
+        // Keep the post-inc/dec old value below the working value on the x87
+        // register stack. This avoids interposing scratch bytes above the saved
+        // lvalue address that store() pops from the machine stack.
+        if (return_old)
             printf("  fld %%st(0)\n");
-            printf("  fstpt (%%rsp)\n");
-            depth += 2;
-        }
         printf("  fld1\n");
         printf(increment ? "  faddp %%st, %%st(1)\n"
                          : "  fsubrp %%st, %%st(1)\n");
         store(node->ty);
-        if (return_old) {
+        if (return_old)
             printf("  fstp %%st(0)\n");
-            printf("  fldt (%%rsp)\n");
-            printf("  add $16, %%rsp\n");
-            depth -= 2;
-        }
         return;
     }
     if (is_flonum(node->ty)) {
