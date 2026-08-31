@@ -82,10 +82,10 @@ int main(void) {
 
   dz.d = mini_neg_double(0.0);
   if (dz.u != 0x8000000000000000ULL)
-    return 6;
+    return dz.u == 0 ? 6 : 8;
   fz.f = mini_neg_float(0.0f);
   if (fz.u != 0x80000000U)
-    return 7;
+    return fz.u == 0 ? 7 : 9;
   return 0;
 }
 EOF
