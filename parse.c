@@ -4039,7 +4039,7 @@ static void parse_automatic_aggregate_subobject(Node **tail, Node *lhs, Type *ty
 
 
 static Token *parse_typedef_declaration(Token *tok, Type *basety,
-                                        DeclAttrs *attrs) {
+                                        DeclAttrs *attrs, Node **runtime_tail) {
     if (attrs->align)
         error_at(tok->loc, "_Alignas is not allowed on a typedef declaration");
     if (attrs->is_thread_local)
@@ -4052,8 +4052,17 @@ static Token *parse_typedef_declaration(Token *tok, Type *basety,
     for (;;) {
         Token *ident;
         Type *ty = declarator(&tok, tok, basety, &ident);
-        if (type_is_variably_modified(ty))
-            error_at(ident->loc, "variably modified typedefs are not supported yet");
+        if (type_is_variably_modified(ty)) {
+            // C11 6.7.6.2 permits variably-modified typedef names only at
+            // ordinary block scope.  Materialize every dynamic byte extent at
+            // the typedef declaration itself: later objects and sizeof(type)
+            // reuse those saved values and must not re-evaluate the bounds.
+            if (!runtime_tail)
+                error_at(ident->loc,
+                         "variably modified typedef requires block scope");
+            append_vm_size_materialization(ty, runtime_tail);
+            current_function_has_vla = true;
+        }
         if (equal(tok, "="))
             error_at(tok->loc, "typedef declaration cannot have an initializer");
         push_typedef(ident, ty);
@@ -4069,8 +4078,16 @@ static Node *declaration(Token **rest, Token *tok) {
     DeclAttrs attrs = {};
     Type *basety = declspec_with_attrs(&tok, tok, &attrs);
     if (attrs.is_typedef) {
-        *rest = parse_typedef_declaration(tok, basety, &attrs);
-        return new_node(ND_EXPR_STMT);
+        Node typedef_head = {};
+        Node *typedef_cur = &typedef_head;
+        *rest = parse_typedef_declaration(tok, basety, &attrs, &typedef_cur);
+        if (!typedef_head.next)
+            return new_node(ND_EXPR_STMT);
+        if (!typedef_head.next->next)
+            return typedef_head.next;
+        Node *block = new_node(ND_BLOCK);
+        block->body = typedef_head.next;
+        return block;
     }
     bool is_static = attrs.is_static;
     bool is_extern = attrs.is_extern;
@@ -6091,7 +6108,7 @@ Program *parse(Token *tok) {
         DeclAttrs attrs = {};
         Type *basety = declspec_with_attrs(&tok, tok, &attrs);
         if (attrs.is_typedef) {
-            tok = parse_typedef_declaration(tok, basety, &attrs);
+            tok = parse_typedef_declaration(tok, basety, &attrs, NULL);
             continue;
         }
         bool is_static = attrs.is_static;

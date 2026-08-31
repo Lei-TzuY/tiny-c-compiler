@@ -119,13 +119,37 @@ assert_run 0 'int first(int n,int a[static n]){return a[0];}int main(void){int a
 assert_run 0 'int sum(int n,int a[*]);int sum(int n,int a[]){int s=0;for(int i=0;i<n;i++)s+=a[i];return s;}int main(void){int a[3]={2,3,4};return sum(3,a)==9?0:1;}'
 assert_run 0 'int pick(int n,int a[const restrict n]){return a[n-1];}int main(void){int a[2]={3,7};return pick(2,a)==7?0:1;}'
 
+# Block-scope variably-modified typedefs evaluate their bounds exactly once at
+# the typedef declaration. Objects and sizeof(type-name) reuse the saved extent.
+assert_run 0 'int main(void){int n=3;typedef int A[n++];if(n!=4)return 1;n=9;A a;a[2]=7;return sizeof(A)==12&&sizeof a==12&&a[2]==7?0:2;}'
+
+# Multidimensional VM typedefs preserve every saved runtime stride and work with
+# pointer-to-VLA indexing without re-evaluating either bound.
+assert_run 0 'int main(void){int n=2,m=3;typedef int A[n++][m++];if(n!=3||m!=4)return 1;n=8;m=9;A a;int (*p)[3]=a;p[1][2]=11;return sizeof(A)==24&&sizeof(*p)==12&&a[1][2]==11?0:2;}'
+
+# A typedef derived from an existing VM typedef reuses the original saved extent
+# rather than replaying its bound expression.
+assert_run 0 'int main(void){int n=2;typedef int A[n++];if(n!=3)return 1;typedef A B;if(n!=3)return 2;A a;B b;a[1]=4;b[1]=5;return sizeof(A)==8&&sizeof(B)==8&&a[1]+b[1]==9?0:3;}'
+
+# Multiple VM declarators in one typedef declaration are materialized in source
+# order and retain independent allocation-time extents.
+assert_run 0 'int main(void){int n=2;typedef int A[n++],B[n++];return n==4&&sizeof(A)==8&&sizeof(B)==12?0:1;}'
+
+# Nested typedef scopes may shadow one another; each scope owns its own saved
+# bound while an outer VM typedef remains valid after the nested scope exits.
+assert_run 0 'int main(void){int n=2;typedef int A[n];int outer=sizeof(A);{int m=3;typedef int A[m];A x;if(sizeof x!=12)return 1;}A y;return outer==8&&sizeof y==8?0:2;}'
+
+# Pointer types derived from VM typedefs use the typedef's saved row stride for
+# pointer arithmetic and sizeof after the source bound variable changes.
+assert_run 0 'int main(void){int m=3;typedef int Row[m++];if(m!=4)return 1;Row a[2];Row *p=a;m=9;p[1][2]=13;return sizeof(Row)==12&&p[1][2]==13&&p-a==0?0:2;}'
+
 # Invalid/unsupported VM shapes are diagnosed rather than miscompiled.
 assert_reject 'int main(void){int n=3;int a[n]={1,2,3};return a[0];}'
 assert_reject 'int main(void){int n=3;static int a[n];return 0;}'
 assert_reject 'int main(void){int n=3;extern int a[n];return 0;}'
 assert_reject 'int n;int a[n];int main(void){return 0;}'
 assert_reject 'int main(void){int n=3;struct S{int a[n];};return 0;}'
-assert_reject 'int main(void){int n=3;typedef int A[n];return 0;}'
+assert_reject 'int n=3;typedef int A[n];int main(void){return 0;}'
 assert_reject 'int main(void){int n=3;int a[n];goto out;out:return a[0];}'
 assert_reject 'int f(int n,int a[static *]);int main(void){return 0;}'
 
