@@ -19,6 +19,12 @@ int *host_seventh(int *a, int *b, int *c, int *d,
 }
 int host_plus1(int x) { return x + 1; }
 int (*host_get_callback(void))(int) { return host_plus1; }
+int host_apply(int (*fn)(int), int x) { return fn(x); }
+int host_seventh_callback(int a, int b, int c, int d, int e, int f,
+                          int (*fn)(int), int x) {
+    (void)a; (void)b; (void)c; (void)d; (void)e; (void)f;
+    return fn(x);
+}
 EOF
 cc -std=c11 -c tmp-pointer-host.c -o tmp-pointer-host.o
 
@@ -29,6 +35,10 @@ int *host_echo(int *);
 int *host_choose(int *, int *);
 int *host_seventh(int *, int *, int *, int *, int *, int *, int *);
 int (*host_get_callback(void))(int);
+int host_apply(int (*)(int), int);
+int host_seventh_callback(int, int, int, int, int, int, int (*)(int), int);
+
+int local_plus3(int x) { return x + 3; }
 
 int main(void) {
     int local = 33;
@@ -45,6 +55,8 @@ int main(void) {
                       &host_a, &host_a, &host_b) != 22) return 6;
     if (callback(41) != 42) return 7;
     if (host_get_callback()(9) != 10) return 8;
+    if (host_apply(local_plus3, 39) != 42) return 9;
+    if (host_seventh_callback(1, 2, 3, 4, 5, 6, local_plus3, 39) != 42) return 10;
     return 0;
 }
 EOF
@@ -61,8 +73,9 @@ fi
 
 # Reverse the ABI boundary: host-compiled callers must receive minicc pointer
 # returns intact and minicc callees must load register and stack parameters
-# according to the platform ABI. Also exercise function-pointer returns so the
-# recursive declarator and indirect-call paths are checked at a real ABI edge.
+# according to the platform ABI. Also exercise function-pointer returns and
+# function-pointer parameters so recursive declarators stay interoperable at
+# real ABI edges in both register and stack argument positions.
 cat > tmp-pointer-minicc-provider.c <<'EOF'
 int minicc_value = 44;
 
@@ -75,6 +88,11 @@ int *minicc_seventh(int *a, int *b, int *c, int *d,
 int *minicc_global(void) { return &minicc_value; }
 int minicc_plus2(int x) { return x + 2; }
 int (*minicc_get_callback(void))(int) { return minicc_plus2; }
+int minicc_apply(int (*fn)(int), int x) { return fn(x); }
+int minicc_seventh_callback(int a, int b, int c, int d, int e, int f,
+                            int (*fn)(int), int x) {
+    return fn(x);
+}
 EOF
 "$MINICC" tmp-pointer-minicc-provider.c > tmp-pointer-minicc-provider.s
 cc -c tmp-pointer-minicc-provider.s -o tmp-pointer-minicc-provider.o
@@ -86,6 +104,10 @@ int *minicc_choose(int *, int *);
 int *minicc_seventh(int *, int *, int *, int *, int *, int *, int *);
 int *minicc_global(void);
 int (*minicc_get_callback(void))(int);
+int minicc_apply(int (*)(int), int);
+int minicc_seventh_callback(int, int, int, int, int, int, int (*)(int), int);
+
+static int host_plus4(int x) { return x + 4; }
 
 int main(void) {
     int a = 51;
@@ -102,6 +124,8 @@ int main(void) {
     if (*minicc_global() != 44) return 7;
     if (callback(40) != 42) return 8;
     if (minicc_get_callback()(8) != 10) return 9;
+    if (minicc_apply(host_plus4, 38) != 42) return 10;
+    if (minicc_seventh_callback(1, 2, 3, 4, 5, 6, host_plus4, 38) != 42) return 11;
     return 0;
 }
 EOF
