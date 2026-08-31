@@ -17,6 +17,7 @@ test: minicc
 	bash ./test/preprocessor_hash_digraphs.sh
 	bash ./test/preprocessor.sh
 	bash ./test/preprocessor_advanced.sh
+	bash ./test/preprocessor_empty_paste.sh
 	bash ./test/preprocessor_stringification_literals.sh
 	bash ./test/preprocessor_inactive_branches.sh
 	bash ./test/preprocessor_recursive_macros.sh
