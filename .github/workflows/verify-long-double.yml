@@ -15,3 +15,4 @@ jobs:
           ref: feat/long-double
       - name: Run full test suite
         run: make test
+# rerun after post-inc/dec x87 stack fix
