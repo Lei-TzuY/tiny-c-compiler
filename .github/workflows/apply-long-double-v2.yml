@@ -1,0 +1,33 @@
+name: Apply long double implementation v2
+
+on:
+  push:
+    paths:
+      - tools/run_long_double_migration.py
+      - .github/workflows/apply-long-double-v2.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/long-double-x87
+      - name: Apply implementation
+        run: python3 tools/run_long_double_migration.py
+      - name: Commit product changes
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add minicc.h type.c tokenize.c parse.c codegen.c preprocess_v2.c Makefile README.md test/long_double.sh test/long_double_abi.sh
+          git commit -m 'Implement x87 long double support'
+          git push origin HEAD:feat/long-double-x87
+      - name: Build compiler
+        run: make clean && make
+      - name: Run focused tests
+        run: |
+          bash test/long_double.sh
+          bash test/long_double_abi.sh
