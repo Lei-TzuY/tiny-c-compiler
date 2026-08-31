@@ -1,0 +1,49 @@
+name: Apply unary negation fix
+
+on:
+  push:
+    branches:
+      - test/float-negation-sysv-abi
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: test/float-negation-sysv-abi
+          fetch-depth: 0
+      - name: Apply exact parser fix and clean diagnostics
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path('parse.c')
+          s = p.read_text()
+          old = '    if (equal(tok, "-"))  return new_binary(ND_SUB, new_num(0), unary(rest, tok->next));\n'
+          new = '    if (equal(tok, "-"))  return new_unary(ND_NEG, unary(rest, tok->next));\n'
+          if s.count(old) != 1:
+              raise SystemExit(f'expected exactly one unary-minus lowering, found {s.count(old)}')
+          p.write_text(s.replace(old, new))
+
+          t = Path('test/float_abi.sh')
+          s = t.read_text()
+          s = s.replace("many(1,2.0,3.0,4.0,5,6.0,7)", "many(1,2.0,3,4.0,5,6.0,7)")
+          s = s.replace("sed -n '/mini_neg_double:/,/mini_neg_float:/p' tmp-float-abi-mini-provider.s\n", "")
+          s = s.replace("if (dz.u != 0x8000000000000000ULL) return dz.u == 0 ? 6 : 8;", "if (dz.u != 0x8000000000000000ULL) return 6;")
+          s = s.replace("if (fz.u != 0x80000000U) return fz.u == 0 ? 7 : 9;", "if (fz.u != 0x80000000U) return 7;")
+          t.write_text(s)
+          PY
+          rm .github/workflows/apply-unary-neg-fix.yml
+      - name: Commit exact fix
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add parse.c test/float_abi.sh .github/workflows/apply-unary-neg-fix.yml
+          git diff --cached --check
+          git commit -m 'Preserve floating signed zero in unary negation'
+          git push origin HEAD:test/float-negation-sysv-abi
