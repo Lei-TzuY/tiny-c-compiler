@@ -460,6 +460,45 @@ static char *trim_copy(const char *s) {
     return strndup(s, (size_t)(end - s));
 }
 
+// Translation phase 1 replaces the nine C trigraph sequences before line
+// splicing, comment recognition, literal parsing, directive recognition, or
+// macro expansion.  In particular, ??/ becomes a real backslash soon enough
+// to participate in translation phase 2.  Replacement is deliberately done
+// only on physical source input: text produced later by macro replacement must
+// not be rescanned for trigraphs.
+static char trigraph_replacement(char third) {
+    switch (third) {
+    case '=': return '#';
+    case '/': return '\\';
+    case '\'': return '^';
+    case '(': return '[';
+    case ')': return ']';
+    case '!': return '|';
+    case '<': return '{';
+    case '>': return '}';
+    case '-': return '~';
+    default: return 0;
+    }
+}
+
+static char *replace_trigraphs(const char *input) {
+    StrBuf out;
+    sb_init(&out, strlen(input) + 1);
+
+    for (const char *p = input; *p;) {
+        if (p[0] == '?' && p[1] == '?' && p[2]) {
+            char replacement = trigraph_replacement(p[2]);
+            if (replacement) {
+                sb_putc(&out, replacement);
+                p += 3;
+                continue;
+            }
+        }
+        sb_putc(&out, *p++);
+    }
+    return out.data;
+}
+
 static char *splice_lines(const char *input) {
     StrBuf out;
     sb_init(&out, strlen(input) + 1);
@@ -2883,7 +2922,9 @@ static char *preprocess_v2_source_impl(char *input, const char *source_name,
     }
 
     CondStack *base_cond = cond_stack;
-    char *spliced = splice_lines(input);
+    char *phase1 = replace_trigraphs(input);
+    char *spliced = splice_lines(phase1);
+    free(phase1);
     char *canonical = canonicalize_pp_digraphs(spliced);
     free(spliced);
     spliced = canonical;
