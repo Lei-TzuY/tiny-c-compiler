@@ -150,6 +150,7 @@ test: minicc
 	bash ./test/nested_designators.sh
 	bash ./test/nested_brace_designators.sh
 	bash ./test/call_arguments.sh
+	bash ./test/record_callback_abi.sh
 	bash ./test/record_abi_firewall.sh
 	bash ./test/sysv_record_abi.sh
 	bash ./test/sysv_sse_record_abi.sh
