@@ -73,5 +73,7 @@ assert_reject 'extern _Alignas(8) char g; _Alignas(16) char g; int main(void){re
 assert_reject 'char g; extern _Alignas(8) char g; extern _Alignas(16) char g; int main(void){return 0;}'
 assert_reject 'extern _Alignas(16) char g; extern _Alignas(8) char g; char g; int main(void){return 0;}'
 assert_reject 'struct S{_Alignas(1) int x;}; int main(void){return 0;}'
+assert_reject 'struct S{_Alignas(8) unsigned x:3;}; int main(void){return 0;}'
+assert_reject 'struct S{_Alignas(8) unsigned :3;}; int main(void){return 0;}'
 
 echo 'All _Alignas tests passed!'
