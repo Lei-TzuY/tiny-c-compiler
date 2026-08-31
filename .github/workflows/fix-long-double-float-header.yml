@@ -1,0 +1,26 @@
+name: Fix long double float.h
+
+on:
+  push:
+    branches: [feat/long-double]
+    paths:
+      - 'tools/fix_long_double_float_header.py'
+      - '.github/workflows/fix-long-double-float-header.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/long-double
+      - run: python3 tools/fix_long_double_float_header.py
+      - run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add preprocess_v2.c
+          git commit -m 'Expose x86-64 long double limits in float.h'
+          git push origin HEAD:feat/long-double
