@@ -241,7 +241,7 @@ static char *scan_hex_digits(char *p) {
 // spelling to strtod for conversion.  strtod intentionally accepts a broader
 // implementation syntax on some hosts, so it must not decide whether a token
 // is a legal C floating constant.
-static bool read_floating_literal(char *start, char **rest, double *value,
+static bool read_floating_literal(char *start, char **rest, long double *value,
                                   Type **literal_ty) {
     char *p = start;
     char *body_end;
@@ -324,9 +324,8 @@ static bool read_floating_literal(char *start, char **rest, double *value,
         ty = ty_float;
         p++;
     } else if (*p == 'l' || *p == 'L') {
-        // The language frontend intentionally does not expose long double yet:
-        // the x86-64 backend has no x87 80-bit storage/call ABI lowering.
-        error_at(start, "long double floating constants are not supported");
+        ty = ty_ldouble;
+        p++;
     }
 
     if (is_ident2(*p))
@@ -334,7 +333,7 @@ static bool read_floating_literal(char *start, char **rest, double *value,
 
     errno = 0;
     char *converted;
-    double fval = strtod(start, &converted);
+    long double fval = strtold(start, &converted);
     if (converted != body_end)
         error_at(start, "invalid floating constant");
 
@@ -487,7 +486,7 @@ Token *tokenize(char *p) {
             (*p == '.' && isdigit((unsigned char)p[1]))) {
             char *q = p;
             char *float_end;
-            double fval;
+            long double fval;
             Type *float_ty;
 
             if (read_floating_literal(p, &float_end, &fval, &float_ty)) {
@@ -495,7 +494,8 @@ Token *tokenize(char *p) {
                 cur = cur->next = new_token(TK_NUM, q, p);
                 cur->line_no = line;
                 cur->is_float = true;
-                cur->fval = fval;
+                cur->ldval = fval;
+                cur->fval = (double)fval;
                 cur->ty = float_ty;
                 continue;
             }

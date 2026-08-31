@@ -41,6 +41,7 @@ test: minicc
 	bash ./test/predefined_source_macros.sh
 	bash ./test/predefined_datetime_macros.sh
 	bash ./test/float.sh
+	bash ./test/long_double.sh
 	bash ./test/floating_literals.sh
 	bash ./test/float_header.sh
 	bash ./test/float_abi.sh
