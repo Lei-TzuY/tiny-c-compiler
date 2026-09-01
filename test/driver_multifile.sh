@@ -101,6 +101,22 @@ EOF
 "$MINICC" --link use_library.c -L. -lhelper -o library_app
 ./library_app
 
+# Direct archive inputs are forwarded to the host linker in input order.
+"$MINICC" --link use_library.c libhelper.a -o archive_app
+./archive_app
+
+# Direct shared-object inputs are accepted as link inputs as advertised.
+"$HOST_CC" -shared -fPIC libhelper.c -o libhelper.so
+"$MINICC" --link use_library.c ./libhelper.so -o shared_app
+LD_LIBRARY_PATH=. ./shared_app
+
+# -Wl, arguments are passed through to the host linker driver.
+rm -f link.map
+"$MINICC" --link a.c b.c -Wl,-Map,link.map -o mapped_app
+./mapped_app
+test -s link.map
+grep -q 'main' link.map
+
 # Independent translation units must not inherit source-defined macros.
 cat > macro_a.c <<'EOF'
 #define LEAK 1
