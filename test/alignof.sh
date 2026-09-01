@@ -28,6 +28,23 @@ cc -o tmp-alignof tmp-alignof.s
 
 echo 'OK(_Alignof): scalar, pointer, array, record and typedef alignments'
 
+# Unlike sizeof(VLA), alignment does not depend on the runtime bound.  _Alignof
+# therefore remains an integer constant expression even when its type-name is
+# variably modified, including a pointer-to-VLA derived type.
+cat > tmp-alignof-vla.c <<'EOF'
+int main(void) {
+  int n = 3;
+  _Static_assert(_Alignof(int[n]) == _Alignof(int), "VLA alignment is constant");
+  _Static_assert(_Alignof(int (*)[n]) == _Alignof(int *), "VM pointer alignment is constant");
+  return 0;
+}
+EOF
+./minicc tmp-alignof-vla.c > tmp-alignof-vla.s
+cc -o tmp-alignof-vla tmp-alignof-vla.s
+./tmp-alignof-vla
+
+echo 'OK(_Alignof): VLA and variably-modified type names remain ICEs'
+
 for src in \
   'int main(void){return _Alignof(void);}' \
   'struct F; int main(void){return _Alignof(struct F);}' \
@@ -41,5 +58,5 @@ do
   fi
 done
 
-rm -f tmp-alignof.c tmp-alignof.s tmp-alignof tmp-alignof-bad.c
+rm -f tmp-alignof.c tmp-alignof.s tmp-alignof tmp-alignof-vla.c tmp-alignof-vla.s tmp-alignof-vla tmp-alignof-bad.c
 echo 'All C11 _Alignof tests passed!'
