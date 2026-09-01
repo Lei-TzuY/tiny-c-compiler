@@ -42,6 +42,15 @@ assert_run 6 'int main(){int a[3];a[1]=6;int *p=a;p++;return *p;}'
 assert_run 4 'int main(){int a[3];a[1]=4;int *p=a+2;--p;return *p;}'
 assert_run 1 'int main(){int a[2][3];int (*p)[3]=a;p++;return p-a;}'
 
+# Pointer subtraction accepts compatible complete object types even when the
+# pointed-to types differ only by top-level qualifiers. On LP64 the result is
+# ptrdiff_t-compatible long, and array designators decay before subtraction.
+assert_run 3 'int main(void){int a[5];int *p=&a[4];const int *q=&a[1];return p-q;}'
+assert_run 2 'int main(void){int a[5];const volatile int *p=&a[4];volatile int *q=&a[2];return p-q;}'
+assert_run 0 'int main(void){int a[3];int *p=&a[2];const int *q=a;return _Generic(p-q,long:0,default:1);}'
+assert_run 3 'int main(void){int a[5];return &a[4]-a-1;}'
+assert_run 2 'struct S{int x;};int main(void){struct S a[4];const struct S *p=&a[3];struct S *q=&a[1];return p-q;}'
+
 # Array designators decay before additive pointer arithmetic determines the
 # expression type. sizeof observes the resulting pointer type without
 # evaluating the arithmetic itself.
@@ -66,5 +75,13 @@ assert_fail 'int main(){int a[2];int *p=a;int *q=a;p=p+q;return 0;}'
 assert_fail 'int main(){int a[2];int *p=a;return 1-p;}'
 assert_fail 'int main(){int a[2];double b[2];return a-b;}'
 assert_fail 'int f(){return 0;} int main(){int (*p)()=f;int (*q)()=f;return p-q;}'
+
+# Subtraction specifically requires compatible complete object types; nested
+# qualification changes are not compatibility-preserving, and incomplete
+# pointed-to object types have no defined element size for a difference.
+assert_fail 'int main(void){int a[2];double b[2];int *p=a;double *q=b;return p-q;}'
+assert_fail 'int main(void){int *a[2];const int *b[2];int **p=a;const int **q=b;return p-q;}'
+assert_fail 'struct S; int main(void){struct S *p=0,*q=0;return p-q;}'
+assert_fail 'int main(void){void *p=0,*q=0;return p-q;}'
 
 echo 'All pointer-arithmetic tests passed!'
