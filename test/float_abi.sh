@@ -53,6 +53,10 @@ double mini_ninth(double a, double b, double c, double d, double e,
 }
 double mini_neg_double(double x) { return -x; }
 float mini_neg_float(float x) { return -x; }
+double mini_nan_double(void) { return 0.0 / 0.0; }
+float mini_nan_float(void) { return 0.0f / 0.0f; }
+double mini_inf_double(void) { return 1.0 / 0.0; }
+float mini_inf_float(void) { return -1.0f / 0.0f; }
 EOF
 "${MINICC:-./minicc}" tmp-float-abi-mini-provider.c > tmp-float-abi-mini-provider.s
 gcc -c -o tmp-float-abi-mini-provider.o tmp-float-abi-mini-provider.s
@@ -64,6 +68,10 @@ double mini_ninth(double, double, double, double, double,
                   double, double, double, double);
 double mini_neg_double(double);
 float mini_neg_float(float);
+double mini_nan_double(void);
+float mini_nan_float(void);
+double mini_inf_double(void);
+float mini_inf_float(void);
 
 int main(void) {
   union { double d; unsigned long long u; } dz;
@@ -86,6 +94,15 @@ int main(void) {
   fz.f = mini_neg_float(0.0f);
   if (fz.u != 0x80000000U)
     return 7;
+
+  if (mini_nan_double() == mini_nan_double())
+    return 8;
+  if (mini_nan_float() == mini_nan_float())
+    return 9;
+  if (!(mini_inf_double() > 1.0e300))
+    return 10;
+  if (!(mini_inf_float() < -1.0e30f))
+    return 11;
   return 0;
 }
 EOF
@@ -101,6 +118,10 @@ double host_ninth(double a, double b, double c, double d, double e,
                   double f, double g, double h, double i) {
   return i;
 }
+double host_nan_double(void) { return 0.0 / 0.0; }
+float host_nan_float(void) { return 0.0f / 0.0f; }
+double host_inf_double(void) { return 1.0 / 0.0; }
+float host_inf_float(void) { return -1.0f / 0.0f; }
 EOF
 gcc -std=c11 -c -o tmp-float-abi-host-provider.o tmp-float-abi-host-provider.c
 
@@ -109,15 +130,29 @@ double host_mix(double, float, double);
 float host_half(float);
 double host_ninth(double, double, double, double, double,
                   double, double, double, double);
+double host_nan_double(void);
+float host_nan_float(void);
+double host_inf_double(void);
+float host_inf_float(void);
 
 int main(void) {
   double (*mixfp)(double, float, double) = host_mix;
+  double (*nandfp)(void) = host_nan_double;
+  float (*nanffp)(void) = host_nan_float;
   if (mixfp(1.5, 2.0f, 4.5) != 8.0)
     return 1;
   if (host_half(7.0f) != 3.5f)
     return 2;
   if (host_ninth(1, 2, 3, 4, 5, 6, 7, 8, 9.5) != 9.5)
     return 3;
+  if (nandfp() == nandfp())
+    return 4;
+  if (nanffp() == nanffp())
+    return 5;
+  if (!(host_inf_double() > 1.0e300))
+    return 6;
+  if (!(host_inf_float() < -1.0e30f))
+    return 7;
   return 0;
 }
 EOF
