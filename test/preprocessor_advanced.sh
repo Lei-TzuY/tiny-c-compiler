@@ -69,6 +69,14 @@ int main() { return CAT(X,2); }'
 assert_pp_adv 12 '#define CAT(a,b) a##b
 int main() { return CAT(1,2); }'
 
+# A ## result must be exactly one valid preprocessing token.  Reject
+# punctuation combinations that cannot form a token instead of feeding the
+# concatenated bytes into later compiler phases as if they were valid input.
+assert_pp_fail '#define CAT(a,b) a##b
+int main(void) { return CAT(+,*); }'
+assert_pp_fail '#define CAT(a,b) a##b
+int main(void) { int x=0; return CAT(x,+); }'
+
 # Stringification produces a string literal.
 assert_pp_adv 104 '#define STR(x) #x
 int main() { char *s=STR(hello); return s[0]; }'
