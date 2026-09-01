@@ -58,6 +58,14 @@ int f(void) {
 int main(void) { return f() == 3 ? 0 : 1; }
 EOF
 
+compile_ok "sizeof pointer-to-VLA remains an integer constant expression" <<'EOF'
+int main(void) {
+  int n = 3;
+  _Static_assert(sizeof(int (*)[n]) == sizeof(void *), "pointer size is constant");
+  return 0;
+}
+EOF
+
 compile_fail "false assertion reports user message" "static assertion failed: layout contract broke" <<'EOF'
 _Static_assert(sizeof(int) == 8, "layout contract broke");
 int main(void) { return 0; }
@@ -72,6 +80,14 @@ EOF
 compile_fail "floating condition is rejected" "requires an integer constant expression" <<'EOF'
 _Static_assert(1.0, "floating condition");
 int main(void) { return 0; }
+EOF
+
+compile_fail "sizeof VLA is not an integer constant expression" "not an integer constant expression" <<'EOF'
+int main(void) {
+  int n = 3;
+  _Static_assert(sizeof(int[n]) > 0, "VLA size is runtime");
+  return 0;
+}
 EOF
 
 compile_fail "string message is required" "requires a string literal message" <<'EOF'
