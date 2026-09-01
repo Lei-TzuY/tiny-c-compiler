@@ -5,7 +5,7 @@ run() {
   expected=$1; src=$2
   printf '%s\n' "$src" > tmp-ld.c
   "$MINICC" tmp-ld.c > tmp-ld.s
-  cc -o tmp-ld tmp-ld.s
+  cc -o tmp-ld tmp-ld.s -lm
   set +e; ./tmp-ld >/dev/null 2>&1; actual=$?; set -e
   if [ "$actual" != "$expected" ]; then echo "FAIL(long double): expected $expected got $actual"; echo "$src"; exit 1; fi
 }
@@ -22,7 +22,6 @@ run 0 'struct S{char c; long double x; char z;}; int main(void){struct S s={1,2.
 run 0 'static long double x=1.0L+0x1p-60L; static struct S{int n; long double x;} s={7,3.25L}; int main(void){if(x==1.0L)return 1; return s.n!=7||s.x!=3.25L;}'
 run 0 '#include <float.h>
 int main(void){if(LDBL_MANT_DIG!=64||LDBL_DIG!=18||DECIMAL_DIG!=21)return 1; if(_Generic(LDBL_EPSILON,long double:1,default:0)!=1)return 2; if(!(1.0L+LDBL_EPSILON>1.0L))return 3; return 0;}'
-echo 'All long double scalar tests passed!'
-
 run 0 '#include <math.h>
-int main(void){long double x=sqrtl(81.0L);if(x!=9.0L)return 1;if(fabsl(-3.5L)!=3.5L)return 2;if(powl(2.0L,5.0L)!=32.0L)return 3;if(!isfinite(x)||isnan(x)||isinf(x))return 4;if(!signbit(copysignl(0.0L,-1.0L)))return 5;if(fpclassify(1.0L)!=FP_NORMAL)return 6;return 0;}'
+int main(void){long double x=sqrtl(81.0L);if(x!=9.0L)return 1;if(fabsl(-3.5L)!=3.5L)return 2;if(powl(2.0L,5.0L)!=32.0L)return 3;if(!isfinite(x)||isnan(x)||isinf(x))return 4;if(!signbit(copysignl(0.0L,-1.0L)))return 5;if(fpclassify(1.0L)!=FP_NORMAL)return 6;if(_Generic(HUGE_VALL,long double:1,default:0)!=1)return 7;return 0;}'
+echo 'All long double scalar/header tests passed!'
