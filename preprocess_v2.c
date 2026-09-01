@@ -1017,6 +1017,61 @@ static IncludeResolution resolve_include_next(const char *header,
 }
 
 static char *get_builtin_header(char *name) {
+    if (!strcmp(name, "errno.h")) {
+        return "int *__errno_location(void);\n"
+               "#define errno (*__errno_location())\n"
+               "#define EDOM 33\n"
+               "#define ERANGE 34\n"
+               "#define EILSEQ 84\n";
+    }
+
+    if (!strcmp(name, "time.h")) {
+        return "typedef long clock_t;\n"
+               "typedef long time_t;\n"
+               "typedef unsigned long size_t;\n"
+               "struct tm { int tm_sec; int tm_min; int tm_hour; int tm_mday; int tm_mon; int tm_year; int tm_wday; int tm_yday; int tm_isdst; long tm_gmtoff; const char *tm_zone; };\n"
+               "struct timespec { time_t tv_sec; long tv_nsec; };\n"
+               "#define CLOCKS_PER_SEC 1000000L\n"
+               "#define TIME_UTC 1\n"
+               "clock_t clock(void);\n"
+               "time_t time(time_t *);\n"
+               "double difftime(time_t,time_t);\n"
+               "time_t mktime(struct tm *);\n"
+               "char *asctime(const struct tm *);\n"
+               "char *ctime(const time_t *);\n"
+               "struct tm *gmtime(const time_t *);\n"
+               "struct tm *localtime(const time_t *);\n"
+               "size_t strftime(char *,size_t,const char *,const struct tm *);\n"
+               "int timespec_get(struct timespec *,int);\n";
+    }
+
+    if (!strcmp(name, "locale.h")) {
+        return "struct lconv { char *decimal_point; char *thousands_sep; char *grouping; char *int_curr_symbol; char *currency_symbol; char *mon_decimal_point; char *mon_thousands_sep; char *mon_grouping; char *positive_sign; char *negative_sign; char int_frac_digits; char frac_digits; char p_cs_precedes; char p_sep_by_space; char n_cs_precedes; char n_sep_by_space; char p_sign_posn; char n_sign_posn; char int_p_cs_precedes; char int_p_sep_by_space; char int_n_cs_precedes; char int_n_sep_by_space; char int_p_sign_posn; char int_n_sign_posn; };\n"
+               "#define LC_CTYPE 0\n"
+               "#define LC_NUMERIC 1\n"
+               "#define LC_TIME 2\n"
+               "#define LC_COLLATE 3\n"
+               "#define LC_MONETARY 4\n"
+               "#define LC_ALL 6\n"
+               "char *setlocale(int,const char *);\n"
+               "struct lconv *localeconv(void);\n";
+    }
+
+    if (!strcmp(name, "signal.h")) {
+        return "typedef int sig_atomic_t;\n"
+               "#define SIG_DFL ((void (*)(int))0)\n"
+               "#define SIG_IGN ((void (*)(int))1)\n"
+               "#define SIG_ERR ((void (*)(int))-1)\n"
+               "#define SIGINT 2\n"
+               "#define SIGILL 4\n"
+               "#define SIGABRT 6\n"
+               "#define SIGFPE 8\n"
+               "#define SIGSEGV 11\n"
+               "#define SIGTERM 15\n"
+               "void (*signal(int,void (*)(int)))(int);\n"
+               "int raise(int);\n";
+    }
+
     if (!strcmp(name, "math.h")) {
         return "#ifndef __MINICC_MATH_H\n"
                "#define __MINICC_MATH_H 1\n"

@@ -133,6 +133,7 @@ test: minicc
 	bash ./test/assert_header.sh
 	bash ./test/ctype_header.sh
 	bash ./test/stdio_header.sh
+	bash ./test/libc_compat_headers.sh
 	bash ./test/noreturn.sh
 	bash ./test/inline_function_specifier.sh
 	bash ./test/sizeof_alignof_size_t.sh

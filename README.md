@@ -34,6 +34,8 @@ The test target builds `minicc`, compiles small C programs with it, links them w
 
 ## Notes
 
+- Built-in libc compatibility headers include `<errno.h>`, `<time.h>`, `<locale.h>`, and `<signal.h>` with Linux/glibc x86-64 ABI-compatible public types, macros, and declarations. `<setjmp.h>` remains deferred until returns-twice/non-local control transfer semantics are modeled safely.
+
 - Built-in `<math.h>` exposes a C99 float/double libm surface, floating classification/comparison macros, and common mathematical constants for Linux x86-64 programs linked with `-lm`. Long-double (`*l`) entry points remain deferred until the x87 scalar/ABI layer is implemented.
 
 The compiler is designed as an educational systems-programming project rather than a packaged commercial product.
