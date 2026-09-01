@@ -18,7 +18,7 @@ jobs:
           ref: fix/ice-dead-runtime-operands
           fetch-depth: 0
       - name: Patch evaluator
-        shell: python
+        shell: python {0}
         run: |
           from pathlib import Path
           p = Path('parse.c')
@@ -49,8 +49,6 @@ static void validate_ice_operands(Node *node) {
     case ND_CAST:
         if (!node->ty || !is_integer(node->ty))
             error("cast does not produce an integer constant expression");
-        // A floating constant is permitted only as the immediate operand of a
-        // cast to integer type (C11 6.6p6).
         if (node->lhs && node->lhs->kind == ND_NUM && node->lhs->ty &&
             is_flonum(node->lhs->ty))
             return;
@@ -84,8 +82,6 @@ static void validate_ice_operands(Node *node) {
         return;
 
     case ND_COMMA:
-        // C11 6.6p3 permits a comma operator when it occurs only inside an
-        // unevaluated subexpression. Its operands still have to be admissible.
         validate_ice_operands(node->lhs);
         validate_ice_operands(node->rhs);
         return;
