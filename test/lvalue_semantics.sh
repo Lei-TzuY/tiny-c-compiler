@@ -74,4 +74,8 @@ assert_fail 'int main(){void *p=0;p+=1;return 0;}'
 assert_fail 'int f(){return 0;}int main(){int (*p)()=f;p-=1;return 0;}'
 assert_fail 'struct S{int x;};int main(){struct S s={1};s+=1;return 0;}'
 
+# Keep the side-effecting lvalue regression in a focused script while making
+# it part of the ordinary lvalue/compound-assignment test path.
+bash ./test/compound_assignment_single_eval.sh
+
 echo 'All lvalue semantic tests passed!'
