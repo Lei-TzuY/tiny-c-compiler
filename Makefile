@@ -124,6 +124,7 @@ test: minicc
 	bash ./test/stdatomic_pointer.sh
 	bash ./test/stdatomic_bool.sh
 	bash ./test/stdatomic_floating.sh
+	bash ./test/stdatomic_floating_contention.sh
 	bash ./test/stdint_header.sh
 	bash ./test/inttypes_header.sh
 	bash ./test/limits_header.sh
