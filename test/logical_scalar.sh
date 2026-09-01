@@ -26,6 +26,27 @@ int main(void) {
 }
 EOF
 
+# NaNs compare unordered with zero, but C scalar truth conversion still treats
+# every NaN as true. Exercise all codegen paths that lower a floating operand
+# to a boolean value so an accidental `setne`-only implementation cannot turn
+# unordered values into false.
+compile_and_run <<'EOF'
+#include <math.h>
+int main(void) {
+  float nf = NAN;
+  double nd = (double)NAN;
+  _Bool bf = nf;
+  _Bool bd = nd;
+  if (bf != 1 || bd != 1) return 1;
+  if (!nf || !nd) return 2;
+  if (!(nf && 1) || !(nd && 1)) return 3;
+  if (!(0 || nf) || !(0 || nd)) return 4;
+  if ((nf ? 11 : 22) != 11) return 5;
+  if ((nd ? 33 : 44) != 33) return 6;
+  return 0;
+}
+EOF
+
 # Logical operators require scalar operands. Records/unions must be rejected
 # instead of reaching code generation with an aggregate value.
 for src in \
