@@ -52,16 +52,25 @@ assert_run 0 '#include <float.h>
 #endif
 int main(void){return !(DECIMAL_DIG==17&&FLT_DECIMAL_DIG==9&&DBL_DECIMAL_DIG==17);}'
 
-# The target is deliberately a float/double subset. Do not expose LDBL_*
-# macros until 80-bit storage and SysV x87 lowering exist.
+# x86-64 SysV long double uses 80-bit extended precision in 16-byte storage.
 assert_run 0 '#include <float.h>
-#ifdef LDBL_MANT_DIG
-#error long double must remain firewalled
+#if LDBL_MANT_DIG != 64 || LDBL_DIG != 18
+#error bad long-double precision
 #endif
-#ifdef LDBL_MAX
-#error long double constants must remain firewalled
+#if LDBL_MIN_EXP != -16381 || LDBL_MAX_EXP != 16384
+#error bad long-double exponent range
 #endif
-int main(void){return 0;}'
+#if LDBL_DECIMAL_DIG != 21 || LDBL_HAS_SUBNORM != 1
+#error bad long-double model
+#endif
+int main(void){
+  if(_Generic(LDBL_MAX,long double:1,default:0)!=1)return 1;
+  if(_Generic(LDBL_EPSILON,long double:1,default:0)!=1)return 2;
+  if(_Generic(LDBL_MIN,long double:1,default:0)!=1)return 3;
+  if(_Generic(LDBL_TRUE_MIN,long double:1,default:0)!=1)return 4;
+  if(!(1.0L+LDBL_EPSILON>1.0L))return 5;
+  return 0;
+}'
 
 # Macro constants must retain the correct language types.
 assert_run 0 '#include <float.h>
