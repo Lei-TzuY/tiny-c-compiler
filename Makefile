@@ -122,6 +122,7 @@ test: minicc
 	bash ./test/stdatomic_header.sh
 	bash ./test/stdatomic_narrow.sh
 	bash ./test/stdatomic_pointer.sh
+	bash ./test/stdatomic_bool.sh
 	bash ./test/stdint_header.sh
 	bash ./test/inttypes_header.sh
 	bash ./test/limits_header.sh
