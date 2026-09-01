@@ -851,18 +851,44 @@ static void cleanup_temp_paths(void) {
     }
 }
 
+static char *remember_temp_path(const char *path) {
+    TempPath *tmp = calloc(1, sizeof(TempPath));
+    tmp->path = strdup(path);
+    tmp->next = temp_paths;
+    temp_paths = tmp;
+    return tmp->path;
+}
+
 static char *new_temp_path(void) {
     char tmpl[] = "/tmp/minicc-XXXXXX";
     int fd = mkstemp(tmpl);
     if (fd < 0)
         error("failed to create temporary file");
     close(fd);
+    return remember_temp_path(tmpl);
+}
 
-    TempPath *tmp = calloc(1, sizeof(TempPath));
-    tmp->path = strdup(tmpl);
-    tmp->next = temp_paths;
-    temp_paths = tmp;
-    return tmp->path;
+static char *new_output_temp_path(const char *output) {
+    size_t size = strlen(output) + sizeof(".tmp.XXXXXX");
+    char *tmpl = calloc(1, size);
+    snprintf(tmpl, size, "%s.tmp.XXXXXX", output);
+
+    int fd = mkstemp(tmpl);
+    if (fd < 0)
+        error("failed to create temporary output next to %s", output);
+
+    mode_t mask = umask(0);
+    umask(mask);
+    if (fchmod(fd, 0666 & ~mask) < 0) {
+        close(fd);
+        unlink(tmpl);
+        error("failed to set temporary output permissions for %s", output);
+    }
+    close(fd);
+
+    char *path = remember_temp_path(tmpl);
+    free(tmpl);
+    return path;
 }
 
 static const char *host_cc(void) {
@@ -935,9 +961,12 @@ static int run_frontend(DriverOptions *opts) {
 }
 
 static void assemble_file(const char *assembly, const char *object) {
+    char *temporary = new_output_temp_path(object);
     char *argv[] = {(char *)host_cc(), "-x", "assembler", "-c",
-                    (char *)assembly, "-o", (char *)object, NULL};
+                    (char *)assembly, "-o", temporary, NULL};
     run_command(argv);
+    if (rename(temporary, object) < 0)
+        error("failed to replace object output %s", object);
 }
 
 static void compile_c_to_object(const DriverOptions *opts, const char *input,
