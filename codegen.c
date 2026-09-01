@@ -553,7 +553,7 @@ static void gen_inc_dec(Node *node, bool increment, bool return_old) {
         if (increment)
             printf("  faddp %%st, %%st(1)\n");
         else
-            printf("  fsubp %%st, %%st(1)\n");
+            printf("  fsubrp %%st, %%st(1)\n");
         int addr_off = return_old ? 16 : 0;
         printf("  mov %d(%%rsp), %%rdi\n", addr_off);
         printf("  fld %%st(0)\n");
@@ -627,8 +627,8 @@ static void gen_compound_assign(Node *node) {
         printf("  fxch %%st(1)\n"); // ST0=rhs, ST1=old lhs
         if (node->kind == ND_ADD_EQ) printf("  faddp %%st, %%st(1)\n");
         else if (node->kind == ND_MUL_EQ) printf("  fmulp %%st, %%st(1)\n");
-        else if (node->kind == ND_SUB_EQ) printf("  fsubp %%st, %%st(1)\n");
-        else if (node->kind == ND_DIV_EQ) printf("  fdivp %%st, %%st(1)\n");
+        else if (node->kind == ND_SUB_EQ) printf("  fsubrp %%st, %%st(1)\n");
+        else if (node->kind == ND_DIV_EQ) printf("  fdivrp %%st, %%st(1)\n");
         else error("invalid long double compound assignment");
         store(node->ty);
         return;
@@ -1426,9 +1426,9 @@ static void gen_expr(Node *node) {
             return;
         }
         if (node->kind == ND_ADD) printf("  faddp %%st, %%st(1)\n");
-        else if (node->kind == ND_SUB) printf("  fsubp %%st, %%st(1)\n");
+        else if (node->kind == ND_SUB) printf("  fsubrp %%st, %%st(1)\n");
         else if (node->kind == ND_MUL) printf("  fmulp %%st, %%st(1)\n");
-        else if (node->kind == ND_DIV) printf("  fdivp %%st, %%st(1)\n");
+        else if (node->kind == ND_DIV) printf("  fdivrp %%st, %%st(1)\n");
         else error("invalid long double arithmetic");
         return;
     }
