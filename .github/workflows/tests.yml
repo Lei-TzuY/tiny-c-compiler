@@ -7,10 +7,37 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: tests-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
+    name: Full suite (${{ matrix.cc }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        cc: [gcc, clang]
+    env:
+      CC: ${{ matrix.cc }}
     steps:
       - uses: actions/checkout@v4
-      - name: Test
+      - name: Show host compiler
+        run: "$CC --version"
+      - name: Full test suite
+        run: make test
+
+  sanitizer-audit:
+    name: ASan + UBSan audit
+    runs-on: ubuntu-latest
+    env:
+      CC: gcc
+      CFLAGS: -std=c11 -g -O1 -fno-common -fno-omit-frame-pointer -fsanitize=address,undefined
+      LDFLAGS: -fsanitize=address,undefined
+      ASAN_OPTIONS: detect_leaks=0
+      UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and run full suite under sanitizers
         run: make test
