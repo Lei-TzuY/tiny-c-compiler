@@ -203,4 +203,14 @@ EOF
 expect_fail "$MINICC" -c bad.c -o keep.o
 cmp keep.expected keep.o
 
+# An assembler error must likewise leave an existing object output untouched.
+printf 'sentinel-assembler-object\n' > keep-asm.o
+cp keep-asm.o keep-asm.expected
+cat > bad.s <<'EOF'
+  .text
+  definitely_not_an_instruction %rax
+EOF
+expect_fail "$MINICC" -c bad.s -o keep-asm.o
+cmp keep-asm.expected keep-asm.o
+
 echo 'driver multi-file tests passed'
