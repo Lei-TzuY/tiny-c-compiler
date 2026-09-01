@@ -33,6 +33,8 @@ The test target builds `minicc`, compiles small C programs with it, links them w
 
 ## Notes
 
+- Built-in `<math.h>` exposes a C99 float/double libm surface, floating classification/comparison macros, and common mathematical constants for Linux x86-64 programs linked with `-lm`. Long-double (`*l`) entry points remain deferred until the x87 scalar/ABI layer is implemented.
+
 The compiler is designed as an educational systems-programming project rather than a packaged commercial product.
 
 - Function calls share prototype-aware argument coercion and C default argument promotions for variadic and unprototyped calls.
