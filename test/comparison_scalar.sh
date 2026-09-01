@@ -37,6 +37,46 @@ int main(void) {
 }
 EOF
 
+# IEEE NaNs are unordered. C equality/relational operators must therefore make
+# ==, <, <=, >, and >= false while != remains true, regardless of which operand
+# carries the NaN. This specifically exercises the parity-flag handling required
+# after x86 ucomiss/ucomisd rather than only ordinary ordered comparisons.
+compile_and_run <<'EOF'
+int main(void) {
+  volatile float zf = 0.0f;
+  volatile double zd = 0.0;
+  float nf = zf / zf;
+  double nd = zd / zd;
+
+  if ((nf == 1.0f) != 0) return 1;
+  if ((nf != 1.0f) != 1) return 2;
+  if ((nf < 1.0f) != 0) return 3;
+  if ((nf <= 1.0f) != 0) return 4;
+  if ((nf > 1.0f) != 0) return 5;
+  if ((nf >= 1.0f) != 0) return 6;
+  if ((1.0f == nf) != 0) return 7;
+  if ((1.0f != nf) != 1) return 8;
+  if ((1.0f < nf) != 0) return 9;
+  if ((1.0f <= nf) != 0) return 10;
+  if ((1.0f > nf) != 0) return 11;
+  if ((1.0f >= nf) != 0) return 12;
+
+  if ((nd == 1.0) != 0) return 13;
+  if ((nd != 1.0) != 1) return 14;
+  if ((nd < 1.0) != 0) return 15;
+  if ((nd <= 1.0) != 0) return 16;
+  if ((nd > 1.0) != 0) return 17;
+  if ((nd >= 1.0) != 0) return 18;
+  if ((1.0 == nd) != 0) return 19;
+  if ((1.0 != nd) != 1) return 20;
+  if ((1.0 < nd) != 0) return 21;
+  if ((1.0 <= nd) != 0) return 22;
+  if ((1.0 > nd) != 0) return 23;
+  if ((1.0 >= nd) != 0) return 24;
+  return 0;
+}
+EOF
+
 # Aggregate values are not scalar and therefore cannot participate directly in
 # equality or relational comparisons. Relational operators additionally require
 # both operands to be arithmetic, or both to be pointers to object types.
