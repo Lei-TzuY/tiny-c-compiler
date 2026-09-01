@@ -1,0 +1,36 @@
+name: Integrate long double on current main
+
+on:
+  push:
+    paths:
+      - .github/workflows/integrate-long-double-current.yml
+
+permissions:
+  contents: write
+
+jobs:
+  integrate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/long-double-x87-current
+          fetch-depth: 0
+      - name: Import proven migration logic
+        run: |
+          git fetch origin feat/long-double-x87
+          mkdir -p tools
+          git show origin/feat/long-double-x87:tools/migrate_long_double.py > tools/migrate_long_double.py
+          git show origin/feat/long-double-x87:tools/run_long_double_migration.py > tools/run_long_double_migration.py
+          python3 tools/run_long_double_migration.py
+      - name: Import long double regression oracles
+        run: |
+          git show origin/feat/long-double-x87:test/long_double.sh > test/long_double.sh
+          git show origin/feat/long-double-x87:test/long_double_abi.sh > test/long_double_abi.sh
+      - name: Commit integration result
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add minicc.h type.c tokenize.c parse.c codegen.c preprocess_v2.c Makefile README.md test/long_double.sh test/long_double_abi.sh tools/migrate_long_double.py tools/run_long_double_migration.py
+          git commit -m 'Integrate x87 long double on current main'
+          git push origin HEAD:feat/long-double-x87-current
