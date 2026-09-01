@@ -109,5 +109,8 @@ assert_reject 'int main(){int a[0xffffffffffffffffULL]; return 0;}'
 assert_reject 'int x; enum { A = 0 && x }; int main(void){return A;}'
 assert_reject 'int x; enum { A = 1 || x }; int main(void){return A;}'
 assert_reject 'int x; enum { A = 1 ? 7 : x }; int main(void){return A;}'
+# Operators that C11 explicitly permits only inside an unevaluated subexpression
+# remain legal there; validation must not accidentally evaluate that branch.
+assert_run 0 'int main(){enum { A = 0 && (1, 2) }; return A;}'
 
 echo 'All typed integer constant-expression tests passed!'
