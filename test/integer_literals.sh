@@ -39,6 +39,19 @@ assert_run 8 'int main(){return sizeof(0x100000000);}'
 assert_run 1 'int main(){return 0xffffffff>0;}'
 assert_run 1 'int main(){return 0xffffffffffffffff>0;}'
 
+# Lock the actual C11 candidate type, not only its width. On LP64, decimal
+# constants move from int to long, while hexadecimal constants may select
+# unsigned int before long. _Generic catches signedness/type regressions that
+# sizeof alone cannot distinguish.
+assert_run 1 'int main(){return _Generic(2147483647,int:1,default:0);}'
+assert_run 1 'int main(){return _Generic(2147483648,long:1,default:0);}'
+assert_run 1 'int main(){return _Generic(4294967295,long:1,default:0);}'
+assert_run 1 'int main(){return _Generic(0x7fffffff,int:1,default:0);}'
+assert_run 1 'int main(){return _Generic(0x80000000,unsigned int:1,default:0);}'
+assert_run 1 'int main(){return _Generic(0xffffffff,unsigned int:1,default:0);}'
+assert_run 1 'int main(){return _Generic(0x100000000,long:1,default:0);}'
+assert_run 1 'int main(){return _Generic(0xffffffffffffffff,unsigned long:1,default:0);}'
+
 # U/L/UL/LU/LL/ULL/LLU suffixes are consumed case-insensitively and typed.
 assert_run 4 'int main(){return sizeof(2147483648U);}'
 assert_run 8 'int main(){return sizeof(4294967296U);}'
