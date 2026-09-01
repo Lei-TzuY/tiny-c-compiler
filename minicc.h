@@ -42,7 +42,7 @@ struct Token {
     TokenKind kind; // Token kind
     Token *next;    // Next token
     int64_t val;    // If kind is TK_NUM (integer), its value
-    double fval;    // If kind is TK_NUM (floating point), its value
+    long double fval; // If kind is TK_NUM (floating point), its value
     bool is_float;  // True if token is a floating point constant
     char *loc;      // Token location
     int len;        // Token length
@@ -76,6 +76,7 @@ typedef enum {
     TY_FUNC,
     TY_FLOAT,
     TY_DOUBLE,
+    TY_LDOUBLE,
 } TypeKind;
 
 struct Type {
@@ -142,6 +143,7 @@ extern Type *ty_uchar;
 extern Type *ty_ushort;
 extern Type *ty_float;
 extern Type *ty_double;
+extern Type *ty_ldouble;
 
 bool is_integer(Type *ty);
 bool is_flonum(Type *ty);
@@ -261,7 +263,7 @@ struct Node {
     Obj *ret_buffer; // Hidden local materialization for by-value record calls
 
     int64_t val;   // Used if kind == ND_NUM (integer)
-    double fval;   // Used if kind == ND_NUM (float)
+    long double fval; // Used if kind == ND_NUM (floating)
 
     // goto / label
     char *label_name;    // goto target or label name (source)
@@ -296,7 +298,7 @@ struct Obj {
     char *init_data;
     bool is_string_literal; // compiler-generated literal storage belongs in .rodata
     int64_t init_val;    // for initialized global scalars
-    double finit_val;    // for initialized double/float global scalars
+    long double finit_val; // initialized floating scalar
     bool has_init_val;
     char *init_reloc_label;   // static address constant relocation target
     int64_t init_reloc_addend; // byte addend applied to relocation target

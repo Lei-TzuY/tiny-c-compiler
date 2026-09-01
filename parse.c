@@ -1904,8 +1904,6 @@ static void validate_type_specifier_set(TypeSpecState *state,
         if (state->n_bool || state->n_float || state->n_char || state->n_void ||
             state->n_short || state->n_int || has_sign || state->n_long > 1)
             invalid_type_specifier_set(state);
-        if (state->n_long == 1)
-            error_at(state->first->loc, "long double is not supported by this target");
         return;
     }
 
@@ -2177,6 +2175,8 @@ static Type *declspec_impl(Token **rest, Token *tok, DeclAttrs *attrs) {
     if ((saw_signed || saw_unsigned) && saw_non_signable_type)
         error_at(sign_spec->loc, "signed/unsigned type specifier requires an integer base type");
     validate_type_specifier_set(&specs, saw_signed, saw_unsigned, tok);
+    if (specs.n_double == 1 && specs.n_long == 1)
+        ty = ty_ldouble;
     if (is_restrict && !is_restrict_qualifiable_type(ty))
         error_at(restrict_tok->loc,
                  "restrict qualifier requires a pointer to object or incomplete type");
@@ -2603,12 +2603,12 @@ typedef struct {
     Type *ty;
     bool is_fp;
     int64_t ival;
-    double fval;
+    long double fval;
 } ConstNumber;
 
 static ConstNumber eval_const_number(Node *node);
 
-static double const_number_as_double(ConstNumber v) {
+static long double const_number_as_floating(ConstNumber v) {
     if (v.is_fp)
         return v.fval;
 
@@ -2617,8 +2617,8 @@ static double const_number_as_double(ConstNumber v) {
 
     int64_t val = cast_const_integer(v.ival, v.ty);
     if (v.ty->is_unsigned)
-        return (double)(uint64_t)val;
-    return (double)val;
+        return (long double)(uint64_t)val;
+    return (long double)val;
 }
 
 static bool const_number_truth(ConstNumber v) {
@@ -2633,9 +2633,14 @@ static ConstNumber const_number_cast(ConstNumber v, Type *ty) {
 
     ConstNumber out = {.ty = ty};
     if (is_flonum(ty)) {
-        double x = const_number_as_double(v);
+        long double x = const_number_as_floating(v);
         out.is_fp = true;
-        out.fval = ty->kind == TY_FLOAT ? (double)(float)x : x;
+        if (ty->kind == TY_FLOAT)
+            out.fval = (long double)(float)x;
+        else if (ty->kind == TY_DOUBLE)
+            out.fval = (long double)(double)x;
+        else
+            out.fval = x;
         return out;
     }
 
@@ -2650,15 +2655,15 @@ static ConstNumber const_number_cast(ConstNumber v, Type *ty) {
         return out;
     }
 
-    double x = v.fval;
+    long double x = v.fval;
     if (ty->is_unsigned) {
-        if (!(x >= 0.0) || x >= 18446744073709551616.0)
+        if (!(x >= 0.0) || x >= 18446744073709551616.0L)
             error("floating-to-unsigned conversion is out of range in constant expression");
         out.ival = cast_const_integer((int64_t)(uint64_t)x, ty);
         return out;
     }
 
-    if (x < (double)INT64_MIN || x >= 9223372036854775808.0)
+    if (x < (long double)INT64_MIN || x >= 9223372036854775808.0L)
         error("floating-to-integer conversion is out of range in constant expression");
     out.ival = cast_const_integer((int64_t)x, ty);
     return out;
@@ -2683,8 +2688,8 @@ static ConstNumber eval_const_number(Node *node) {
 
             ConstNumber lhs = eval_const_number(node->lhs);
             ConstNumber rhs = eval_const_number(node->rhs);
-            double a = const_number_as_double(lhs);
-            double b = const_number_as_double(rhs);
+            double a = const_number_as_floating(lhs);
+            double b = const_number_as_floating(rhs);
             bool r = node->kind == ND_EQ ? a == b
                    : node->kind == ND_NE ? a != b
                    : node->kind == ND_LT ? a < b
@@ -2728,25 +2733,31 @@ static ConstNumber eval_const_number(Node *node) {
     case ND_NUM:
         return (ConstNumber){.ty = node->ty, .is_fp = true,
                              .fval = node->ty->kind == TY_FLOAT
-                                         ? (double)(float)node->fval
-                                         : node->fval};
+                                         ? (long double)(float)node->fval
+                                         : node->ty->kind == TY_DOUBLE
+                                               ? (long double)(double)node->fval
+                                               : node->fval};
     case ND_NEG: {
         ConstNumber v = const_number_cast(eval_const_number(node->lhs), node->ty);
-        v.fval = node->ty->kind == TY_FLOAT ? (double)(float)-v.fval : -v.fval;
+        v.fval = node->ty->kind == TY_FLOAT ? (long double)(float)-v.fval
+                 : node->ty->kind == TY_DOUBLE ? (long double)(double)-v.fval
+                 : -v.fval;
         return v;
     }
     case ND_ADD:
     case ND_SUB:
     case ND_MUL:
     case ND_DIV: {
-        double a = const_number_as_double(eval_const_number(node->lhs));
-        double b = const_number_as_double(eval_const_number(node->rhs));
-        double r = node->kind == ND_ADD ? a + b
+        long double a = const_number_as_floating(eval_const_number(node->lhs));
+        long double b = const_number_as_floating(eval_const_number(node->rhs));
+        long double r = node->kind == ND_ADD ? a + b
                    : node->kind == ND_SUB ? a - b
                    : node->kind == ND_MUL ? a * b
                                           : a / b;
         if (node->ty->kind == TY_FLOAT)
-            r = (double)(float)r;
+            r = (long double)(float)r;
+        else if (node->ty->kind == TY_DOUBLE)
+            r = (long double)(double)r;
         return (ConstNumber){.ty = node->ty, .is_fp = true, .fval = r};
     }
     case ND_TERNARY: {
@@ -2762,13 +2773,13 @@ static ConstNumber eval_const_number(Node *node) {
     }
 }
 
-static double parse_const_double(Token **rest, Token *tok) {
+static long double parse_const_floating(Token **rest, Token *tok, Type *target) {
     Node *node = assign(&tok, tok);
     add_type(node);
     if (!is_numeric(node->ty))
         error("static floating initializer requires an arithmetic constant expression");
 
-    ConstNumber value = const_number_cast(eval_const_number(node), ty_double);
+    ConstNumber value = const_number_cast(eval_const_number(node), target);
     *rest = tok;
     return value.fval;
 }
@@ -2904,7 +2915,7 @@ static void parse_static_pointer_initializer(Obj *var, Token **rest, Token *tok,
 static void parse_static_scalar_initializer(Obj *var, Token **rest, Token *tok,
                                             Type *ty) {
     if (is_flonum(ty)) {
-        var->finit_val = parse_const_double(rest, tok);
+        var->finit_val = parse_const_floating(rest, tok, ty);
         var->has_init_val = true;
         return;
     }
@@ -3366,12 +3377,17 @@ static void parse_static_image_scalar(Obj *var, Token **rest, Token *tok,
     }
 
     if (is_flonum(ty)) {
-        double val = parse_const_double(rest, tok);
+        long double val = parse_const_floating(rest, tok, ty);
         if (ty->kind == TY_FLOAT) {
             float f = (float)val;
             memcpy(var->init_image + offset, &f, sizeof(f));
+        } else if (ty->kind == TY_DOUBLE) {
+            double d = (double)val;
+            memcpy(var->init_image + offset, &d, sizeof(d));
         } else {
-            memcpy(var->init_image + offset, &val, sizeof(val));
+            unsigned char raw[16] = {0};
+            memcpy(raw, &val, sizeof(val));
+            memcpy(var->init_image + offset, raw, 16);
         }
         return;
     }
@@ -5738,8 +5754,9 @@ static Node *primary(Token **rest, Token *tok) {
         // and are materialized into an anonymous local result object.
         bool gp = ty->kind == TY_PTR || (is_integer(ty) && ty->size >= 4);
         bool fp = ty->kind == TY_DOUBLE;
+        bool ld = ty->kind == TY_LDOUBLE;
         bool record = ty->kind == TY_STRUCT && supported_record_abi(ty);
-        if (!gp && !fp && !record)
+        if (!gp && !fp && !ld && !record)
             error_at(builtin->loc, "unsupported or unpromoted type in va_arg");
 
         Node *node = new_unary(ND_VA_ARG, ap);

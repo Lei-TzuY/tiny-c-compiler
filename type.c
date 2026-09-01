@@ -15,8 +15,9 @@ Type *ty_ullong = &(Type){TY_LLONG,  8, 8, true};
 Type *ty_uchar  = &(Type){TY_CHAR,   1, 1, true};
 Type *ty_ushort = &(Type){TY_SHORT,  2, 2, true};
 
-Type *ty_float  = &(Type){TY_FLOAT,  4, 4, false};
-Type *ty_double = &(Type){TY_DOUBLE, 8, 8, false};
+Type *ty_float   = &(Type){TY_FLOAT,   4,  4, false};
+Type *ty_double  = &(Type){TY_DOUBLE,  8,  8, false};
+Type *ty_ldouble = &(Type){TY_LDOUBLE, 16, 16, false};
 
 bool is_integer(Type *ty) {
     return ty->kind == TY_INT || ty->kind == TY_LONG ||
@@ -25,7 +26,8 @@ bool is_integer(Type *ty) {
 }
 
 bool is_flonum(Type *ty) {
-    return ty->kind == TY_FLOAT || ty->kind == TY_DOUBLE;
+    return ty->kind == TY_FLOAT || ty->kind == TY_DOUBLE ||
+           ty->kind == TY_LDOUBLE;
 }
 
 bool is_numeric(Type *ty) {
@@ -122,6 +124,12 @@ static bool classify_sysv_type(Type *ty, int offset, SysVAbiClass classes[2]) {
         return true;
     }
 
+    // SysV x87/X87UP aggregate classes are post-processed to MEMORY.
+    // Keep the small-record INTEGER/SSE classifier deliberately free
+    // of long-double values; sysv_record_is_memory() handles them.
+    if (ty->kind == TY_LDOUBLE)
+        return false;
+
     SysVAbiClass cls;
     if (is_integer(ty) || ty->kind == TY_PTR)
         cls = SYSV_ABI_INTEGER;
@@ -156,8 +164,24 @@ int sysv_classify_record(Type *ty, SysVAbiClass classes[2]) {
     return slots;
 }
 
+static bool type_contains_long_double(Type *ty) {
+    if (!ty)
+        return false;
+    if (ty->kind == TY_LDOUBLE)
+        return true;
+    if (ty->kind == TY_ARRAY)
+        return type_contains_long_double(ty->base);
+    if (ty->kind == TY_STRUCT) {
+        for (Member *m = ty->members; m; m = m->next)
+            if (!m->is_bitfield && type_contains_long_double(m->ty))
+                return true;
+    }
+    return false;
+}
+
 bool sysv_record_is_memory(Type *ty) {
-    return ty && ty->kind == TY_STRUCT && !ty->is_incomplete && ty->size > 16;
+    return ty && ty->kind == TY_STRUCT && !ty->is_incomplete &&
+           (ty->size > 16 || type_contains_long_double(ty));
 }
 
 Type *qualify_type(Type *ty, bool is_const, bool is_volatile, bool is_restrict) {
@@ -266,6 +290,8 @@ Type *get_common_type(Type *ty1, Type *ty2) {
     if (ty1->base)
         return pointer_to(ty1->base);
 
+    if (ty1->kind == TY_LDOUBLE || ty2->kind == TY_LDOUBLE)
+        return ty_ldouble;
     if (ty1->kind == TY_DOUBLE || ty2->kind == TY_DOUBLE)
         return ty_double;
     if (ty1->kind == TY_FLOAT || ty2->kind == TY_FLOAT)
@@ -387,6 +413,7 @@ static bool equality_type_compatible(Type *a, Type *b, bool ignore_top_qual) {
     case TY_VOID:
     case TY_FLOAT:
     case TY_DOUBLE:
+    case TY_LDOUBLE:
         return true;
     case TY_PTR:
         return equality_type_compatible(a->base, b->base, false);
