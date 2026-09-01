@@ -243,6 +243,19 @@ static void mark_once_source(const char *source_name) {
     once_files = file;
 }
 
+static void clear_macro_table(void) {
+    while (macros) {
+        Macro *next = macros->next;
+        free(macros->name);
+        for (int i = 0; i < macros->num_params; i++)
+            free(macros->params[i]);
+        free(macros->params);
+        free(macros->body);
+        free(macros);
+        macros = next;
+    }
+}
+
 static void clear_once_files(void) {
     while (once_files) {
         OnceFile *next = once_files->next;
@@ -2908,6 +2921,7 @@ static char *preprocess_v2_source_impl(char *input, const char *source_name,
     current_pp_source_origin = source_origin;
     bool outermost = preprocess_depth++ == 0;
     if (outermost) {
+        clear_macro_table();
         clear_once_files();
         clear_dependencies();
         add_macro(strdup("__STDC__"), true, false, NULL, 0, strdup("1"));

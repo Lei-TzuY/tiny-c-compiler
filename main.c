@@ -1,15 +1,30 @@
 #include "minicc.h"
 #include "preprocess_v2.h"
 #include <sys/stat.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <errno.h>
 
 void validate_program(Program *prog);
 
 typedef enum {
     DRIVER_COMPILE_ASSEMBLY,
+    DRIVER_COMPILE_OBJECT,
+    DRIVER_LINK,
     DRIVER_PREPROCESS_ONLY,
     DRIVER_DEPENDENCIES_ONLY,
     DRIVER_SYNTAX_ONLY,
 } DriverMode;
+
+typedef enum {
+    INPUT_C,
+    INPUT_ASSEMBLY,
+    INPUT_OBJECT,
+    INPUT_ARCHIVE,
+    INPUT_SHARED,
+    INPUT_UNKNOWN,
+} InputKind;
 
 typedef enum {
     MACRO_DUMP_NONE,
@@ -27,8 +42,15 @@ struct DependencyTarget {
 
 typedef struct {
     DriverMode mode;
-    char *input_path;
+    char **input_paths;
+    int input_count;
+    int input_cap;
+    char *input_path; // active translation unit / first input for legacy single-input paths
     char *output_path;
+    char *dependency_artifact_path;
+    char **linker_args;
+    int linker_arg_count;
+    int linker_arg_cap;
     char *dependency_output_path;
     DependencyTarget *dependency_targets;
     DependencyTarget *dependency_targets_tail;
@@ -42,14 +64,17 @@ typedef struct {
 
 static void print_usage(FILE *out, const char *prog) {
     fprintf(out,
-            "Usage: %s [options] <input>\n"
+            "Usage: %s [options] <input>...\n"
             "\n"
-            "Compile one C source file to x86-64 assembly.\n"
-            "Use '-' as the input or output path for standard input/output.\n"
+            "Compile C source files to x86-64 assembly, objects, or a linked ELF executable.\n"
+            "The legacy single-input default remains assembly on standard output.\n"
+            "Use '-' as a C input or textual output path for standard input/output.\n"
             "\n"
             "Options:\n"
             "  -E               Preprocess only\n"
             "  -S               Compile to assembly (default)\n"
+            "  -c               Compile/assemble to object file(s)\n"
+            "  --link           Compile/assemble/link inputs to an executable\n"
             "  -fsyntax-only    Check preprocessing, syntax and semantics only\n"
             "  -M               Emit all Make dependencies only\n"
             "  -MM              Emit non-system Make dependencies only\n"
@@ -78,6 +103,9 @@ static void print_usage(FILE *out, const char *prog) {
             "  -dN              Emit macro names with -E output (requires -E)\n"
             "  -o <file>        Write output to <file>\n"
             "  -o<file>         Same as '-o <file>'\n"
+            "  -L<dir>          Pass a library search directory in --link mode\n"
+            "  -l<name>         Link a library in --link mode\n"
+            "  -Wl,<opts>       Pass comma-separated options to the host linker driver\n"
             "  -h, --help       Show this help and exit\n"
             "  --version        Show version information and exit\n"
             "  --               End option processing\n",
@@ -115,11 +143,56 @@ static MacroDumpMode parse_macro_dump_mode(const char *mode, const char *prog) {
     error("%s: supported macro dump modes are M, D and N", prog);
 }
 
+
+static void add_input_path(DriverOptions *opts, const char *path) {
+    if (opts->input_count == opts->input_cap) {
+        opts->input_cap = opts->input_cap ? opts->input_cap * 2 : 4;
+        opts->input_paths = realloc(opts->input_paths,
+                                    sizeof(char *) * (size_t)opts->input_cap);
+        if (!opts->input_paths)
+            error("out of memory while recording input files");
+    }
+    opts->input_paths[opts->input_count++] = strdup(path);
+}
+
+static void add_linker_arg(DriverOptions *opts, const char *arg) {
+    if (opts->linker_arg_count == opts->linker_arg_cap) {
+        opts->linker_arg_cap = opts->linker_arg_cap ? opts->linker_arg_cap * 2 : 4;
+        opts->linker_args = realloc(opts->linker_args,
+                                    sizeof(char *) * (size_t)opts->linker_arg_cap);
+        if (!opts->linker_args)
+            error("out of memory while recording linker arguments");
+    }
+    opts->linker_args[opts->linker_arg_count++] = strdup(arg);
+}
+
+static bool path_has_suffix(const char *path, const char *suffix) {
+    size_t n = strlen(path);
+    size_t m = strlen(suffix);
+    return n >= m && !strcmp(path + n - m, suffix);
+}
+
+static InputKind classify_input(const char *path) {
+    if (!strcmp(path, "-") || path_has_suffix(path, ".c"))
+        return INPUT_C;
+    if (path_has_suffix(path, ".s"))
+        return INPUT_ASSEMBLY;
+    if (path_has_suffix(path, ".o"))
+        return INPUT_OBJECT;
+    if (path_has_suffix(path, ".a"))
+        return INPUT_ARCHIVE;
+    if (path_has_suffix(path, ".so"))
+        return INPUT_SHARED;
+    return INPUT_UNKNOWN;
+}
+
 static DriverOptions parse_options(int argc, char **argv) {
     DriverOptions opts = {.mode = DRIVER_COMPILE_ASSEMBLY};
     bool end_options = false;
     bool saw_E = false;
     bool saw_S = false;
+    bool saw_c = false;
+    bool saw_link = false;
     bool saw_M = false;
     bool saw_MM = false;
     bool saw_MD = false;
@@ -175,6 +248,18 @@ static DriverOptions parse_options(int argc, char **argv) {
         if (!end_options && !strcmp(arg, "-S")) {
             saw_S = true;
             opts.mode = DRIVER_COMPILE_ASSEMBLY;
+            continue;
+        }
+
+        if (!end_options && !strcmp(arg, "-c")) {
+            saw_c = true;
+            opts.mode = DRIVER_COMPILE_OBJECT;
+            continue;
+        }
+
+        if (!end_options && !strcmp(arg, "--link")) {
+            saw_link = true;
+            opts.mode = DRIVER_LINK;
             continue;
         }
 
@@ -439,13 +524,22 @@ static DriverOptions parse_options(int argc, char **argv) {
             continue;
         }
 
+        if (!end_options &&
+            ((!strncmp(arg, "-L", 2) && arg[2]) ||
+             (!strncmp(arg, "-l", 2) && arg[2]) ||
+             !strncmp(arg, "-Wl,", 4))) {
+            add_linker_arg(&opts, arg);
+            continue;
+        }
+
         if (!end_options && arg[0] == '-' && strcmp(arg, "-"))
             error("%s: unknown option: %s", argv[0], arg);
 
-        if (opts.input_path)
-            error("%s: multiple input files are not supported", argv[0]);
-        opts.input_path = arg;
+        add_input_path(&opts, arg);
     }
+
+    if (opts.input_count)
+        opts.input_path = opts.input_paths[0];
 
     int dependency_mode_count = (saw_M ? 1 : 0) + (saw_MM ? 1 : 0) +
                                 (saw_MD ? 1 : 0) + (saw_MMD ? 1 : 0);
@@ -453,20 +547,26 @@ static DriverOptions parse_options(int argc, char **argv) {
     bool dependency_only = saw_M || saw_MM;
     bool dependency_side_effect_requested = saw_MD || saw_MMD;
 
-    if ((saw_E ? 1 : 0) + (saw_S ? 1 : 0) + (saw_syntax_only ? 1 : 0) > 1)
+    int legacy_output_mode_count = (saw_E ? 1 : 0) + (saw_S ? 1 : 0) +
+                                   (saw_syntax_only ? 1 : 0);
+    if (legacy_output_mode_count > 1 && !saw_c && !saw_link)
         error("%s: '-E', '-S' and '-fsyntax-only' are mutually exclusive", argv[0]);
+    if (legacy_output_mode_count + (saw_c ? 1 : 0) + (saw_link ? 1 : 0) > 1)
+        error("%s: '-E', '-S', '-c', '--link' and '-fsyntax-only' are mutually exclusive", argv[0]);
     if (saw_M && saw_MD)
         error("%s: '-M' and '-MD' are mutually exclusive", argv[0]);
     if (dependency_mode_count > 1)
         error("%s: '-M', '-MM', '-MD' and '-MMD' are mutually exclusive", argv[0]);
-    if (saw_M && (saw_E || saw_S || saw_syntax_only))
-        error("%s: '-M' is mutually exclusive with '-E', '-S' and '-fsyntax-only'", argv[0]);
-    if (saw_MM && (saw_E || saw_S || saw_syntax_only))
-        error("%s: '-MM' is mutually exclusive with '-E', '-S' and '-fsyntax-only'", argv[0]);
+    if (saw_M && (saw_E || saw_S || saw_c || saw_link || saw_syntax_only))
+        error("%s: '-M' is mutually exclusive with compiler output modes", argv[0]);
+    if (saw_MM && (saw_E || saw_S || saw_c || saw_link || saw_syntax_only))
+        error("%s: '-MM' is mutually exclusive with compiler output modes", argv[0]);
     if (saw_MD && (saw_E || saw_syntax_only))
         error("%s: '-MD' is not supported with '-E' or '-fsyntax-only'", argv[0]);
     if (saw_MMD && (saw_E || saw_syntax_only))
         error("%s: '-MMD' is not supported with '-E' or '-fsyntax-only'", argv[0]);
+    if ((saw_MD || saw_MMD) && saw_link)
+        error("%s: '-MD' and '-MMD' are not supported with '--link'", argv[0]);
     if ((opts.dependency_output_path || opts.dependency_targets || opts.dependency_phony) &&
         !dependency_requested)
         error("%s: '-MF', '-MP', '-MT' and '-MQ' require '-M' or '-MD' (also '-MM' or '-MMD')", argv[0]);
@@ -477,10 +577,37 @@ static DriverOptions parse_options(int argc, char **argv) {
     if ((opts.macro_dump == MACRO_DUMP_DEFINITIONS ||
          opts.macro_dump == MACRO_DUMP_NAMES) && !saw_E)
         error("%s: macro dump options require '-E'", argv[0]);
-    if (!opts.input_path)
+    if (!opts.input_count)
         error("%s: no input file", argv[0]);
-    if (dependency_requested && !strcmp(opts.input_path, "-"))
-        error("%s: dependency generation requires a named input file", argv[0]);
+    if (opts.input_count > 1 && !saw_E && !saw_S && !saw_c && !saw_link &&
+        !saw_syntax_only && !dependency_only)
+        error("%s: multiple input files are not supported", argv[0]);
+    if (opts.input_count > 1 && (saw_E || dependency_only))
+        error("%s: multiple inputs are not supported with '-E', '-M' or '-MM'", argv[0]);
+    for (int i = 0; i < opts.input_count; i++)
+        if (dependency_requested && !strcmp(opts.input_paths[i], "-"))
+            error("%s: dependency generation requires a named input file", argv[0]);
+    if (opts.input_count > 1 && opts.output_path &&
+        (opts.mode == DRIVER_COMPILE_ASSEMBLY || opts.mode == DRIVER_COMPILE_OBJECT))
+        error("%s: cannot use '-o' with multiple inputs in '-S' or '-c' mode", argv[0]);
+    if (opts.input_count > 1 &&
+        (opts.dependency_output_path || opts.dependency_targets))
+        error("%s: '-MF', '-MT' and '-MQ' are ambiguous with multiple inputs", argv[0]);
+    if (opts.mode == DRIVER_LINK && opts.dependency_side_effect)
+        error("%s: dependency side effects are not supported with '--link'", argv[0]);
+    if (opts.linker_arg_count && opts.mode != DRIVER_LINK)
+        error("%s: '-L', '-l' and '-Wl,' options require '--link'", argv[0]);
+    if (opts.mode == DRIVER_LINK && opts.output_path && !strcmp(opts.output_path, "-"))
+        error("%s: linked executable output cannot be standard output", argv[0]);
+    if (opts.mode == DRIVER_COMPILE_OBJECT && opts.output_path && !strcmp(opts.output_path, "-"))
+        error("%s: object output cannot be standard output", argv[0]);
+    if (opts.mode == DRIVER_COMPILE_OBJECT && opts.input_count == 1 &&
+        !strcmp(opts.input_path, "-") && !opts.output_path)
+        error("%s: '-c' from standard input requires '-o <file>'", argv[0]);
+    if (opts.input_count > 1)
+        for (int i = 0; i < opts.input_count; i++)
+            if (!strcmp(opts.input_paths[i], "-"))
+                error("%s: standard input cannot be combined with other inputs", argv[0]);
     if (saw_M && opts.output_path)
         error("%s: '-o' is not supported with '-M'; use '-MF'", argv[0]);
     if (saw_MM && opts.output_path)
@@ -491,10 +618,12 @@ static DriverOptions parse_options(int argc, char **argv) {
         !strcmp(opts.dependency_output_path, "-") &&
         (!opts.output_path || !strcmp(opts.output_path, "-")))
         error("%s: dependency output and compiler output cannot both use standard output", argv[0]);
-    if (opts.output_path && strcmp(opts.output_path, "-") &&
-        (!strcmp(opts.output_path, opts.input_path) ||
-         same_existing_file(opts.output_path, opts.input_path)))
-        error("%s: input and output files must be different", argv[0]);
+    if (opts.output_path && strcmp(opts.output_path, "-")) {
+        for (int i = 0; i < opts.input_count; i++)
+            if (!strcmp(opts.output_path, opts.input_paths[i]) ||
+                same_existing_file(opts.output_path, opts.input_paths[i]))
+                error("%s: input and output files must be different", argv[0]);
+    }
 
     return opts;
 }
@@ -543,18 +672,44 @@ static char *read_file(char *path) {
     return buf;
 }
 
-static void select_output(char *path) {
+typedef struct {
+    int saved_stdout;
+    const char *path;
+} OutputScope;
+
+static OutputScope begin_output(const char *path) {
+    OutputScope scope = {.saved_stdout = -1, .path = path};
     if (!path || !strcmp(path, "-"))
-        return;
-    if (!freopen(path, "w", stdout))
+        return scope;
+
+    if (fflush(stdout) == EOF)
+        error("failed to flush compiler output");
+    scope.saved_stdout = dup(STDOUT_FILENO);
+    if (scope.saved_stdout < 0)
+        error("failed to save standard output");
+
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+    if (fd < 0)
         error("cannot open output %s", path);
+    if (dup2(fd, STDOUT_FILENO) < 0)
+        error("cannot redirect output %s", path);
+    close(fd);
+    clearerr(stdout);
+    return scope;
 }
 
-static void finish_output(char *path) {
+static void end_output(OutputScope *scope) {
     if (fflush(stdout) == EOF || ferror(stdout)) {
-        if (path && strcmp(path, "-"))
-            error("failed to write output %s", path);
+        if (scope->path && strcmp(scope->path, "-"))
+            error("failed to write output %s", scope->path);
         error("failed to write output");
+    }
+    if (scope->saved_stdout >= 0) {
+        if (dup2(scope->saved_stdout, STDOUT_FILENO) < 0)
+            error("failed to restore standard output");
+        close(scope->saved_stdout);
+        scope->saved_stdout = -1;
+        clearerr(stdout);
     }
 }
 
@@ -585,8 +740,11 @@ static void write_make_escaped(FILE *out, const char *text) {
 }
 
 static char *default_dependency_target(const DriverOptions *opts) {
-    if (opts->output_path && strcmp(opts->output_path, "-"))
-        return strdup(opts->output_path);
+    const char *artifact = opts->dependency_artifact_path
+                               ? opts->dependency_artifact_path
+                               : opts->output_path;
+    if (artifact && strcmp(artifact, "-"))
+        return strdup(artifact);
     return path_with_extension(opts->input_path, ".s", true);
 }
 
@@ -595,8 +753,11 @@ static char *default_dependency_output(const DriverOptions *opts) {
         return strdup(opts->dependency_output_path);
     if (opts->mode == DRIVER_DEPENDENCIES_ONLY)
         return NULL;
-    if (opts->output_path && strcmp(opts->output_path, "-"))
-        return path_with_extension(opts->output_path, ".d", false);
+    const char *artifact = opts->dependency_artifact_path
+                               ? opts->dependency_artifact_path
+                               : opts->output_path;
+    if (artifact && strcmp(artifact, "-"))
+        return path_with_extension(artifact, ".d", false);
     return path_with_extension(opts->input_path, ".d", true);
 }
 
@@ -672,7 +833,243 @@ static void emit_dependency_rule(const DriverOptions *opts) {
     free(path);
 }
 
+typedef struct TempPath TempPath;
+struct TempPath {
+    TempPath *next;
+    char *path;
+};
+
+static TempPath *temp_paths;
+
+static void cleanup_temp_paths(void) {
+    while (temp_paths) {
+        TempPath *next = temp_paths->next;
+        unlink(temp_paths->path);
+        free(temp_paths->path);
+        free(temp_paths);
+        temp_paths = next;
+    }
+}
+
+static char *new_temp_path(void) {
+    char tmpl[] = "/tmp/minicc-XXXXXX";
+    int fd = mkstemp(tmpl);
+    if (fd < 0)
+        error("failed to create temporary file");
+    close(fd);
+
+    TempPath *tmp = calloc(1, sizeof(TempPath));
+    tmp->path = strdup(tmpl);
+    tmp->next = temp_paths;
+    temp_paths = tmp;
+    return tmp->path;
+}
+
+static const char *host_cc(void) {
+    const char *cc = getenv("CC");
+    return cc && *cc ? cc : "cc";
+}
+
+static void run_command(char *const argv[]) {
+    pid_t pid = fork();
+    if (pid < 0)
+        error("failed to fork external tool");
+    if (pid == 0) {
+        execvp(argv[0], argv);
+        _exit(127);
+    }
+
+    int status;
+    while (waitpid(pid, &status, 0) < 0) {
+        if (errno == EINTR)
+            continue;
+        error("failed waiting for external tool");
+    }
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+        if (WIFEXITED(status))
+            error("external command '%s' failed with exit status %d",
+                  argv[0], WEXITSTATUS(status));
+        error("external command '%s' terminated by signal", argv[0]);
+    }
+}
+
+static int run_frontend(DriverOptions *opts) {
+    char *user_input = read_file(opts->input_path);
+    const char *source_name = !strcmp(opts->input_path, "-") ? "<stdin>" : opts->input_path;
+    char *preprocessed = preprocess_v2_source(user_input, source_name);
+
+    if (opts->mode == DRIVER_DEPENDENCIES_ONLY) {
+        emit_dependency_rule(opts);
+        return 0;
+    }
+
+    if (opts->mode == DRIVER_PREPROCESS_ONLY) {
+        OutputScope out = begin_output(opts->output_path);
+        if (opts->macro_dump == MACRO_DUMP_FINAL) {
+            char *dump = preprocess_v2_dump_macros();
+            fputs(dump, stdout);
+            free(dump);
+        } else {
+            fputs(preprocessed, stdout);
+        }
+        end_output(&out);
+        return 0;
+    }
+
+    Token *tok = tokenize(preprocessed);
+    Program *prog = parse(tok);
+    validate_program(prog);
+
+    if (opts->dependency_side_effect)
+        emit_dependency_rule(opts);
+
+    if (opts->mode == DRIVER_SYNTAX_ONLY)
+        return 0;
+
+    // Delay opening the output until the complete front end has succeeded, so
+    // an invalid translation unit cannot truncate an existing assembly/object.
+    OutputScope out = begin_output(opts->output_path);
+    codegen(prog);
+    end_output(&out);
+    return 0;
+}
+
+static void assemble_file(const char *assembly, const char *object) {
+    char *argv[] = {(char *)host_cc(), "-x", "assembler", "-c",
+                    (char *)assembly, "-o", (char *)object, NULL};
+    run_command(argv);
+}
+
+static void compile_c_to_object(const DriverOptions *opts, const char *input,
+                                const char *object) {
+    char *assembly = new_temp_path();
+    DriverOptions unit = *opts;
+    unit.mode = DRIVER_COMPILE_ASSEMBLY;
+    unit.input_path = (char *)input;
+    unit.output_path = assembly;
+    unit.dependency_artifact_path = (char *)object;
+    unit.macro_dump = MACRO_DUMP_NONE;
+    run_frontend(&unit);
+    assemble_file(assembly, object);
+}
+
+static void compile_input_to_object(const DriverOptions *opts, const char *input,
+                                    const char *object) {
+    InputKind kind = classify_input(input);
+    if (kind == INPUT_C) {
+        compile_c_to_object(opts, input, object);
+        return;
+    }
+    if (kind == INPUT_ASSEMBLY) {
+        if (opts->dependency_side_effect)
+            error("dependency side effects require C source inputs");
+        assemble_file(input, object);
+        return;
+    }
+    error("unsupported input '%s' for '-c'; expected .c or .s", input);
+}
+
+static char *default_output_for(const char *input, const char *ext) {
+    if (!strcmp(input, "-"))
+        error("standard input requires an explicit output path in this mode");
+    return path_with_extension(input, ext, true);
+}
+
+static void reject_default_output_collision(const DriverOptions *opts, int index,
+                                            const char *ext, const char *output) {
+    for (int i = 0; i < index; i++) {
+        char *previous = default_output_for(opts->input_paths[i], ext);
+        bool same = !strcmp(previous, output);
+        free(previous);
+        if (same)
+            error("multiple inputs would write the same default output '%s'", output);
+    }
+}
+
+static int run_multi_assembly(DriverOptions *opts) {
+    for (int i = 0; i < opts->input_count; i++) {
+        const char *input = opts->input_paths[i];
+        if (classify_input(input) != INPUT_C)
+            error("'-S' multi-input mode accepts only C source files: %s", input);
+        char *output = default_output_for(input, ".s");
+        reject_default_output_collision(opts, i, ".s", output);
+        DriverOptions unit = *opts;
+        unit.input_path = (char *)input;
+        unit.output_path = output;
+        unit.dependency_artifact_path = output;
+        run_frontend(&unit);
+        free(output);
+    }
+    return 0;
+}
+
+static int run_multi_syntax(DriverOptions *opts) {
+    for (int i = 0; i < opts->input_count; i++) {
+        if (classify_input(opts->input_paths[i]) != INPUT_C)
+            error("'-fsyntax-only' accepts only C source files: %s", opts->input_paths[i]);
+        DriverOptions unit = *opts;
+        unit.input_path = opts->input_paths[i];
+        unit.output_path = NULL;
+        unit.dependency_artifact_path = NULL;
+        run_frontend(&unit);
+    }
+    return 0;
+}
+
+static int run_object_mode(DriverOptions *opts) {
+    for (int i = 0; i < opts->input_count; i++) {
+        const char *input = opts->input_paths[i];
+        char *owned_output = NULL;
+        const char *output = opts->output_path;
+        if (!output) {
+            owned_output = default_output_for(input, ".o");
+            reject_default_output_collision(opts, i, ".o", owned_output);
+            output = owned_output;
+        }
+        compile_input_to_object(opts, input, output);
+        free(owned_output);
+    }
+    return 0;
+}
+
+static int run_link_mode(DriverOptions *opts) {
+    const char *output = opts->output_path ? opts->output_path : "a.out";
+    int max_items = opts->input_count + opts->linker_arg_count + 4;
+    char **argv = calloc((size_t)max_items, sizeof(char *));
+    int n = 0;
+    argv[n++] = (char *)host_cc();
+
+    for (int i = 0; i < opts->input_count; i++) {
+        const char *input = opts->input_paths[i];
+        InputKind kind = classify_input(input);
+        if (kind == INPUT_C || kind == INPUT_ASSEMBLY) {
+            char *object = new_temp_path();
+            DriverOptions unit = *opts;
+            unit.dependency_side_effect = false;
+            unit.dependency_artifact_path = NULL;
+            compile_input_to_object(&unit, input, object);
+            argv[n++] = object;
+            continue;
+        }
+        if (kind == INPUT_OBJECT || kind == INPUT_ARCHIVE || kind == INPUT_SHARED) {
+            argv[n++] = (char *)input;
+            continue;
+        }
+        error("unsupported link input '%s'; expected .c, .s, .o, .a or .so", input);
+    }
+
+    for (int i = 0; i < opts->linker_arg_count; i++)
+        argv[n++] = opts->linker_args[i];
+    argv[n++] = "-o";
+    argv[n++] = (char *)output;
+    argv[n] = NULL;
+    run_command(argv);
+    free(argv);
+    return 0;
+}
+
 int main(int argc, char **argv) {
+    atexit(cleanup_temp_paths);
     DriverOptions opts = parse_options(argc, argv);
     if (opts.exit_after_options)
         return 0;
@@ -682,43 +1079,17 @@ int main(int argc, char **argv) {
     else if (opts.macro_dump == MACRO_DUMP_NAMES)
         preprocess_v2_set_dump_mode(PREPROCESS_DUMP_NAMES);
 
-    char *user_input = read_file(opts.input_path);
-    const char *source_name = !strcmp(opts.input_path, "-") ? "<stdin>" : opts.input_path;
-    char *preprocessed = preprocess_v2_source(user_input, source_name);
+    if (opts.mode == DRIVER_COMPILE_OBJECT)
+        return run_object_mode(&opts);
+    if (opts.mode == DRIVER_LINK)
+        return run_link_mode(&opts);
+    if (opts.mode == DRIVER_SYNTAX_ONLY && opts.input_count > 1)
+        return run_multi_syntax(&opts);
+    if (opts.mode == DRIVER_COMPILE_ASSEMBLY && opts.input_count > 1)
+        return run_multi_assembly(&opts);
 
-    if (opts.mode == DRIVER_DEPENDENCIES_ONLY) {
-        emit_dependency_rule(&opts);
-        return 0;
-    }
-
-    if (opts.mode == DRIVER_PREPROCESS_ONLY) {
-        select_output(opts.output_path);
-        if (opts.macro_dump == MACRO_DUMP_FINAL) {
-            char *dump = preprocess_v2_dump_macros();
-            fputs(dump, stdout);
-            free(dump);
-        } else {
-            fputs(preprocessed, stdout);
-        }
-        finish_output(opts.output_path);
-        return 0;
-    }
-
-    Token *tok = tokenize(preprocessed);
-    Program *prog = parse(tok);
-    validate_program(prog);
-
-    if (opts.dependency_side_effect)
-        emit_dependency_rule(&opts);
-
-    if (opts.mode == DRIVER_SYNTAX_ONLY)
-        return 0;
-
-    // Delay opening the output until preprocessing, tokenization and parsing
-    // have succeeded so a front-end error does not truncate an existing file.
-    select_output(opts.output_path);
-    codegen(prog);
-    finish_output(opts.output_path);
-
-    return 0;
+    // Preprocess/dependency-only multi-input combinations are rejected during
+    // option validation. All remaining paths preserve the legacy single-TU
+    // behavior, including default assembly on stdout when -o is absent.
+    return run_frontend(&opts);
 }
