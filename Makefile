@@ -67,6 +67,7 @@ test: minicc
 	bash ./test/enum_value_range.sh
 	bash ./test/abi_stack_args.sh
 	bash ./test/integer_parameter_abi.sh
+	bash ./test/integer_return_abi.sh
 	bash ./test/int64_abi.sh
 	bash ./test/mixed_scalar_abi.sh
 	bash ./test/mixed_variadic_abi.sh
