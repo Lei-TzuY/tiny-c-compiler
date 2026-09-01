@@ -50,7 +50,7 @@ assert_run 0 '#include <float.h>
 #if FLT_HAS_SUBNORM != 1 || DBL_HAS_SUBNORM != 1
 #error bad subnormal model
 #endif
-int main(void){return !(DECIMAL_DIG==17&&FLT_DECIMAL_DIG==9&&DBL_DECIMAL_DIG==17);}'
+int main(void){return !(DECIMAL_DIG==21&&FLT_DECIMAL_DIG==9&&DBL_DECIMAL_DIG==17);}'
 
 # x86-64 SysV long double uses 80-bit extended precision in 16-byte storage.
 assert_run 0 '#include <float.h>
