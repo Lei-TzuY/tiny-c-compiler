@@ -58,9 +58,7 @@ int main(void) {
   if (cursor != items + 1 || expected != items + 8) return 15;
 
   expected = items + 7;
-  if (atomic_compare_exchange_weak_explicit(&cursor, &expected, items + 5,
-                                            memory_order_acq_rel,
-                                            memory_order_acquire)) return 16;
+  if (atomic_compare_exchange_weak_explicit(&cursor, &expected, items + 5, memory_order_acq_rel, memory_order_acquire)) return 16;
   if (cursor != items + 1 || expected != items + 1) return 17;
 
   object_calls = 0;
