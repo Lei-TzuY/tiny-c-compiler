@@ -54,6 +54,18 @@ assert_run 1 'int f(void){return 0;} int main(){return f ? 1 : 0;}'
 assert_run 3 'int main(){int x=3; int *p=&x; const int *cp=&x; const int *q=1?p:cp; return *q;}'
 assert_run 1 'int main(){int x=1; int *p=&x; void *v=0; void *q=1?p:v; return q!=0;}'
 
+# Lock down the result type itself, not merely assignments that could add the
+# missing qualifier after the conditional expression. C11 6.5.15 requires the
+# pointed-to qualifiers from both pointer operands to be unioned.
+assert_run 0 'int main(){int x=0; int *p=&x; const int *cp=&x; return _Generic((1?p:cp), const int *:0, int *:1, default:2);}'
+assert_run 0 'int main(){int x=0; const int *cp=&x; volatile int *vp=&x; return _Generic((1?cp:vp), const volatile int *:0, default:1);}'
+
+# Losing qualifiers in the composite pointer type would incorrectly permit
+# these assignments. The void-pointer case must preserve the object pointer's
+# pointed-to qualifiers when forming the qualified void result.
+assert_fail 'int main(){int x=0; int *p=&x; const int *cp=&x; int *bad=1?p:cp; return bad!=0;}'
+assert_fail 'int main(){int x=0; const int *cp=&x; void *v=0; void *bad=1?cp:v; return bad!=0;}'
+
 # The first operand must be scalar, and pointer arms must be compatible.
 assert_fail 'struct S{int x;}; int main(){struct S s; return s ? 1 : 2;}'
 assert_fail 'int main(){int *p=0; double *q=0; return (1 ? p : q)!=0;}'
