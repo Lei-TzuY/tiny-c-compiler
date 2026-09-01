@@ -38,6 +38,8 @@ bool is_numeric(Type *ty) {
 Type *default_argument_promotion(Type *ty) {
     if (!ty)
         return NULL;
+    if (ty->is_atomic)
+        ty = atomic_value_type(ty);
     if (ty->kind == TY_FLOAT)
         return ty_double;
     if (ty->kind == TY_BOOL || ty->kind == TY_CHAR || ty->kind == TY_SHORT)
@@ -198,6 +200,26 @@ Type *qualify_type(Type *ty, bool is_const, bool is_volatile, bool is_restrict) 
     return copy;
 }
 
+// C11 atomics are represented as shallow-qualified scalar types.  `origin`
+// identifies the corresponding non-atomic value type, which is what ordinary
+// lvalue conversion and generic atomic operations produce.
+Type *atomic_type(Type *ty) {
+    if (!ty || ty->is_atomic)
+        return ty;
+    Type *copy = calloc(1, sizeof(Type));
+    *copy = *ty;
+    copy->origin = ty->origin ? ty->origin : ty;
+    copy->is_atomic = true;
+    copy->qual_next = NULL;
+    return copy;
+}
+
+Type *atomic_value_type(Type *ty) {
+    if (!ty || !ty->is_atomic)
+        return ty;
+    return ty->origin ? ty->origin : ty;
+}
+
 Type *pointer_to(Type *base) {
     Type *ty = calloc(1, sizeof(Type));
     ty->kind = TY_PTR;
@@ -263,6 +285,8 @@ static Type *unsigned_integer_type(Type *ty) {
 // `long long` are both 64-bit here but retain distinct C ranks, so size alone
 // is insufficient (notably unsigned long + long long -> unsigned long long).
 Type *get_common_type(Type *ty1, Type *ty2) {
+    if (ty1 && ty1->is_atomic) ty1 = atomic_value_type(ty1);
+    if (ty2 && ty2->is_atomic) ty2 = atomic_value_type(ty2);
     if (ty1->base)
         return pointer_to(ty1->base);
 
@@ -371,7 +395,7 @@ static bool equality_type_compatible(Type *a, Type *b, bool ignore_top_qual) {
         return false;
     if (!ignore_top_qual &&
         (a->is_const != b->is_const || a->is_volatile != b->is_volatile ||
-         a->is_restrict != b->is_restrict))
+         a->is_restrict != b->is_restrict || a->is_atomic != b->is_atomic))
         return false;
 
     switch (a->kind) {

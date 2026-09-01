@@ -14,6 +14,7 @@ static char *brk_label;
 static char *cnt_label;
 
 static void gen_expr(Node *node);
+static void normalize(Type *ty);
 static int count(void);
 
 static void push(void) {
@@ -75,6 +76,26 @@ static void load(Type *ty) {
 
 static void store(Type *ty) {
     pop("%rdi");
+    if (ty->is_atomic) {
+        Type *value_ty = atomic_value_type(ty);
+        if (!is_integer(value_ty) && value_ty->kind != TY_PTR)
+            error("unsupported atomic store type");
+        normalize(value_ty);
+        printf("  mov %%rax, %%r8\n");
+        if (value_ty->size == 1)
+            printf("  xchgb %%al, (%%rdi)\n");
+        else if (value_ty->size == 2)
+            printf("  xchgw %%ax, (%%rdi)\n");
+        else if (value_ty->size == 4)
+            printf("  xchgl %%eax, (%%rdi)\n");
+        else if (value_ty->size == 8)
+            printf("  xchgq %%rax, (%%rdi)\n");
+        else
+            error("unsupported atomic store width");
+        printf("  mov %%r8, %%rax\n");
+        normalize(value_ty);
+        return;
+    }
     if (ty->kind == TY_FLOAT) {
         printf("  movss %%xmm0, (%%rdi)\n");
     } else if (ty->kind == TY_DOUBLE) {
@@ -420,7 +441,145 @@ static void gen_addr(Node *node) {
     error("not an lvalue");
 }
 
+static void emit_atomic_load_r10(Type *atomic_ty) {
+    Type *ty = atomic_value_type(atomic_ty);
+    if (ty->size == 1)
+        printf("  movzbq (%%r10), %%rax\n");
+    else if (ty->size == 2)
+        printf("  movzwq (%%r10), %%rax\n");
+    else if (ty->size == 4)
+        printf("  mov (%%r10), %%eax\n");
+    else if (ty->size == 8)
+        printf("  mov (%%r10), %%rax\n");
+    else
+        error("unsupported atomic load width");
+    normalize(ty);
+}
+
+static void emit_atomic_cmpxchg_r9(Type *atomic_ty) {
+    Type *ty = atomic_value_type(atomic_ty);
+    if (ty->size == 1)
+        printf("  lock cmpxchgb %%r9b, (%%r10)\n");
+    else if (ty->size == 2)
+        printf("  lock cmpxchgw %%r9w, (%%r10)\n");
+    else if (ty->size == 4)
+        printf("  lock cmpxchgl %%r9d, (%%r10)\n");
+    else if (ty->size == 8)
+        printf("  lock cmpxchgq %%r9, (%%r10)\n");
+    else
+        error("unsupported atomic compare-exchange width");
+}
+
+static void emit_atomic_store_rax_to_r11(Type *ty) {
+    if (ty->size == 1)
+        printf("  mov %%al, (%%r11)\n");
+    else if (ty->size == 2)
+        printf("  mov %%ax, (%%r11)\n");
+    else if (ty->size == 4)
+        printf("  mov %%eax, (%%r11)\n");
+    else if (ty->size == 8)
+        printf("  mov %%rax, (%%r11)\n");
+    else
+        error("unsupported atomic expected width");
+}
+
+static void emit_atomic_compute_new(NodeKind kind, Type *ty) {
+    // R8 = old value, R11 = already-evaluated RHS. Produce converted new value
+    // in R9 without re-evaluating source expressions when cmpxchg retries.
+    printf("  mov %%r8, %%r9\n");
+    switch (kind) {
+    case ND_ADD_EQ: printf("  add %%r11, %%r9\n"); break;
+    case ND_SUB_EQ: printf("  sub %%r11, %%r9\n"); break;
+    case ND_MUL_EQ: printf("  imul %%r11, %%r9\n"); break;
+    case ND_AND_EQ: printf("  and %%r11, %%r9\n"); break;
+    case ND_OR_EQ:  printf("  or %%r11, %%r9\n"); break;
+    case ND_XOR_EQ: printf("  xor %%r11, %%r9\n"); break;
+    case ND_SHL_EQ:
+        printf("  mov %%r11, %%rcx\n");
+        printf("  shl %%cl, %%r9\n");
+        break;
+    case ND_SHR_EQ:
+        printf("  mov %%r11, %%rcx\n");
+        if (ty->is_unsigned)
+            printf("  shr %%cl, %%r9\n");
+        else
+            printf("  sar %%cl, %%r9\n");
+        break;
+    case ND_DIV_EQ:
+    case ND_MOD_EQ:
+        printf("  mov %%r8, %%rax\n");
+        if (ty->is_unsigned) {
+            printf("  xor %%edx, %%edx\n");
+            printf("  div %%r11\n");
+        } else {
+            printf("  cqo\n");
+            printf("  idiv %%r11\n");
+        }
+        if (kind == ND_DIV_EQ)
+            printf("  mov %%rax, %%r9\n");
+        else
+            printf("  mov %%rdx, %%r9\n");
+        break;
+    default:
+        error("invalid atomic compound assignment");
+    }
+    printf("  mov %%r9, %%rax\n");
+    normalize(ty);
+    printf("  mov %%rax, %%r9\n");
+}
+
+static void gen_atomic_compound_assign(Node *node) {
+    Type *atomic_ty = node->lhs->ty;
+    Type *ty = atomic_value_type(atomic_ty);
+    gen_addr(node->lhs);
+    push();
+    gen_expr(node->rhs);
+    if (node->kind != ND_SHL_EQ && node->kind != ND_SHR_EQ &&
+        ty->kind != TY_PTR)
+        cast_value(node->rhs->ty, ty);
+    printf("  mov %%rax, %%r11\n");
+    pop("%r10");
+
+    int c = count();
+    printf(".L.atomic_rmw.%d:\n", c);
+    emit_atomic_load_r10(atomic_ty);
+    printf("  mov %%rax, %%r8\n");
+    emit_atomic_compute_new(node->kind, ty);
+    printf("  mov %%r8, %%rax\n");
+    emit_atomic_cmpxchg_r9(atomic_ty);
+    printf("  jne .L.atomic_rmw.%d\n", c);
+    printf("  mov %%r9, %%rax\n");
+    normalize(ty);
+}
+
+static void gen_atomic_inc_dec(Node *node, bool increment, bool return_old) {
+    Type *atomic_ty = node->lhs->ty;
+    Type *ty = atomic_value_type(atomic_ty);
+    int step = ty->kind == TY_PTR ? ty->base->size : 1;
+    gen_addr(node->lhs);
+    printf("  mov %%rax, %%r10\n");
+    printf("  mov $%d, %%r11\n", step);
+    int c = count();
+    printf(".L.atomic_inc.%d:\n", c);
+    emit_atomic_load_r10(atomic_ty);
+    printf("  mov %%rax, %%r8\n");
+    printf("  mov %%rax, %%r9\n");
+    printf(increment ? "  add %%r11, %%r9\n" : "  sub %%r11, %%r9\n");
+    printf("  mov %%r9, %%rax\n");
+    normalize(ty);
+    printf("  mov %%rax, %%r9\n");
+    printf("  mov %%r8, %%rax\n");
+    emit_atomic_cmpxchg_r9(atomic_ty);
+    printf("  jne .L.atomic_inc.%d\n", c);
+    printf(return_old ? "  mov %%r8, %%rax\n" : "  mov %%r9, %%rax\n");
+    normalize(ty);
+}
+
 static void gen_inc_dec(Node *node, bool increment, bool return_old) {
+    if (node->lhs->ty && node->lhs->ty->is_atomic) {
+        gen_atomic_inc_dec(node, increment, return_old);
+        return;
+    }
     if (is_flonum(node->ty)) {
         gen_addr(node->lhs);
         push();
@@ -476,6 +635,10 @@ static void gen_inc_dec(Node *node, bool increment, bool return_old) {
 }
 
 static void gen_compound_assign(Node *node) {
+    if (node->lhs->ty && node->lhs->ty->is_atomic) {
+        gen_atomic_compound_assign(node);
+        return;
+    }
     if (is_flonum(node->ty)) {
         gen_addr(node->lhs);
         push();
@@ -1133,6 +1296,147 @@ static void gen_expr(Node *node) {
         gen_addr(node);
         if (node->ty->kind != TY_ARRAY && node->ty->kind != TY_STRUCT)
             load_lvalue(node);
+        return;
+    }
+
+    if (node->kind == ND_ATOMIC_LOAD) {
+        gen_expr(node->rhs); // evaluate memory_order expression
+        gen_expr(node->lhs); // atomic object pointer
+        Type *atomic_ty = node->lhs->ty->base;
+        load(atomic_ty);
+        normalize(node->ty);
+        return;
+    }
+
+    if (node->kind == ND_ATOMIC_STORE) {
+        gen_expr(node->cond);
+        gen_expr(node->lhs);
+        push();
+        gen_expr(node->rhs);
+        Type *atomic_ty = node->lhs->ty->base;
+        Type *ty = atomic_value_type(atomic_ty);
+        cast_value(node->rhs->ty, ty);
+        store(atomic_ty);
+        return;
+    }
+
+    if (node->kind == ND_ATOMIC_EXCHANGE) {
+        gen_expr(node->cond);
+        gen_expr(node->lhs);
+        push();
+        gen_expr(node->rhs);
+        Type *atomic_ty = node->lhs->ty->base;
+        Type *ty = atomic_value_type(atomic_ty);
+        cast_value(node->rhs->ty, ty);
+        normalize(ty);
+        pop("%r10");
+        if (ty->size == 1) printf("  xchgb %%al, (%%r10)\n");
+        else if (ty->size == 2) printf("  xchgw %%ax, (%%r10)\n");
+        else if (ty->size == 4) printf("  xchgl %%eax, (%%r10)\n");
+        else if (ty->size == 8) printf("  xchgq %%rax, (%%r10)\n");
+        else error("unsupported atomic exchange width");
+        normalize(ty);
+        return;
+    }
+
+    if (node->kind == ND_ATOMIC_FETCH_ADD || node->kind == ND_ATOMIC_FETCH_SUB) {
+        gen_expr(node->cond);
+        gen_expr(node->lhs);
+        push();
+        gen_expr(node->rhs);
+        Type *atomic_ty = node->lhs->ty->base;
+        Type *ty = atomic_value_type(atomic_ty);
+        if (ty->kind == TY_PTR)
+            printf("  imul $%d, %%rax\n", ty->base->size);
+        else
+            cast_value(node->rhs->ty, ty);
+        if (node->kind == ND_ATOMIC_FETCH_SUB)
+            printf("  neg %%rax\n");
+        printf("  mov %%rax, %%r9\n");
+        pop("%r10");
+        if (ty->size == 1) printf("  lock xaddb %%r9b, (%%r10)\n");
+        else if (ty->size == 2) printf("  lock xaddw %%r9w, (%%r10)\n");
+        else if (ty->size == 4) printf("  lock xaddl %%r9d, (%%r10)\n");
+        else if (ty->size == 8) printf("  lock xaddq %%r9, (%%r10)\n");
+        else error("unsupported atomic fetch width");
+        printf("  mov %%r9, %%rax\n");
+        normalize(ty);
+        return;
+    }
+
+    if (node->kind == ND_ATOMIC_FETCH_AND || node->kind == ND_ATOMIC_FETCH_OR ||
+        node->kind == ND_ATOMIC_FETCH_XOR) {
+        gen_expr(node->cond);
+        gen_expr(node->lhs);
+        push();
+        gen_expr(node->rhs);
+        Type *atomic_ty = node->lhs->ty->base;
+        Type *ty = atomic_value_type(atomic_ty);
+        cast_value(node->rhs->ty, ty);
+        printf("  mov %%rax, %%r11\n");
+        pop("%r10");
+        int c = count();
+        printf(".L.atomic_fetch_logic.%d:\n", c);
+        emit_atomic_load_r10(atomic_ty);
+        printf("  mov %%rax, %%r8\n");
+        printf("  mov %%rax, %%r9\n");
+        if (node->kind == ND_ATOMIC_FETCH_AND) printf("  and %%r11, %%r9\n");
+        else if (node->kind == ND_ATOMIC_FETCH_OR) printf("  or %%r11, %%r9\n");
+        else printf("  xor %%r11, %%r9\n");
+        printf("  mov %%r9, %%rax\n");
+        normalize(ty);
+        printf("  mov %%rax, %%r9\n");
+        printf("  mov %%r8, %%rax\n");
+        emit_atomic_cmpxchg_r9(atomic_ty);
+        printf("  jne .L.atomic_fetch_logic.%d\n", c);
+        printf("  mov %%r8, %%rax\n");
+        normalize(ty);
+        return;
+    }
+
+    if (node->kind == ND_ATOMIC_CMPXCHG) {
+        gen_expr(node->cond);
+        gen_expr(node->els);
+        gen_expr(node->lhs);
+        push();
+        gen_expr(node->rhs);
+        push();
+        gen_expr(node->then);
+        Type *atomic_ty = node->lhs->ty->base;
+        Type *ty = atomic_value_type(atomic_ty);
+        cast_value(node->then->ty, ty);
+        normalize(ty);
+        printf("  mov %%rax, %%r9\n");
+        pop("%r11");
+        pop("%r10");
+        // Load *expected into the cmpxchg accumulator.
+        if (ty->size == 1) printf("  movzbq (%%r11), %%rax\n");
+        else if (ty->size == 2) printf("  movzwq (%%r11), %%rax\n");
+        else if (ty->size == 4) printf("  mov (%%r11), %%eax\n");
+        else printf("  mov (%%r11), %%rax\n");
+        normalize(ty);
+        emit_atomic_cmpxchg_r9(atomic_ty);
+        int c = count();
+        printf("  je .L.atomic_cas_ok.%d\n", c);
+        emit_atomic_store_rax_to_r11(ty);
+        printf("  mov $0, %%rax\n");
+        printf("  jmp .L.atomic_cas_end.%d\n", c);
+        printf(".L.atomic_cas_ok.%d:\n", c);
+        printf("  mov $1, %%rax\n");
+        printf(".L.atomic_cas_end.%d:\n", c);
+        return;
+    }
+
+    if (node->kind == ND_ATOMIC_FENCE || node->kind == ND_ATOMIC_SIGNAL_FENCE) {
+        gen_expr(node->lhs);
+        if (node->kind == ND_ATOMIC_FENCE)
+            printf("  mfence\n");
+        return;
+    }
+
+    if (node->kind == ND_ATOMIC_IS_LOCK_FREE) {
+        gen_expr(node->lhs);
+        printf("  mov $1, %%rax\n");
         return;
     }
 

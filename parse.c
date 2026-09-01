@@ -411,7 +411,7 @@ static bool is_typename(Token *tok) {
         equal(tok, "enum") || equal(tok, "struct") || equal(tok, "union") ||
         equal(tok, "short") || equal(tok, "long") || equal(tok, "signed") ||
         equal(tok, "unsigned") || equal(tok, "const") ||
-        equal(tok, "volatile") || equal(tok, "restrict") ||
+        equal(tok, "volatile") || equal(tok, "restrict") || equal(tok, "_Atomic") ||
         equal(tok, "_Bool") || equal(tok, "float") || equal(tok, "double"))
         return true;
     return find_typedef(tok) != NULL;
@@ -604,7 +604,7 @@ static Type *generic_control_type(Node *node) {
         return pointer_to(ty->base);
     if (ty->kind == TY_FUNC)
         return pointer_to(ty);
-    if (ty->is_const || ty->is_volatile || ty->is_restrict)
+    if (ty->is_const || ty->is_volatile || ty->is_restrict || ty->is_atomic)
         return ty->origin ? ty->origin : ty;
     return ty;
 }
@@ -1225,6 +1225,8 @@ static Type *record_decl(Token **rest, Token *tok, bool is_union) {
                 tok = tok->next;
                 bit_width = parse_bitfield_width(&tok, tok, mty, colon);
                 is_bitfield = true;
+                if (mty->is_atomic)
+                    error_at(colon->loc, "atomic bit-fields are not supported");
                 if (attrs.align)
                     error_at(member_at->loc, "_Alignas is not allowed on a bit-field");
                 if (bit_width == 0 && ident)
@@ -1991,11 +1993,31 @@ static void validate_type_specifier_set(TypeSpecState *state,
         invalid_type_specifier_set(state);
 }
 
+static bool supported_atomic_object_type(Type *ty) {
+    if (!ty || ty->is_atomic)
+        return false;
+    if (!is_integer(ty) && ty->kind != TY_PTR)
+        return false;
+    return ty->size == 1 || ty->size == 2 || ty->size == 4 || ty->size == 8;
+}
+
+static Type *checked_atomic_type(Type *ty, Token *at, bool specifier_form) {
+    if (!ty)
+        error_at(at->loc, "_Atomic requires an object type");
+    if (specifier_form && (ty->is_const || ty->is_volatile || ty->is_restrict))
+        error_at(at->loc, "_Atomic(type-name) requires an unqualified type name");
+    if (!supported_atomic_object_type(ty))
+        error_at(at->loc,
+                 "atomic backend supports only 1/2/4/8-byte integer and pointer types");
+    return atomic_type(ty);
+}
+
 static Type *declspec_impl(Token **rest, Token *tok, DeclAttrs *attrs) {
     Type *ty = NULL;
     bool is_const = false;
     bool is_volatile = false;
     bool is_restrict = false;
+    bool is_atomic_qualifier = false;
     Token *restrict_tok = NULL;
     TypeSpecState specs = {};
     bool saw_signed = false;
@@ -2011,6 +2033,23 @@ static Type *declspec_impl(Token **rest, Token *tok, DeclAttrs *attrs) {
             int a = parse_alignment_specifier(&tok, tok);
             if (a > attrs->align)
                 attrs->align = a;
+            continue;
+        }
+        if (equal(tok, "_Atomic") && equal(tok->next, "(")) {
+            Token *atomic_tok = tok;
+            if (ty)
+                error_at(atomic_tok->loc, "_Atomic(type-name) cannot be combined with another type specifier");
+            tok = skip(tok->next, "(");
+            Type *inner = type_name(&tok, tok);
+            tok = skip(tok, ")");
+            note_type_specifier(&specs, atomic_tok, &specs.n_named);
+            ty = checked_atomic_type(inner, atomic_tok, true);
+            saw_non_signable_type = true;
+            saw_typedef_type = true;
+            continue;
+        }
+        if (consume(&tok, tok, "_Atomic")) {
+            is_atomic_qualifier = true;
             continue;
         }
         if (consume(&tok, tok, "const")) {
@@ -2256,6 +2295,8 @@ static Type *declspec_impl(Token **rest, Token *tok, DeclAttrs *attrs) {
     if (is_restrict && !is_restrict_qualifiable_type(ty))
         error_at(restrict_tok->loc,
                  "restrict qualifier requires a pointer to object or incomplete type");
+    if (is_atomic_qualifier)
+        ty = checked_atomic_type(ty, tok, false);
     return qualify_type(ty, is_const, is_volatile, is_restrict);
 }
 
@@ -2553,14 +2594,19 @@ static Type *declarator_impl(Token **rest, Token *tok, Type *ty, Token **ident,
         bool ptr_const = false;
         bool ptr_volatile = false;
         bool ptr_restrict = false;
+        bool ptr_atomic = false;
         Token *ptr_restrict_tok = NULL;
+        Token *ptr_atomic_tok = NULL;
         while (equal(tok, "const") || equal(tok, "volatile") ||
-               equal(tok, "restrict")) {
+               equal(tok, "restrict") || equal(tok, "_Atomic")) {
             if (consume(&tok, tok, "const"))
                 ptr_const = true;
             else if (consume(&tok, tok, "volatile"))
                 ptr_volatile = true;
-            else {
+            else if (consume(&tok, tok, "_Atomic")) {
+                ptr_atomic = true;
+                if (!ptr_atomic_tok) ptr_atomic_tok = tok;
+            } else {
                 ptr_restrict_tok = tok;
                 consume(&tok, tok, "restrict");
                 ptr_restrict = true;
@@ -2569,6 +2615,8 @@ static Type *declarator_impl(Token **rest, Token *tok, Type *ty, Token **ident,
         if (ptr_restrict && !is_restrict_qualifiable_type(ty))
             error_at(ptr_restrict_tok->loc,
                      "restrict qualifier requires a pointer to object or incomplete type");
+        if (ptr_atomic)
+            ty = checked_atomic_type(ty, ptr_atomic_tok ? ptr_atomic_tok : tok, false);
         ty = qualify_type(ty, ptr_const, ptr_volatile, ptr_restrict);
     }
 
@@ -4981,7 +5029,7 @@ static Node *expr(Token **rest, Token *tok) {
 }
 
 static bool qualifier_superset(Type *dst, Type *src) {
-    return dst && src &&
+    return dst && src && dst->is_atomic == src->is_atomic &&
            (!src->is_const || dst->is_const) &&
            (!src->is_volatile || dst->is_volatile) &&
            (!src->is_restrict || dst->is_restrict);
@@ -5712,7 +5760,159 @@ static Node *postfix(Token **rest, Token *tok) {
     return node;
 }
 
+static Type *require_atomic_pointer(Node *ptr, Token *at) {
+    add_type(ptr);
+    reject_register_array_decay(ptr);
+    if (!ptr->ty || ptr->ty->kind != TY_PTR || !ptr->ty->base ||
+        !ptr->ty->base->is_atomic)
+        error_at(at->loc, "atomic operation requires a pointer to an atomic object");
+    Type *ty = ptr->ty->base;
+    Type *value = atomic_value_type(ty);
+    if ((!is_integer(value) && value->kind != TY_PTR) ||
+        (value->size != 1 && value->size != 2 && value->size != 4 && value->size != 8))
+        error_at(at->loc, "unsupported atomic object type");
+    return ty;
+}
+
+static void require_atomic_order(Node *order, Token *at) {
+    add_type(order);
+    if (!is_integer(order->ty))
+        error_at(at->loc, "memory_order argument must have integer type");
+}
+
+static Node *parse_atomic_builtin(Token **rest, Token *tok) {
+    NodeKind kind;
+    bool is_load = equal(tok, "__builtin_atomic_load");
+    bool is_store = equal(tok, "__builtin_atomic_store");
+    bool is_exchange = equal(tok, "__builtin_atomic_exchange");
+    bool is_fetch_add = equal(tok, "__builtin_atomic_fetch_add");
+    bool is_fetch_sub = equal(tok, "__builtin_atomic_fetch_sub");
+    bool is_fetch_and = equal(tok, "__builtin_atomic_fetch_and");
+    bool is_fetch_or = equal(tok, "__builtin_atomic_fetch_or");
+    bool is_fetch_xor = equal(tok, "__builtin_atomic_fetch_xor");
+    bool is_cmp = equal(tok, "__builtin_atomic_compare_exchange");
+    bool is_fence = equal(tok, "__builtin_atomic_thread_fence");
+    bool is_signal_fence = equal(tok, "__builtin_atomic_signal_fence");
+    bool is_lock_free = equal(tok, "__builtin_atomic_is_lock_free");
+    if (!is_load && !is_store && !is_exchange && !is_fetch_add && !is_fetch_sub &&
+        !is_fetch_and && !is_fetch_or && !is_fetch_xor && !is_cmp && !is_fence &&
+        !is_signal_fence && !is_lock_free)
+        return NULL;
+
+    Token *builtin = tok;
+    tok = skip(tok->next, "(");
+
+    if (is_fence || is_signal_fence) {
+        Node *order = assign(&tok, tok);
+        require_atomic_order(order, builtin);
+        tok = skip(tok, ")");
+        Node *node = new_node(is_fence ? ND_ATOMIC_FENCE : ND_ATOMIC_SIGNAL_FENCE);
+        node->lhs = order;
+        node->ty = ty_void;
+        *rest = tok;
+        return node;
+    }
+
+    Node *obj = assign(&tok, tok);
+    Type *atomic_ty = require_atomic_pointer(obj, builtin);
+    Type *value_ty = atomic_value_type(atomic_ty);
+
+    if (is_lock_free) {
+        tok = skip(tok, ")");
+        Node *node = new_node(ND_ATOMIC_IS_LOCK_FREE);
+        node->lhs = obj;
+        node->ty = ty_int;
+        *rest = tok;
+        return node;
+    }
+
+    tok = skip(tok, ",");
+    if (is_load) {
+        Node *order = assign(&tok, tok);
+        require_atomic_order(order, builtin);
+        tok = skip(tok, ")");
+        Node *node = new_node(ND_ATOMIC_LOAD);
+        node->lhs = obj;
+        node->rhs = order;
+        node->ty = value_ty;
+        *rest = tok;
+        return node;
+    }
+
+    if (is_cmp) {
+        Node *expected = assign(&tok, tok);
+        add_type(expected);
+        if (!expected->ty || expected->ty->kind != TY_PTR || !expected->ty->base ||
+            expected->ty->base->is_const ||
+            !type_compatible_ignoring_top_qual(expected->ty->base, value_ty))
+            error_at(builtin->loc,
+                     "atomic compare-exchange expected argument has incompatible pointer type");
+        tok = skip(tok, ",");
+        Node *desired = assign(&tok, tok);
+        if (!assignment_compatible(value_ty, desired))
+            error_at(builtin->loc, "incompatible atomic compare-exchange desired value");
+        tok = skip(tok, ",");
+        Node *success = assign(&tok, tok);
+        require_atomic_order(success, builtin);
+        tok = skip(tok, ",");
+        Node *failure = assign(&tok, tok);
+        require_atomic_order(failure, builtin);
+        tok = skip(tok, ")");
+        Node *node = new_node(ND_ATOMIC_CMPXCHG);
+        node->lhs = obj;
+        node->rhs = expected;
+        node->then = desired;
+        node->cond = success;
+        node->els = failure;
+        node->ty = ty_bool;
+        *rest = tok;
+        return node;
+    }
+
+    Node *value = assign(&tok, tok);
+    if (is_fetch_add || is_fetch_sub) {
+        add_type(value);
+        if (value_ty->kind == TY_PTR) {
+            if (!is_integer(value->ty))
+                error_at(builtin->loc, "atomic pointer fetch-add/sub requires integer delta");
+        } else if (!assignment_compatible(value_ty, value)) {
+            error_at(builtin->loc, "incompatible atomic fetch operand");
+        }
+    } else if (is_fetch_and || is_fetch_or || is_fetch_xor) {
+        add_type(value);
+        if (!is_integer(value_ty) || !is_integer(value->ty))
+            error_at(builtin->loc, "atomic bitwise fetch operation requires integer type");
+    } else if (!assignment_compatible(value_ty, value)) {
+        error_at(builtin->loc, "incompatible atomic value");
+    }
+
+    tok = skip(tok, ",");
+    Node *order = assign(&tok, tok);
+    require_atomic_order(order, builtin);
+    tok = skip(tok, ")");
+
+    if (is_store) kind = ND_ATOMIC_STORE;
+    else if (is_exchange) kind = ND_ATOMIC_EXCHANGE;
+    else if (is_fetch_add) kind = ND_ATOMIC_FETCH_ADD;
+    else if (is_fetch_sub) kind = ND_ATOMIC_FETCH_SUB;
+    else if (is_fetch_and) kind = ND_ATOMIC_FETCH_AND;
+    else if (is_fetch_or) kind = ND_ATOMIC_FETCH_OR;
+    else kind = ND_ATOMIC_FETCH_XOR;
+
+    Node *node = new_node(kind);
+    node->lhs = obj;
+    node->rhs = value;
+    node->cond = order;
+    node->ty = is_store ? ty_void : value_ty;
+    *rest = tok;
+    return node;
+}
+
 static Node *primary(Token **rest, Token *tok) {
+    Node *atomic_builtin = parse_atomic_builtin(rest, tok);
+    if (atomic_builtin)
+        return atomic_builtin;
+
     if (equal(tok, "__builtin_offsetof")) {
         Token *builtin = tok;
         tok = skip(tok->next, "(");
@@ -6077,7 +6277,7 @@ static bool type_compatible_impl(Type *a, Type *b, bool ignore_top_qual) {
         return false;
     if (!ignore_top_qual &&
         (a->is_const != b->is_const || a->is_volatile != b->is_volatile ||
-         a->is_restrict != b->is_restrict))
+         a->is_restrict != b->is_restrict || a->is_atomic != b->is_atomic))
         return false;
 
     switch (a->kind) {

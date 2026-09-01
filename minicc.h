@@ -111,6 +111,7 @@ struct Type {
     bool is_const;
     bool is_volatile;
     bool is_restrict;
+    bool is_atomic;   // C11 _Atomic qualifier on supported scalar objects
     Type *origin;
     Type *qual_next;
 };
@@ -161,6 +162,8 @@ Type *pointer_to(Type *base);
 Type *array_of(Type *base, int size);
 Type *func_type(Type *return_ty);
 Type *qualify_type(Type *ty, bool is_const, bool is_volatile, bool is_restrict);
+Type *atomic_type(Type *ty);
+Type *atomic_value_type(Type *ty);
 Type *get_common_type(Type *ty1, Type *ty2);
 Type *get_common_type_for_nodes(Node *lhs, Node *rhs);
 Type *integer_promotion_for_node(Node *node);
@@ -199,6 +202,18 @@ typedef enum {
     ND_FUNCALL,   // Function call
     ND_VA_START,  // compiler-backed va_start
     ND_VA_ARG,    // compiler-backed typed va_arg
+    ND_ATOMIC_LOAD,
+    ND_ATOMIC_STORE,
+    ND_ATOMIC_EXCHANGE,
+    ND_ATOMIC_FETCH_ADD,
+    ND_ATOMIC_FETCH_SUB,
+    ND_ATOMIC_FETCH_AND,
+    ND_ATOMIC_FETCH_OR,
+    ND_ATOMIC_FETCH_XOR,
+    ND_ATOMIC_CMPXCHG,
+    ND_ATOMIC_FENCE,
+    ND_ATOMIC_SIGNAL_FENCE,
+    ND_ATOMIC_IS_LOCK_FREE,
     ND_ADDR,      // & (address-of)
     ND_DEREF,     // * (dereference)
     ND_EXPR_STMT, // Expression statement

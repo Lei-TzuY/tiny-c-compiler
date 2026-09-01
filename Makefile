@@ -119,6 +119,7 @@ test: minicc
 	bash ./test/alignas.sh
 	bash ./test/stdalign_header.sh
 	bash ./test/stdbool_header.sh
+	bash ./test/stdatomic_header.sh
 	bash ./test/stdint_header.sh
 	bash ./test/inttypes_header.sh
 	bash ./test/limits_header.sh
