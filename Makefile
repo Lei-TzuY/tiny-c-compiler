@@ -92,6 +92,7 @@ test: minicc
 	bash ./test/logical_scalar.sh
 	bash ./test/comparison_scalar.sh
 	bash ./test/pointer_equality.sh
+	bash ./test/pointer_relational.sh
 	bash ./test/conditional_operator.sh
 	bash ./test/null_pointer_constants.sh
 	bash ./test/pointer_arithmetic.sh
