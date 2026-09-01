@@ -1996,7 +1996,7 @@ static void validate_type_specifier_set(TypeSpecState *state,
 static bool supported_atomic_object_type(Type *ty) {
     if (!ty || ty->is_atomic)
         return false;
-    if (!is_integer(ty) && ty->kind != TY_PTR)
+    if (!is_integer(ty) && !is_flonum(ty) && ty->kind != TY_PTR)
         return false;
     return ty->size == 1 || ty->size == 2 || ty->size == 4 || ty->size == 8;
 }
@@ -2008,7 +2008,7 @@ static Type *checked_atomic_type(Type *ty, Token *at, bool specifier_form) {
         error_at(at->loc, "_Atomic(type-name) requires an unqualified type name");
     if (!supported_atomic_object_type(ty))
         error_at(at->loc,
-                 "atomic backend supports only 1/2/4/8-byte integer and pointer types");
+                 "atomic backend supports only lock-free integer, pointer, float, and double types");
     return atomic_type(ty);
 }
 
@@ -5768,7 +5768,7 @@ static Type *require_atomic_pointer(Node *ptr, Token *at) {
         error_at(at->loc, "atomic operation requires a pointer to an atomic object");
     Type *ty = ptr->ty->base;
     Type *value = atomic_value_type(ty);
-    if ((!is_integer(value) && value->kind != TY_PTR) ||
+    if ((!is_integer(value) && !is_flonum(value) && value->kind != TY_PTR) ||
         (value->size != 1 && value->size != 2 && value->size != 4 && value->size != 8))
         error_at(at->loc, "unsupported atomic object type");
     return ty;
@@ -5875,8 +5875,16 @@ static Node *parse_atomic_builtin(Token **rest, Token *tok) {
         if (value_ty->kind == TY_PTR) {
             if (!is_integer(value->ty))
                 error_at(builtin->loc, "atomic pointer fetch-add/sub requires integer delta");
-        } else if (!assignment_compatible(value_ty, value)) {
-            error_at(builtin->loc, "incompatible atomic fetch operand");
+        } else {
+            // C11's generic atomic_fetch_add/sub interfaces are restricted to
+            // atomic integer (and, by widely implemented correction, pointer)
+            // objects. Floating atomic arithmetic remains available through
+            // the language's compound-assignment/inc-dec operators below.
+            if (!is_integer(value_ty))
+                error_at(builtin->loc,
+                         "atomic fetch-add/sub requires integer or pointer type");
+            if (!assignment_compatible(value_ty, value))
+                error_at(builtin->loc, "incompatible atomic fetch operand");
         }
     } else if (is_fetch_and || is_fetch_or || is_fetch_xor) {
         add_type(value);

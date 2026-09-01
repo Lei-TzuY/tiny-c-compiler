@@ -144,7 +144,8 @@ expect_fail() {
   grep -F "$needle" "$TMP/$name.err" >/dev/null
 }
 
-expect_fail atomic_float 'atomic backend supports only' '_Atomic float x; int main(void){return 0;}'
+# Floating atomics are covered by stdatomic_floating.sh. Keep the genuinely
+# unsupported aggregate/array/bit-field constraints locked here.
 expect_fail atomic_record 'atomic backend supports only' 'struct S { int x; }; _Atomic(struct S) x; int main(void){return 0;}'
 expect_fail atomic_array 'atomic backend supports only' '_Atomic(int[2]) x; int main(void){return 0;}'
 expect_fail atomic_bitfield 'atomic bit-fields are not supported' 'struct S { _Atomic int x:3; }; int main(void){return 0;}'

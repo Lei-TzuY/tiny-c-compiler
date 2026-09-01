@@ -78,8 +78,27 @@ static void store(Type *ty) {
     pop("%rdi");
     if (ty->is_atomic) {
         Type *value_ty = atomic_value_type(ty);
-        if (!is_integer(value_ty) && value_ty->kind != TY_PTR)
+        if (!is_integer(value_ty) && !is_flonum(value_ty) && value_ty->kind != TY_PTR)
             error("unsupported atomic store type");
+
+        // Seq-cst atomic stores use xchg. Floating values are bit-cast through
+        // a GP register so x86 performs an atomic 32/64-bit exchange while the
+        // C expression value remains in XMM0 unchanged.
+        if (is_flonum(value_ty)) {
+            if (value_ty->kind == TY_FLOAT) {
+                printf("  movd %%xmm0, %%eax\n");
+                printf("  mov %%eax, %%r8d\n");
+                printf("  xchgl %%eax, (%%rdi)\n");
+                printf("  movd %%r8d, %%xmm0\n");
+            } else {
+                printf("  movq %%xmm0, %%rax\n");
+                printf("  mov %%rax, %%r8\n");
+                printf("  xchgq %%rax, (%%rdi)\n");
+                printf("  movq %%r8, %%xmm0\n");
+            }
+            return;
+        }
+
         normalize(value_ty);
         printf("  mov %%rax, %%r8\n");
         if (value_ty->size == 1)
@@ -484,8 +503,33 @@ static void emit_atomic_store_rax_to_r11(Type *ty) {
 }
 
 static void emit_atomic_compute_new(NodeKind kind, Type *ty) {
-    // R8 = old value, R11 = already-evaluated RHS. Produce converted new value
-    // in R9 without re-evaluating source expressions when cmpxchg retries.
+    // R8 = old representation, R11 = already-evaluated RHS representation.
+    // Produce the new representation in R9 without re-evaluating source
+    // expressions when cmpxchg retries. Floating arithmetic happens in SSE,
+    // but equality/replacement remains an integer bitwise compare-exchange.
+    if (is_flonum(ty)) {
+        if (ty->kind == TY_FLOAT) {
+            printf("  movd %%r8d, %%xmm0\n");
+            printf("  movd %%r11d, %%xmm1\n");
+            if (kind == ND_ADD_EQ) printf("  addss %%xmm1, %%xmm0\n");
+            else if (kind == ND_SUB_EQ) printf("  subss %%xmm1, %%xmm0\n");
+            else if (kind == ND_MUL_EQ) printf("  mulss %%xmm1, %%xmm0\n");
+            else if (kind == ND_DIV_EQ) printf("  divss %%xmm1, %%xmm0\n");
+            else error("invalid floating atomic compound assignment");
+            printf("  movd %%xmm0, %%r9d\n");
+        } else {
+            printf("  movq %%r8, %%xmm0\n");
+            printf("  movq %%r11, %%xmm1\n");
+            if (kind == ND_ADD_EQ) printf("  addsd %%xmm1, %%xmm0\n");
+            else if (kind == ND_SUB_EQ) printf("  subsd %%xmm1, %%xmm0\n");
+            else if (kind == ND_MUL_EQ) printf("  mulsd %%xmm1, %%xmm0\n");
+            else if (kind == ND_DIV_EQ) printf("  divsd %%xmm1, %%xmm0\n");
+            else error("invalid floating atomic compound assignment");
+            printf("  movq %%xmm0, %%r9\n");
+        }
+        return;
+    }
+
     printf("  mov %%r8, %%r9\n");
     switch (kind) {
     case ND_ADD_EQ: printf("  add %%r11, %%r9\n"); break;
@@ -537,7 +581,14 @@ static void gen_atomic_compound_assign(Node *node) {
     if (node->kind != ND_SHL_EQ && node->kind != ND_SHR_EQ &&
         ty->kind != TY_PTR)
         cast_value(node->rhs->ty, ty);
-    printf("  mov %%rax, %%r11\n");
+    if (is_flonum(ty)) {
+        if (ty->kind == TY_FLOAT)
+            printf("  movd %%xmm0, %%r11d\n");
+        else
+            printf("  movq %%xmm0, %%r11\n");
+    } else {
+        printf("  mov %%rax, %%r11\n");
+    }
     pop("%r10");
 
     int c = count();
@@ -548,6 +599,8 @@ static void gen_atomic_compound_assign(Node *node) {
     printf("  mov %%r8, %%rax\n");
     emit_atomic_cmpxchg_r9(atomic_ty);
     printf("  jne .L.atomic_rmw.%d\n", c);
+    if (is_flonum(ty))
+        return; // XMM0 already contains the successfully stored new value.
     printf("  mov %%r9, %%rax\n");
     normalize(ty);
 }
@@ -558,6 +611,29 @@ static void gen_atomic_inc_dec(Node *node, bool increment, bool return_old) {
     int step = ty->kind == TY_PTR ? ty->base->size : 1;
     gen_addr(node->lhs);
     printf("  mov %%rax, %%r10\n");
+
+    if (is_flonum(ty)) {
+        if (ty->kind == TY_FLOAT)
+            printf("  mov $1065353216, %%r11d\n"); // 1.0f bits
+        else
+            printf("  movabs $4607182418800017408, %%r11\n"); // 1.0 bits
+        int c = count();
+        printf(".L.atomic_inc.%d:\n", c);
+        emit_atomic_load_r10(atomic_ty);
+        printf("  mov %%rax, %%r8\n");
+        emit_atomic_compute_new(increment ? ND_ADD_EQ : ND_SUB_EQ, ty);
+        printf("  mov %%r8, %%rax\n");
+        emit_atomic_cmpxchg_r9(atomic_ty);
+        printf("  jne .L.atomic_inc.%d\n", c);
+        if (return_old) {
+            if (ty->kind == TY_FLOAT)
+                printf("  movd %%r8d, %%xmm0\n");
+            else
+                printf("  movq %%r8, %%xmm0\n");
+        }
+        return;
+    }
+
     printf("  mov $%d, %%r11\n", step);
     int c = count();
     printf(".L.atomic_inc.%d:\n", c);
@@ -1328,6 +1404,19 @@ static void gen_expr(Node *node) {
         Type *atomic_ty = node->lhs->ty->base;
         Type *ty = atomic_value_type(atomic_ty);
         cast_value(node->rhs->ty, ty);
+        if (is_flonum(ty)) {
+            pop("%r10");
+            if (ty->kind == TY_FLOAT) {
+                printf("  movd %%xmm0, %%eax\n");
+                printf("  xchgl %%eax, (%%r10)\n");
+                printf("  movd %%eax, %%xmm0\n");
+            } else {
+                printf("  movq %%xmm0, %%rax\n");
+                printf("  xchgq %%rax, (%%r10)\n");
+                printf("  movq %%rax, %%xmm0\n");
+            }
+            return;
+        }
         normalize(ty);
         pop("%r10");
         if (ty->size == 1) printf("  xchgb %%al, (%%r10)\n");
@@ -1405,16 +1494,26 @@ static void gen_expr(Node *node) {
         Type *atomic_ty = node->lhs->ty->base;
         Type *ty = atomic_value_type(atomic_ty);
         cast_value(node->then->ty, ty);
-        normalize(ty);
-        printf("  mov %%rax, %%r9\n");
+        if (is_flonum(ty)) {
+            if (ty->kind == TY_FLOAT)
+                printf("  movd %%xmm0, %%r9d\n");
+            else
+                printf("  movq %%xmm0, %%r9\n");
+        } else {
+            normalize(ty);
+            printf("  mov %%rax, %%r9\n");
+        }
         pop("%r11");
         pop("%r10");
-        // Load *expected into the cmpxchg accumulator.
+        // cmpxchg compares object representations. For floating atomics, load
+        // *expected as raw bits so NaNs and signed zero are not collapsed by an
+        // SSE floating comparison.
         if (ty->size == 1) printf("  movzbq (%%r11), %%rax\n");
         else if (ty->size == 2) printf("  movzwq (%%r11), %%rax\n");
         else if (ty->size == 4) printf("  mov (%%r11), %%eax\n");
         else printf("  mov (%%r11), %%rax\n");
-        normalize(ty);
+        if (!is_flonum(ty))
+            normalize(ty);
         emit_atomic_cmpxchg_r9(atomic_ty);
         int c = count();
         printf("  je .L.atomic_cas_ok.%d\n", c);
