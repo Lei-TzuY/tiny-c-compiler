@@ -1475,7 +1475,78 @@ static int64_t checked_signed_mul(int64_t lhs, int64_t rhs, Type *ty) {
     return lhs * rhs;
 }
 
-int64_t eval_const_expr(Node *node) {
+// Validate the complete syntax tree of an integer constant expression before
+// evaluating its value. C11 6.6 constrains operands even in subexpressions
+// skipped by &&, ||, or ?:; short-circuiting suppresses evaluation-time faults,
+// not the constant-expression operand restrictions.
+static void validate_ice_operands(Node *node) {
+    if (!node)
+        error("expected integer constant expression");
+
+    add_type(node);
+    switch (node->kind) {
+    case ND_NUM:
+        if (!node->ty || !is_integer(node->ty))
+            error("floating value is not an integer constant expression");
+        return;
+
+    case ND_POS:
+    case ND_NEG:
+    case ND_BITNOT:
+    case ND_NOT:
+        validate_ice_operands(node->lhs);
+        return;
+
+    case ND_CAST:
+        if (!node->ty || !is_integer(node->ty))
+            error("cast does not produce an integer constant expression");
+        // C11 6.6p6 permits a floating constant only when it is the
+        // immediate operand of a cast to integer type.
+        if (node->lhs && node->lhs->kind == ND_NUM && node->lhs->ty &&
+            is_flonum(node->lhs->ty))
+            return;
+        validate_ice_operands(node->lhs);
+        return;
+
+    case ND_ADD:
+    case ND_SUB:
+    case ND_MUL:
+    case ND_DIV:
+    case ND_MOD:
+    case ND_BITAND:
+    case ND_BITOR:
+    case ND_BITXOR:
+    case ND_SHL:
+    case ND_SHR:
+    case ND_EQ:
+    case ND_NE:
+    case ND_LT:
+    case ND_LE:
+    case ND_LOGAND:
+    case ND_LOGOR:
+        validate_ice_operands(node->lhs);
+        validate_ice_operands(node->rhs);
+        return;
+
+    case ND_TERNARY:
+        validate_ice_operands(node->cond);
+        validate_ice_operands(node->then);
+        validate_ice_operands(node->els);
+        return;
+
+    case ND_COMMA:
+        // A comma operator may appear in an unevaluated subexpression;
+        // its operands must still be valid constant-expression operands.
+        validate_ice_operands(node->lhs);
+        validate_ice_operands(node->rhs);
+        return;
+
+    default:
+        error("not an integer constant expression");
+    }
+}
+
+static int64_t eval_const_expr_impl(Node *node) {
     if (!node)
         error("expected integer constant expression");
 
@@ -1490,7 +1561,7 @@ int64_t eval_const_expr(Node *node) {
     case ND_NEG: {
         if (!is_integer(node->ty))
             error("floating value is not an integer constant expression");
-        int64_t val = cast_const_integer(eval_const_expr(node->lhs), node->ty);
+        int64_t val = cast_const_integer(eval_const_expr_impl(node->lhs), node->ty);
         if (node->ty->is_unsigned) {
             uint64_t bits = 0 - (uint64_t)val;
             return cast_const_integer((int64_t)bits, node->ty);
@@ -1506,8 +1577,8 @@ int64_t eval_const_expr(Node *node) {
         if (!is_integer(node->ty))
             error("non-integer arithmetic in integer constant expression");
         Type *ty = const_binary_type(node);
-        int64_t lhs = cast_const_integer(eval_const_expr(node->lhs), ty);
-        int64_t rhs = cast_const_integer(eval_const_expr(node->rhs), ty);
+        int64_t lhs = cast_const_integer(eval_const_expr_impl(node->lhs), ty);
+        int64_t rhs = cast_const_integer(eval_const_expr_impl(node->rhs), ty);
 
         if (ty->is_unsigned) {
             uint64_t bits;
@@ -1533,8 +1604,8 @@ int64_t eval_const_expr(Node *node) {
     case ND_DIV:
     case ND_MOD: {
         Type *ty = const_binary_type(node);
-        int64_t lhs = cast_const_integer(eval_const_expr(node->lhs), ty);
-        int64_t rhs = cast_const_integer(eval_const_expr(node->rhs), ty);
+        int64_t lhs = cast_const_integer(eval_const_expr_impl(node->lhs), ty);
+        int64_t rhs = cast_const_integer(eval_const_expr_impl(node->rhs), ty);
         if (!rhs)
             error(node->kind == ND_DIV
                       ? "division by zero in integer constant expression"
@@ -1559,8 +1630,8 @@ int64_t eval_const_expr(Node *node) {
     case ND_BITOR:
     case ND_BITXOR: {
         Type *ty = const_binary_type(node);
-        uint64_t lhs = (uint64_t)cast_const_integer(eval_const_expr(node->lhs), ty);
-        uint64_t rhs = (uint64_t)cast_const_integer(eval_const_expr(node->rhs), ty);
+        uint64_t lhs = (uint64_t)cast_const_integer(eval_const_expr_impl(node->lhs), ty);
+        uint64_t rhs = (uint64_t)cast_const_integer(eval_const_expr_impl(node->rhs), ty);
         uint64_t bits = node->kind == ND_BITAND ? lhs & rhs
                         : node->kind == ND_BITOR ? lhs | rhs
                                                  : lhs ^ rhs;
@@ -1570,7 +1641,7 @@ int64_t eval_const_expr(Node *node) {
     case ND_BITNOT: {
         if (!is_integer(node->ty))
             error("integer operand required in integer constant expression");
-        int64_t val = cast_const_integer(eval_const_expr(node->lhs), node->ty);
+        int64_t val = cast_const_integer(eval_const_expr_impl(node->lhs), node->ty);
         return cast_const_integer((int64_t)~(uint64_t)val, node->ty);
     }
 
@@ -1582,8 +1653,8 @@ int64_t eval_const_expr(Node *node) {
             error("integer operands required in integer constant expression");
 
         Type *left_ty = node->ty;
-        int64_t lhs = cast_const_integer(eval_const_expr(node->lhs), left_ty);
-        int64_t rhs = eval_const_expr(node->rhs);
+        int64_t lhs = cast_const_integer(eval_const_expr_impl(node->lhs), left_ty);
+        int64_t rhs = eval_const_expr_impl(node->rhs);
         if (!node->rhs->ty->is_unsigned && rhs < 0)
             error("invalid shift count in integer constant expression");
         uint64_t count = (uint64_t)rhs;
@@ -1611,8 +1682,8 @@ int64_t eval_const_expr(Node *node) {
     case ND_LT:
     case ND_LE: {
         Type *ty = const_binary_type(node);
-        int64_t lhs = cast_const_integer(eval_const_expr(node->lhs), ty);
-        int64_t rhs = cast_const_integer(eval_const_expr(node->rhs), ty);
+        int64_t lhs = cast_const_integer(eval_const_expr_impl(node->lhs), ty);
+        int64_t rhs = cast_const_integer(eval_const_expr_impl(node->rhs), ty);
         if (node->kind == ND_EQ)
             return (uint64_t)lhs == (uint64_t)rhs;
         if (node->kind == ND_NE)
@@ -1624,28 +1695,28 @@ int64_t eval_const_expr(Node *node) {
     }
 
     case ND_NOT:
-        return !eval_const_expr(node->lhs);
+        return !eval_const_expr_impl(node->lhs);
 
     case ND_LOGAND: {
-        int64_t lhs = eval_const_expr(node->lhs);
-        return lhs ? !!eval_const_expr(node->rhs) : 0;
+        int64_t lhs = eval_const_expr_impl(node->lhs);
+        return lhs ? !!eval_const_expr_impl(node->rhs) : 0;
     }
 
     case ND_LOGOR: {
-        int64_t lhs = eval_const_expr(node->lhs);
-        return lhs ? 1 : !!eval_const_expr(node->rhs);
+        int64_t lhs = eval_const_expr_impl(node->lhs);
+        return lhs ? 1 : !!eval_const_expr_impl(node->rhs);
     }
 
     case ND_TERNARY: {
-        Node *selected = eval_const_expr(node->cond) ? node->then : node->els;
-        int64_t val = eval_const_expr(selected);
+        Node *selected = eval_const_expr_impl(node->cond) ? node->then : node->els;
+        int64_t val = eval_const_expr_impl(selected);
         if (!is_integer(node->ty))
             error("non-integer conditional in integer constant expression");
         return cast_const_integer(val, node->ty);
     }
 
     case ND_CAST:
-        return cast_const_integer(eval_const_expr(node->lhs), node->ty);
+        return cast_const_integer(eval_const_expr_impl(node->lhs), node->ty);
 
     default:
         error("not an integer constant expression");
@@ -1655,6 +1726,11 @@ int64_t eval_const_expr(Node *node) {
 // C11 enumerator identifiers have type int, and every enumerator value
 // must be representable as int. Evaluate using the expression's actual signedness
 // first so large unsigned constants cannot masquerade as negative int64_t values.
+int64_t eval_const_expr(Node *node) {
+    validate_ice_operands(node);
+    return eval_const_expr_impl(node);
+}
+
 static int64_t eval_enum_value(Node *node, Token *at) {
     add_type(node);
     if (!node->ty || !is_integer(node->ty))
