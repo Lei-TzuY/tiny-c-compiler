@@ -1,0 +1,37 @@
+name: Fix x87 noncommutative order
+
+on:
+  push:
+    paths:
+      - .github/workflows/fix-x87-noncommutative.yml
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/long-double-x87-current
+      - name: Fix x87 operand order
+        run: |
+          test "$(grep -c 'fsubp %%st, %%st(1)' codegen.c)" = 3
+          test "$(grep -c 'fdivp %%st, %%st(1)' codegen.c)" = 2
+          sed -i 's/fsubp %%st, %%st(1)/fsubrp %%st, %%st(1)/g' codegen.c
+          sed -i 's/fdivp %%st, %%st(1)/fdivrp %%st, %%st(1)/g' codegen.c
+      - name: Commit fix
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add codegen.c
+          git commit -m 'Fix x87 subtraction and division operand order'
+          git push origin HEAD:feat/long-double-x87-current
+      - name: Focused long double tests
+        run: |
+          make clean && make
+          bash test/long_double.sh
+          bash test/long_double_abi.sh
+          bash test/float_header.sh
+          bash test/math_header.sh
