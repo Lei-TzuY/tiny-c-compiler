@@ -57,6 +57,19 @@ assert_run 1 'int main(){long long a=-1;unsigned long b=1;return a>b;}'
 assert_run 1 'int main(){return (1?(long)-1:(unsigned long)1)==(unsigned long)-1;}'
 assert_run 1 'int main(){return (1?(long long)-1:(unsigned long)1)==(unsigned long long)-1;}'
 
+# Lock the exact result type selected by the usual arithmetic conversions.
+# LP64 makes long and long long the same width, so sizeof-based tests cannot
+# detect rank mistakes such as choosing unsigned long instead of unsigned
+# long long for unsigned long + long long.
+assert_run 1 'int main(){return _Generic((unsigned short)1+(unsigned char)2,int:1,default:0);}'
+assert_run 1 'int main(){return _Generic((unsigned int)1+(long)2,long:1,default:0);}'
+assert_run 1 'int main(){return _Generic((long)1+(unsigned long)2,unsigned long:1,default:0);}'
+assert_run 1 'int main(){return _Generic((unsigned long)1+(long long)2,unsigned long long:1,default:0);}'
+assert_run 1 'int main(){return _Generic((long long)1+(unsigned long)2,unsigned long long:1,default:0);}'
+assert_run 1 'int main(){return _Generic((unsigned int)1+(long long)2,long long:1,default:0);}'
+assert_run 1 'int main(){return _Generic((unsigned long)1|(long long)2,unsigned long long:1,default:0);}'
+assert_run 1 'int main(){return _Generic(1?(long long)1:(unsigned long)2,unsigned long long:1,default:0);}'
+
 # Conditional arithmetic alternatives use the same converted result type.
 assert_run 1 'int main(){return (1?(long)-1:(unsigned int)1)<0;}'
 
