@@ -583,7 +583,7 @@ void add_type(Node *node) {
         if (!is_numeric(node->lhs->ty))
             error("numeric operand required");
         node->ty = is_integer(node->lhs->ty)
-                     ? integer_promotion(node->lhs->ty)
+                     ? integer_promotion_for_node(node->lhs)
                      : node->lhs->ty;
         return;
 
