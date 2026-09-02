@@ -52,6 +52,17 @@ assert_run 1 'int main(){return _Generic(0xffffffff,unsigned int:1,default:0);}'
 assert_run 1 'int main(){return _Generic(0x100000000,long:1,default:0);}'
 assert_run 1 'int main(){return _Generic(0xffffffffffffffff,unsigned long:1,default:0);}'
 
+# Octal constants use the same non-decimal candidate list as hexadecimal
+# constants. Pin every LP64 transition so a tokenizer/base regression cannot
+# accidentally route octal constants through the decimal candidate list.
+assert_run 1 'int main(){return _Generic(017777777777,int:1,default:0);}'
+assert_run 1 'int main(){return _Generic(020000000000,unsigned int:1,default:0);}'
+assert_run 1 'int main(){return _Generic(037777777777,unsigned int:1,default:0);}'
+assert_run 1 'int main(){return _Generic(040000000000,long:1,default:0);}'
+assert_run 1 'int main(){return _Generic(0777777777777777777777,long:1,default:0);}'
+assert_run 1 'int main(){return _Generic(01000000000000000000000,unsigned long:1,default:0);}'
+assert_run 1 'int main(){return _Generic(01777777777777777777777,unsigned long:1,default:0);}'
+
 # U/L/UL/LU/LL/ULL/LLU suffixes are consumed case-insensitively and typed.
 assert_run 4 'int main(){return sizeof(2147483648U);}'
 assert_run 8 'int main(){return sizeof(4294967296U);}'
@@ -80,6 +91,16 @@ assert_run 1 'int main(){return _Generic(0x7fffffffffffffffLL,long long:1,defaul
 assert_run 1 'int main(){return _Generic(0x8000000000000000LL,unsigned long long:1,default:0);}'
 assert_run 1 'int main(){return _Generic(1ULL,unsigned long long:1,default:0);}'
 assert_run 1 'int main(){return _Generic(1LLU,unsigned long long:1,default:0);}'
+
+# Octal suffixes must preserve their own candidate lists as well. In
+# particular, L may still select unsigned long for a non-decimal constant,
+# while LL escalates to unsigned long long only after long long is exhausted.
+assert_run 1 'int main(){return _Generic(037777777777U,unsigned int:1,default:0);}'
+assert_run 1 'int main(){return _Generic(040000000000U,unsigned long:1,default:0);}'
+assert_run 1 'int main(){return _Generic(01000000000000000000000L,unsigned long:1,default:0);}'
+assert_run 1 'int main(){return _Generic(0777777777777777777777LL,long long:1,default:0);}'
+assert_run 1 'int main(){return _Generic(01000000000000000000000LL,unsigned long long:1,default:0);}'
+assert_run 1 'int main(){return _Generic(01777777777777777777777ULL,unsigned long long:1,default:0);}'
 
 # long and long long remain distinct C types despite both being 8 bytes on LP64.
 assert_fail 'long f(long); long long f(long long); int main(){return 0;}'
