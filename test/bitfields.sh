@@ -71,6 +71,15 @@ assert_run 0 'struct S{unsigned int a:4;unsigned int b:4;};int main(){struct S s
 # Constant-expression widths and full-width integer fields are accepted.
 assert_run 0 'enum{W=3};struct S{unsigned int a:(W+1);unsigned long b:64;};int main(){struct S s={0};s.a=15;s.b=0xffffffffffffffffUL;return s.a==15&&s.b==0xffffffffffffffffUL?0:1;}'
 
+# Bit-field integer promotions are width-sensitive.  Narrow fields whose full
+# value range fits in int promote to int, while a full-width unsigned-int field
+# remains unsigned int.  Lock the exact promoted expression type with _Generic;
+# value-only tests can miss a rank/signedness regression when values are small.
+assert_run 0 'struct S{unsigned int a:3;signed int b:3;};int main(){struct S s={0};return _Generic(+s.a,int:0,default:1)||_Generic(+s.b,int:0,default:2);}'
+assert_run 0 'struct S{unsigned int a:31;};int main(){struct S s={0};return _Generic(s.a+0,int:0,default:1);}'
+assert_run 0 'struct S{unsigned int a:32;};int main(){struct S s={0};return _Generic(s.a+0,unsigned int:0,default:1);}'
+assert_run 0 'struct S{unsigned long a:31;unsigned long b:32;unsigned long c:33;};int main(){struct S s={0};if(!_Generic(+s.a,int:1,default:0))return 1;if(!_Generic(+s.b,unsigned int:1,default:0))return 2;return _Generic(+s.c,unsigned long:0,default:3);}'
+
 # C constraints: only integer bit-field base types, nonnegative ICE widths no
 # larger than the declared type, zero width only unnamed, no _Alignas, and a
 # bit-field is not addressable nor a valid sizeof expression operand.
