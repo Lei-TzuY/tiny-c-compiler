@@ -63,6 +63,24 @@ assert_run 1 'int main(){unsigned long long x=18446744073709551615ULL;return x==
 assert_run 1 'int main(){return 0xffffffffffffffffLL>0;}'
 assert_run 1 'int main(){return (1ULL<<63)>0;}'
 
+# Suffixes change both the candidate list and the resulting rank/signedness.
+# sizeof cannot distinguish long from long long, nor unsigned long from unsigned
+# long long on LP64, so use _Generic to pin the exact selected C type.
+assert_run 1 'int main(){return _Generic(1U,unsigned int:1,default:0);}'
+assert_run 1 'int main(){return _Generic(4294967295U,unsigned int:1,default:0);}'
+assert_run 1 'int main(){return _Generic(4294967296U,unsigned long:1,default:0);}'
+assert_run 1 'int main(){return _Generic(18446744073709551615U,unsigned long:1,default:0);}'
+assert_run 1 'int main(){return _Generic(1L,long:1,default:0);}'
+assert_run 1 'int main(){return _Generic(0x7fffffffffffffffL,long:1,default:0);}'
+assert_run 1 'int main(){return _Generic(0x8000000000000000L,unsigned long:1,default:0);}'
+assert_run 1 'int main(){return _Generic(1UL,unsigned long:1,default:0);}'
+assert_run 1 'int main(){return _Generic(1LU,unsigned long:1,default:0);}'
+assert_run 1 'int main(){return _Generic(1LL,long long:1,default:0);}'
+assert_run 1 'int main(){return _Generic(0x7fffffffffffffffLL,long long:1,default:0);}'
+assert_run 1 'int main(){return _Generic(0x8000000000000000LL,unsigned long long:1,default:0);}'
+assert_run 1 'int main(){return _Generic(1ULL,unsigned long long:1,default:0);}'
+assert_run 1 'int main(){return _Generic(1LLU,unsigned long long:1,default:0);}'
+
 # long and long long remain distinct C types despite both being 8 bytes on LP64.
 assert_fail 'long f(long); long long f(long long); int main(){return 0;}'
 assert_run 1 'int main(){unsigned long x=(unsigned long)-1;long long y=0;return (x+y)>0;}'
