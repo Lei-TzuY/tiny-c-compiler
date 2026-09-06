@@ -1,0 +1,109 @@
+name: Tiny-C import provenance audit
+
+on:
+  push:
+    branches:
+      - automation/compiler-import-audit
+    paths:
+      - '.github/workflows/compiler-import-audit.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    env:
+      SOURCE_SHA: 5607c3152d319353c42f05ed44ff53479272a74f
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 5607c3152d319353c42f05ed44ff53479272a74f
+          fetch-depth: 0
+      - name: Recheck exact frozen source and zero open PRs
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          live_sha="$(curl -fsSL -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' https://api.github.com/repos/Lei-TzuY/tiny-c-compiler/branches/main | python3 -c 'import json,sys; print(json.load(sys.stdin)["commit"]["sha"])')"
+          test "$live_sha" = "$SOURCE_SHA"
+          open_prs="$(curl -fsSL -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' 'https://api.github.com/repos/Lei-TzuY/tiny-c-compiler/pulls?state=open&per_page=100' | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')"
+          test "$open_prs" = 0
+      - name: Audit reachable attribution provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import re
+          import subprocess
+
+          source = '5607c3152d319353c42f05ed44ff53479272a74f'
+          raw = subprocess.check_output(
+              ['git', 'log', source, '--format=%H%x00%B%x00'],
+          ).decode('utf-8', errors='replace')
+          parts = raw.split('\x00')
+          records = []
+          for i in range(0, len(parts) - 1, 2):
+              sha = parts[i].strip()
+              body = parts[i + 1]
+              if sha:
+                  records.append((sha, body))
+
+          marker_re = re.compile(
+              r'(?im)^\s*(co-authored-by|generated-by|assisted-by|signed-off-by)\s*:\s*(.+?)\s*$'
+          )
+          ai_re = re.compile(r'(?i)\b(anthropic|claude|openai)\b')
+          allowed_bot_re = re.compile(
+              r'^github-actions\[bot\]\s*<41898282\+github-actions\[bot\]@users\.noreply\.github\.com>$',
+              re.I,
+          )
+
+          counts = {k: 0 for k in ('co-authored-by', 'generated-by', 'assisted-by', 'signed-off-by')}
+          allowed_bot = []
+          forbidden = []
+          ai_hits = []
+
+          for sha, body in records:
+              for match in marker_re.finditer(body):
+                  kind = match.group(1).lower()
+                  value = match.group(2).strip()
+                  counts[kind] += 1
+                  print(f'ATTRIBUTION {sha} {kind}: {value}')
+                  if kind == 'co-authored-by' and allowed_bot_re.fullmatch(value):
+                      allowed_bot.append((sha, value))
+                  else:
+                      forbidden.append((sha, kind, value))
+              if ai_re.search(body):
+                  ai_hits.append(sha)
+                  print(f'AI_MARKER {sha}')
+
+          print(f'COMMITS_SCANNED={len(records)}')
+          for kind, count in counts.items():
+              print(f'{kind.upper()}_COUNT={count}')
+          print(f'ALLOWED_GITHUB_ACTIONS_BOT_COUNT={len(allowed_bot)}')
+          print(f'FORBIDDEN_ATTRIBUTION_COUNT={len(forbidden)}')
+          print(f'AI_MARKER_COMMIT_COUNT={len(set(ai_hits))}')
+
+          if allowed_bot:
+              print('ALLOWED_GITHUB_ACTIONS_BOT_SHAS=' + ','.join(sha for sha, _ in allowed_bot))
+          if forbidden:
+              raise SystemExit('forbidden or non-canonical attribution trailers found')
+          if ai_hits:
+              raise SystemExit('AI attribution markers found in canonical reachable history')
+          PY
+      - name: Audit repository hygiene
+        shell: bash
+        run: |
+          set -euo pipefail
+          test ! -e .gitmodules
+          test -f LICENSE
+          suspicious="$(git ls-files | grep -E '(^|/)(__pycache__|\.pytest_cache|target|build|dist)(/|$)|\.(o|a|so|dll|dylib|exe|pyc)$|(^|/)minicc$' || true)"
+          if [ -n "$suspicious" ]; then
+            echo 'Tracked generated/cache-like payloads found:'
+            printf '%s\n' "$suspicious"
+            exit 1
+          fi
+          git diff --check "$SOURCE_SHA^" "$SOURCE_SHA"
+          echo 'HYGIENE_OK=1'
