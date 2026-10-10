@@ -9,6 +9,7 @@ $(OBJS): minicc.h
 
 test: minicc
 	./test/test.sh
+	bash ./test/token_equality.sh
 	bash ./test/driver_stdin.sh
 	bash ./test/driver_cli.sh
 	bash ./test/driver_multifile.sh
