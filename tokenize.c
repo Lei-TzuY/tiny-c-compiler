@@ -49,7 +49,9 @@ _Noreturn void error_at(char *loc, char *fmt, ...) {
 
 // Consumes the current token if it matches `op`.
 bool equal(Token *tok, char *op) {
-    if (memcmp(tok->loc, op, tok->len) == 0 && op[tok->len] == '\0')
+    // A token may be longer than the keyword/punctuator string. Bound the
+    // comparison before memcmp, which reads the entire requested extent.
+    if (strlen(op) == (size_t)tok->len && memcmp(tok->loc, op, tok->len) == 0)
         return true;
 
     // C11 alternative punctuator spellings.  The parser uses the primary

@@ -40,4 +40,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Build and run full suite under sanitizers
-        run: make test
+        run: |
+          make minicc
+          audit_symbols=$(mktemp)
+          trap 'rm -f "$audit_symbols"' EXIT
+          nm -u parse.o > "$audit_symbols"
+          grep -q '__asan_report_' "$audit_symbols"
+          grep -q '__ubsan_handle_' "$audit_symbols"
+          echo 'ASan/UBSan compiler instrumentation verified'
+          make test
