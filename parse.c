@@ -398,6 +398,7 @@ struct SwitchContext {
     Type *ty;
     CaseValue *cases;
     bool has_default;
+    VmGuard *vm_guard;
     SwitchContext *prev;
 };
 
@@ -4720,6 +4721,14 @@ static void require_control_substatement(Token *tok, const char *construct) {
         error_at(tok->loc, "%s body must be a statement, not a declaration", construct);
 }
 
+static void require_switch_label_scope(Token *label) {
+    // Like goto, switch dispatch must not skip a VM declaration. The label's
+    // frontier must already be active at its owning switch (C11 6.8.4.2p2).
+    if (!vm_guard_target_is_active(current_switch->vm_guard, current_vm_guard))
+        error_at(label->loc,
+                 "switch label enters scope of a variably modified identifier");
+}
+
 static Node *stmt(Token **rest, Token *tok) {
     if (equal(tok, "_Static_assert")) {
         *rest = parse_static_assertion(tok);
@@ -4816,6 +4825,7 @@ static Node *stmt(Token **rest, Token *tok) {
 
         SwitchContext ctx = {};
         ctx.ty = node->ty;
+        ctx.vm_guard = current_vm_guard;
         ctx.prev = current_switch;
         Scope *saved_break_scope = current_break_scope;
         current_break_scope = current_scope;
@@ -4830,6 +4840,7 @@ static Node *stmt(Token **rest, Token *tok) {
         Token *case_tok = tok;
         if (!current_switch)
             error_at(case_tok->loc, "case label is not within a switch statement");
+        require_switch_label_scope(case_tok);
 
         Node *value = ternary(&tok, tok->next);
         add_type(value);
@@ -4861,6 +4872,7 @@ static Node *stmt(Token **rest, Token *tok) {
         Token *default_tok = tok;
         if (!current_switch)
             error_at(default_tok->loc, "default label is not within a switch statement");
+        require_switch_label_scope(default_tok);
         if (current_switch->has_default)
             error_at(default_tok->loc, "multiple default labels in one switch");
         current_switch->has_default = true;
